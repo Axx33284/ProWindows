@@ -1,0 +1,9 @@
+# This project was written on Windows with LF endings and builds fine that way.
+# Normalising them now would rewrite all 20k lines on the next checkout and make
+# the first real diff unreadable, so git is told to leave every file exactly as
+# it is on disk.
+* -text
+
+*.png binary
+*.ico binary
+*.exe binary

@@ -1,0 +1,894 @@
+# ProWindows
+
+A dynamic tiling window manager for Windows 11, in the spirit of Hyprland on
+Arch. Windows you open arrange themselves automatically — no dragging, no
+snapping, no overlap. Everything is driven from the keyboard.
+
+Native C++ / Win32. One 392 KB executable, no runtime to install, no services,
+no background polling. Everything is configurable from a tabbed settings window
+that opens when you launch it.
+
+```
+┌─────────────────┬───────────────┐
+│                 │               │
+│                 │   Terminal    │
+│                 │               │
+│     Browser     ├───────────────┤
+│                 │               │
+│                 │     Files     │
+│                 │               │
+└─────────────────┴───────────────┘
+```
+
+---
+
+## Why it's light
+
+| | |
+|---|---|
+| Executable | **530 KB**, statically linked — nothing else to install |
+| Memory, tray only | **4.9 MB** private, with the file index off |
+| CPU, tray only | **0 ms over 30 seconds**, three samples running — with animations *and* the keyboard hook active |
+| Memory with the monitor and a 5,300-entry file index | **10.5 MB** private |
+| CPU with the monitor | **31–47 ms over 30 seconds** on a quiet machine, **~94 ms** while it is busy — the glide only runs when a reading actually moves, so the panel costs most exactly when there is something to show |
+| Threads | **4–6** at rest |
+
+Measured on one machine, several samples each, not estimated. Your numbers will
+differ — the file index in particular is proportional to how many files you
+have, at roughly 300 bytes an entry.
+
+The tray-only row is the honest floor: with the monitor closed and file search
+off, the process does nothing at all between window events, and the CPU counter
+does not move. Everything above that floor is something you switched on. The
+monitor is the only part that costs anything *continuously*, and only while it
+is on screen; the temperatures run a probe on a thread of its own, and
+naming the busiest app snapshots every process once a second.
+
+The glide is nearly free because it refuses to do pointless work: it does not
+start at all unless a reading actually moved, and while it runs it skips any
+frame that would land within a fifth of a percent of the one already on screen.
+Without those two checks the same effect cost **1.0% of a core** — thirteen
+times the idle figure — because an idle machine would still repaint the whole
+panel thirty times a second to move nothing.
+
+It never polls. The window layout is recalculated only when Windows tells it
+something changed, through `SetWinEventHook` — the same out-of-process
+notification mechanism screen readers use. No DLL injection, no hooks inside
+other applications, no driver, no elevation.
+
+**And it starts arranging the moment the window appears.** Every window event
+used to wait out a 35 ms debounce before anything moved. That debounce exists
+to coalesce a burst - one application opening four windows at once - and not to
+slow down the ordinary case, which is one window on a desktop that has been
+still for seconds. A request that arrives out of the quiet is now posted rather
+than timed, so it runs on the very next trip through the message loop; a second
+one within 200 ms goes back to being debounced, exactly as before.
+
+The pass itself got cheaper too. Placing a window wanted three separate answers
+from DWM - where the window is now, where it was when the animation started,
+and how thick its invisible frame is - which are all the same question, asked
+across a process boundary. They are asked once now: **four cross-process calls
+per window per event down to one**, which on a board of ten windows is forty
+round trips replaced by ten.
+
+---
+
+## Build
+
+Requires the **MSVC toolchain** ("Desktop development with C++" from Visual
+Studio or the standalone Build Tools) and Python (only to regenerate the icon;
+a pre-built `res/app.ico` is already committed).
+
+```bash
+build.bat
+```
+
+The result is `build\ProWindows.exe`. That single file is the whole
+application — copy it anywhere you like.
+
+---
+
+## Running it
+
+Launch the exe. The settings window opens and tiling starts immediately.
+
+```
+┌─ ProWindows ─────────────────────────────────┐
+│  ▣  ProWindows                [ Pause tiling ]│
+│     Tiling active - 7 windows arranged                  │
+│ ╭────────┬───────────┬───────────┬─────────╮            │
+│ │ Layout │ Behaviour │ Window keys │ Open apps │ Monitor │ General │ │
+│ ┢━━━━━━━━┷━━━━━━━━━━━┷━━━━━━━━━━━┷━━━━━━━━━┷━━━━━━━━━━┓ │
+│ ┃ How should windows be arranged?                     ┃ │
+│ ┃ [Dwindle ▾]                                         ┃ │
+│ ┃ ┌───────────────┐  Every new window splits the one  ┃ │
+│ ┃ │███████│▒▒▒▒▒▒▒│  you are focused on, always       ┃ │
+│ ┃ │███████├───┬───┤  cutting along its longer side.   ┃ │
+│ ┃ │███████│▒▒▒│▒▒▒│  The result spirals outwards...   ┃ │
+│ ┃ └───────────────┘                                   ┃ │
+│ ┃ ┌ Main area size ─────────────────────────────────┐ ┃ │
+│ ┃ │ ───────●────────────  55%                       │ ┃ │
+│ ┃ └─────────────────────────────────────────────────┘ ┃ │
+│ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ │
+│ [Advanced...] [Re-arrange now]   [ Apply ] [Hide to tray]│
+└─────────────────────────────────────────────────────────┘
+```
+
+Each layout comes with a painted preview and a plain-English explanation of
+what it does and when it suits you, so you can tell Dwindle from Master without
+having to try them all.
+
+Nothing takes effect until you press **Apply**, which also writes your choices
+to the config file. **Hide to tray** (or the X button) closes the window while
+the tiler keeps running; click the tray icon to bring it back.
+
+The status line under the title tells you whether tiling is active, how many
+windows are currently being arranged, and — importantly — how many keyboard
+shortcuts another program has already claimed.
+
+Everything about setting the application *up*, as opposed to setting up how
+windows behave, is on the **General** tab: how it starts with Windows, where it
+keeps its settings and how to open them, the diagnostics report, the safety net
+that brings back every hidden window, and one button that puts every setting
+back to how it shipped.
+
+To start it with Windows, tick **Start automatically when Windows starts** on
+that tab, and usually **Start hidden in the notification area** with it. That
+writes a single
+`HKCU\...\CurrentVersion\Run` entry — no scheduled task, no service, no admin
+rights. The entry records where the executable is, so if you move the folder,
+copy it to another machine or unpack a new release somewhere else, ProWindows
+notices and corrects the path the next time it starts.
+
+There is a third box, **Start as administrator**, which is a different mechanism
+and only worth using if you actually run applications as administrator — see
+[Notes and limitations](#notes-and-limitations).
+
+## Does it need a setup or installer?
+
+No. `ProWindows.exe` is the whole program: statically linked, no runtime, no
+service, no registry setup, nothing to install. Copy it anywhere and run it.
+
+The first launch creates `%APPDATA%\ProWindows\config.ini` from built-in
+defaults, so there is nothing you have to write by hand either. Everything else
+it keeps — the file index cache, the log if you turn it on — lives in that same
+folder. Deleting the folder resets it completely; deleting the executable
+removes it, apart from the `Run` entry if you ticked the autostart box.
+
+If it behaves differently on one machine than another, the tray menu has
+**Diagnostics report...**, which writes `%APPDATA%\ProWindows\diagnostics.txt`
+and opens it: Windows build, DPI, every monitor, whether it is running elevated,
+how many windows it is not allowed to move, and which of your keyboard shortcuts
+another program has already claimed. That last one is the usual answer — the
+shortcuts that work on one PC are silently taken on the other.
+
+---
+
+## Keyboard shortcuts
+
+The modifier is **Alt** by default (`mod = alt` in the config). Alt is the
+default rather than Win because Windows reserves a lot of `Win`+letter chords
+for the shell — `Win+L` in particular can never be reassigned.
+
+### Move around
+| Keys | Action |
+|---|---|
+| `Alt` + `H` `J` `K` `L` — or arrow keys | Focus the window left / down / up / right |
+| `Alt` + `O` / `Alt` + `I` | Focus next / previous window |
+| `Alt` + `,` / `Alt` + `.` | Focus previous / next monitor |
+
+### Rearrange
+| Keys | Action |
+|---|---|
+| `Alt` + `Shift` + `H` `J` `K` `L` — or arrows | Move the window in that direction |
+| `Alt` + `Ctrl` + `H` `J` `K` `L` — or arrows | Resize the split |
+| `Alt` + `Enter` | Promote the window to the master slot |
+| `Alt` + `Shift` + `,` / `.` | Send the window to the previous / next monitor |
+| `Alt` + `E` | Flip this split: side by side, or stacked |
+| `Alt` + `Shift` + `E` | Swap the two halves of this split |
+
+You can also **drag a tiled window onto another one to swap them** - or **hold
+`Alt` and drag anywhere on it**, which is the same gesture without having to
+aim at a title bar. `Alt` + right-drag resizes it from the nearest corner.
+
+### Windows
+| Keys | Action |
+|---|---|
+| `Alt` + `V` | Float / unfloat |
+| `Alt` + `F` | Fullscreen |
+| `Alt` + `Q` | Close |
+| `Alt` + `N` | Minimise |
+
+### Layout and workspaces
+| Keys | Action |
+|---|---|
+| `Win` + `S`, or `Alt` + `R` | Open the search bar |
+| `Alt` + `Space` | Cycle layout |
+| `Alt` + `G` | Toggle gaps |
+| `Alt` + `1` … `9` | Switch workspace |
+| `Alt` + `Shift` + `1` … `9` | Send the window to that workspace |
+| `Alt` + `Ctrl` + `.` / `,` | Next / previous workspace that has windows on it |
+| `Alt` + `` ` `` | Back to the last window, and again to come back |
+
+### Control
+| Keys | Action |
+|---|---|
+| `Alt` + `P` | Pause / resume tiling |
+| `Alt` + `F5` | Reload settings from disk |
+| `Alt` + `Shift` + `F5` | Rescan windows and re-arrange |
+
+### Opening apps
+| Keys | Opens |
+|---|---|
+| `Win` + `B` | Your default browser — detected, so Brave stays Brave |
+| `Win` + `E` / `Win` + `F` | File Explorer |
+| `Win` + `Q` | Windows Terminal (PowerShell if Terminal isn't installed) |
+
+---
+
+## Changing the shortcuts
+
+These live on two separate tabs, because they are two different things.
+
+**Window keys** is for controlling windows — focus, move, resize, workspaces,
+layouts. Each row says what it does in plain English, which keys it uses, and
+whether it is actually working. Select one and press **Change key…** (or
+double-click it), then press the combination you want; it warns you if another
+binding already has it. **Reset all keys** restores the defaults without
+touching your app shortcuts.
+
+Changing **Modifier key** moves every `$mod` shortcut at once, keeping any
+custom keys you set.
+
+**Open apps** is for launchers — press a key, an app opens. **Add an app…**
+gives you a searchable list of everything installed on the PC (read from the
+Start menu), or **Add a file or program…** browses for anything else. Add as
+many as you like.
+
+### Shortcuts Windows reserves
+
+The Windows shell has already claimed nearly every `Win`+letter chord, and it
+will not hand them over — on this machine `RegisterHotKey` was refused for all
+but `Win+J` and `Win+Y`. So a binding on `Win+E`, `Win+F` or `Win+Q` is served
+instead by a low-level keyboard hook that intercepts the chord before the shell
+sees it, exactly as AutoHotkey and PowerToys do.
+
+That hook is only installed when a binding actually needs one, and it only ever
+intercepts those specific chords — everything else you type passes straight
+through untouched, and it costs nothing measurable when idle. Turn it off with
+**Take over shortcuts Windows reserves** on the Open apps tab; those bindings
+are then listed as blocked rather than silently doing nothing.
+
+Keystrokes the app synthesises are tagged so it ignores its own, which means
+macro keyboards, on-screen keyboards and remote sessions still trigger your
+bindings normally.
+
+---
+
+## Layouts
+
+Press `Alt+Space` to cycle. Each workspace on each monitor remembers its own.
+
+- **Dwindle** — Hyprland's default. A real binary space partition: every new
+  window splits the focused pane along its longer edge, producing the familiar
+  spiral. Splits are individually resizable with `Alt+Ctrl`+direction.
+- **Master** — one large pane plus a stack, the classic dwm/tall layout.
+  `Alt+Ctrl+Left/Right` grows and shrinks the master area.
+- **Grid** — even rows and columns.
+- **Monocle** — one window at full size at a time; focus switching brings the
+  next one forward.
+
+**Reshaping one split rather than the whole layout.** Dwindle splits the longer
+edge of whatever you were focused on, which is right nearly every time and
+wrong for the one pair in front of you. `Alt+E` flips that split between side
+by side and stacked; `Alt+Shift+E` exchanges its two halves, and it exchanges
+*subtrees* — one window on the left and three stacked on the right become three
+on the left and one on the right, which swapping two windows cannot express.
+
+## Workspaces
+
+Nine per monitor, independent of Windows' own virtual desktops. Switching a
+workspace hides the windows of the outgoing one and restores the incoming ones
+exactly where they were.
+
+Because inactive workspaces are hidden windows, there is a safety net: **tray
+icon → *Show all hidden windows*** brings everything back at once, and the app
+also un-hides everything when it exits, when Windows shuts down, and even if it
+crashes.
+
+---
+
+## Configuration
+
+Everything on the settings window is stored in
+`%APPDATA%\ProWindows\config.ini`. The file is written by the settings
+window, so the two never disagree — and it stays commented, so editing it by
+hand is still pleasant. **Advanced (config file)…** opens it in Notepad; press
+`Alt+R` afterwards to reload.
+
+A few things live only in the file, because they are rarely changed: border
+colours, corner style, animation duration, resize step, the master-window count,
+and the float/ignore rules that match on window class or title rather than
+program name.
+
+```ini
+mod       = alt          # alt | ctrl | shift | win (combine with +)
+gap_inner = 8
+gap_outer = 8
+layout    = dwindle      # dwindle | master | grid | monocle
+
+accent_border  = true    # coloured DWM border on the focused window
+active_color   = #7AA2F7
+
+animations   = true      # smooth movement instead of windows snapping
+animation_ms = 140       # how long a rearrangement takes
+```
+
+### About the animation
+
+Windows glide to their new positions on an ease-out curve rather than jumping.
+While a transition runs the app raises the system timer resolution to 1 ms and
+steps every 8 ms, so the motion is smooth rather than steppy; both are released
+the moment it finishes, which is why idle cost stays at zero. Frame padding for
+each window is measured once when the transition starts, so no frame pays for a
+DWM round-trip.
+
+Turn `animations` off (or untick the box) if you would rather have windows snap
+into place instantly.
+
+### Excluding applications
+
+Use the **Never arrange these apps** list on the settings window. Two ways to
+add something, no typing required:
+
+- **Add running app…** — a searchable list of everything currently open, shown
+  as program name plus window title so you can tell two Chromium apps apart.
+  Type to filter, double-click to add.
+- **Browse for .exe…** — a normal file dialog, for apps that aren't running
+  right now. Only the file name is stored, so it keeps matching wherever the
+  program is installed.
+
+Select an entry and press **Remove** (or double-click it) to take it off again.
+Nothing takes effect until you press **Apply**.
+
+Behind the scenes this is the `ignore_process` line. The file adds two more
+kinds of rule that the window doesn't expose:
+
+```ini
+ignore_process = obs64.exe, vmware.exe     # never touched at all
+float_process  = Taskmgr.exe               # managed, but never tiled
+float_title    = Picture-in-Picture        # substring match
+```
+
+Dialogs, fixed-size windows and owned pop-ups float automatically — they don't
+need rules. Shell surfaces (Start, Search, widgets, the taskbar) are excluded by
+a built-in list that is kept separate from yours, so it never clutters the
+settings box and never gets duplicated when the file is rewritten.
+
+### Rebinding
+
+```ini
+bind   = $mod+shift+return, promote
+unbind = $mod+q
+```
+
+`clear_binds = true` drops every default first so you can start from scratch.
+The full action list is in the generated config file.
+
+---
+
+## The search bar
+
+`Win` + `S`. Type three letters. Press Enter.
+
+`Alt` + `R` opens the same thing, for the Hyprland habit. `Win` + `S` is where
+Windows itself puts search, so it is already in your fingers — it is a shell
+chord, which means it arrives through the keyboard hook and needs **Claim
+shortcuts the Windows shell reserves** left on (it is on by default).
+
+The thing Hyprland gets right that Windows does not: you should never have to
+keep a shortcut on the desktop, or hunt through a Start menu that wants to show
+you web results. A search box appears in the middle of the screen, filters as
+you type, and the first result is almost always the one you wanted.
+
+```
+╭──────────────────────────────────────────────╮
+│ >  note                                      │
+├──────────────────────────────────────────────┤
+│ ▣    Notepad                            <--  │
+│ ▣    Notes Board                             │
+│ ▣    Node.js website                         │
+│ ▣    NVIDIA Control Panel                    │
+│ ▣    notes.txt                        file   │
+│      C:\Users\you\Documents                  │
+├──────────────────────────────────────────────┤
+│ ↑↓ select   Enter open   Ctrl+Shift+Enter…   │
+╰──────────────────────────────────────────────╯
+```
+
+**It knows about everything the Start menu does**, including Store and packaged
+apps — it reads the shell's own `AppsFolder`, not just shortcuts on disk. The
+list is built once on a background thread while the app starts, so the first
+time you hit the chord it is already there.
+
+**Real icons, and it still opens instantly.** Each row shows the icon the shell
+itself would show, packaged apps included. Fetching one can touch the disk — on
+a mechanical disk, tens of milliseconds each, and eight rows of that is most of
+a second — so it is never done on the way to the screen. Three things between
+them make it feel like it was always there:
+
+- The window is created at startup rather than on the first chord, so pressing
+  the shortcut has nothing left to do but show it.
+- A background thread fetches icons; the row draws a lettered tile until its
+  own arrives, and the panel repaints when it does.
+- What was fetched is written to `icons.cache` and read back in one sequential
+  pass next launch, and everything the cache does *not* hold is fetched anyway
+  — in the background, at lowered disk priority, fifteen seconds after login.
+  So the first run is the only one that ever draws a lettered tile.
+
+**Programs, not just installed applications.** A `.exe` sitting in a folder — a
+portable tool, a game unpacked somewhere, anything that never made a Start-menu
+shortcut — is now a result in its own right, tagged `program`. Program Files,
+Program Files (x86) and `%LOCALAPPDATA%\Programs` are walked for executables
+alongside your own indexed folders, and the result is cached with the rest of
+the index, so this costs part of one background walk and nothing thereafter.
+
+It is deliberately not "every exe on the disk". An application's own executable
+sits at the top of its folder; the things underneath it are its parts. So the
+walk skips the folders that hold parts rather than programs, skips the
+executables that exist to serve another executable (`unins*`, `*crashpad*`,
+`vcredist`, and a dozen more), skips two-letter binaries — a developer
+toolchain ships a whole POSIX userland, and `ex` and `ls` match almost any
+short query while being almost never what you meant — and ranks what is left by
+how deep it is buried. An application that already has a Start-menu entry shows
+up once, not twice.
+
+**Every drive, not just the one Windows is on.** A second disk is where games
+and anything large actually live, and none of it is under Program Files or in
+the Start menu — so `D:\SteamLibrary\steamapps\common\Game\Binaries\Win64\game.exe`
+used to be invisible. Every **fixed** drive is now walked for programs.
+Removable and network drives are not: `GetDriveType` answers that without
+touching the disk, so a USB stick is never spun up and a mapped share is never
+listed over the wire.
+
+It costs nothing, and that is the part worth explaining. Walking a whole disk
+six folders deep to reach a buried game executable took **143 seconds** here.
+The folders that only ever *hold* programs — `Program Files`, `Games`,
+`SteamLibrary`, `steamapps`, `common`, `Epic Games`, and a dozen more — are now
+free of the depth budget, so the walk reaches that same executable while
+spending four levels on the folders that are actually part of an application.
+Measured on the same machine: **20.9 seconds**, against 20.5 for the old
+Program-Files-only walk. Three drives, one cache, no extra cost.
+
+If your programs live somewhere the walk does not reach, add that folder on the
+**Search** tab and it is indexed with everything else. `tests\searchprobe.bat`
+runs the index on its own and prints what it found per drive, without starting
+the tiler.
+
+**And the helper executables inside apps, if you want them.** *Include an app's
+own helper .exe files* on the Search tab drops the rules that hide `unins000`,
+`crashpad_handler`, `vcredist` and a toolchain's POSIX userland. Off by default,
+because those are numerous and almost never what anybody meant — on when the
+one you need is a helper.
+
+**Nothing typed yet shows what you actually open**, most-used first, rather
+than an alphabetical dump of everything installed. Until you have opened
+something from here it says so, instead of offering you `About Java`.
+
+**The keys are written along the bottom** — select, open, open as
+administrator, close. Every one of them worked before; none of them was
+discoverable.
+
+**And four more things besides apps**, each of which can be switched off on the
+**Search** tab:
+
+| | |
+| --- | --- |
+| Files and folders | Your Desktop, Documents, Downloads, Pictures, Music and Videos, indexed once on a background thread at startup. The row shows the containing folder underneath the name, so three files called `notes.txt` are still telling apart. |
+| Windows settings pages | Type `blue` and jump straight to Bluetooth. About fifty pages — the ones people actually go looking for, not every leaf in Settings. |
+| Calculator | Type `1920*0.75` and the answer is the first result; Enter copies it. Handles `+ - * / % ^`, brackets, and `sqrt floor ceil round sin cos tan ln log`, plus `pi` and `e`. |
+| Run what you typed | Anything that looks like a path, a URL or a command line offers to run as typed — and if nothing else matched at all, that offer is the whole list. |
+
+The file index is the only part with a running cost: it is held in memory, at
+roughly 300 bytes an entry, so 20,000 files is about 6 MB. The **Search** tab
+shows the live figure and lets you change which folders are walked, how deep,
+and where the ceiling sits — or turn file search off, which frees it entirely.
+
+### On a mechanical disk
+
+A recursive walk of your home folder is thousands of random seeks, which is the
+one thing a spinning disk is worst at. Three things keep that off your back:
+
+- **It is written down.** The index is saved to `%APPDATA%\ProWindows\index.cache`
+  and reloaded on the next launch — one sequential read of a small file instead
+  of walking anything. Measured here: **5,273 entries restored in about 110 ms**,
+  versus a full walk. The cache is rebuilt only when it is a day old, when you
+  change the folders or the ceiling, or when you press **Rebuild the index now**.
+- **It waits for the login rush.** With no cache to load, the first walk holds
+  off for twenty seconds rather than joining every other startup program in a
+  fight over the disk. Apps are searchable the whole time; only files are late.
+- **It yields.** The walk runs in `THREAD_MODE_BACKGROUND_BEGIN`, which lowers
+  its **I/O** priority as well as its CPU priority, so Windows puts your own
+  reads first. It is meant to be something you never notice running.
+
+### On an old machine
+
+The rest of the app was built for this and holds up: no polling, no injected
+DLLs, no GPU work, and no runtime to load. `SetWinEventHook` is subscribed to
+exactly the six events the tiler acts on, so the OS is not marshalling menu,
+scrolling and capture events across a process boundary for us to discard. If
+your machine is genuinely old, the two things worth turning off are the
+**monitor** overlay (the only continuous cost) and **animations** on the
+Behaviour tab (which briefly raises the system timer resolution while they run).
+
+**Matching is fuzzy but not silly.** A name that *starts* with what you typed
+beats one that merely contains it, which beats one that only has the letters
+scattered through it, and apps you open often drift to the top. Typing `note`
+puts Notepad first, ahead of Notes Board and Release Notes.
+
+| | |
+| --- | --- |
+| type | filter |
+| `Enter` | launch the highlighted entry |
+| `Ctrl` + `Shift` + `Enter` | launch it as administrator |
+| `Up` / `Down` / `Tab` | move the highlight |
+| right-click, or `Menu` | more, for the highlighted entry |
+| `Esc`, or click away | close |
+| `Ctrl` + `U` | clear the query |
+| `Ctrl` + `Backspace` | delete the last word |
+| `Ctrl` + `V` | paste |
+
+**Right-click any result** for the things you would otherwise open a File
+Explorer window to do:
+
+| | |
+| --- | --- |
+| Open | same as Enter |
+| Run as administrator | elevates the shortcut's *target*, not the shortcut |
+| Open file location | Explorer, with the executable already selected |
+| Copy path | the resolved target path, on the clipboard |
+| Forget this app | drops it back down the ranking |
+
+The two greyed-out entries are for Store and other packaged apps: they are
+reached through a shell moniker rather than a file, so there is nothing on disk
+to elevate or to show you.
+
+Rebind it like anything else on the **Window keys** tab, or in the config file:
+`bind = win+s, launcher`.
+
+---
+
+## System monitor
+
+A floating readout of what the machine is doing: **CPU, memory, GPU, disk and network**, each with
+a live value, a bar, and a history graph. It is a layered window with real rounded corners and
+adjustable translucency, not a grey box.
+
+```
+╭──────────────────────────────╮
+│ CPU                      38% │
+│ ▁▂▄▆▅▃▂▁▂▄▃▂▁▁▂▃▄▅▄▃▂▁▂▃▄▅▄ │
+│ ████████░░░░░░░░░░░░░░░░░░░░ │
+│ MEMORY              10.4 GB  │
+│ of 31.6 GB                   │
+│ ██████████░░░░░░░░░░░░░░░░░░ │
+╰──────────────────────────────╯
+```
+
+**Eight readouts:** CPU, memory, GPU, **GPU memory (VRAM)**, **CPU temperature**,
+**GPU temperature**, disk and network. VRAM is real dedicated video memory — used against the
+adapter's actual size, read from DXGI.
+
+**The two temperatures** are the one place Windows has no single answer, so each row also says
+where its number came from.
+
+*GPU temperature* is the easy one: NVIDIA's `nvml.dll` and AMD's `atiadlxx.dll` both ship with the
+driver and both report the die sensor to any user, so on either card the row reads exactly what
+the vendor's own tool would show, with no elevation and nothing to install. The row is labelled
+`nvidia` or `amd` accordingly.
+
+*CPU temperature* is harder, and worth being straight about. Reading the CPU package sensor means
+reading a machine-specific register, which means a kernel driver — this app does not ship one and
+will not ask you to install one. The only honest way to have one is to use the driver you have
+already installed and trusted, so if any of these is running its reading is used, and the row says
+which:
+
+| Source | Row says | Needs |
+|---|---|---|
+| **LibreHardwareMonitor** / OpenHardwareMonitor | `package` | nothing — just leave it running |
+| **HWiNFO** | `hwinfo` | *Shared Memory Support* switched on in its settings |
+| **Core Temp** | `core temp` | nothing — just leave it running |
+
+All three are picked up while ProWindows is already running, so starting one of them mid-session
+simply upgrades the reading. The two shared-memory ones cost a `memcpy` to check, so they are
+re-checked on every pass rather than once a minute.
+
+Failing all of those, every machine publishes its ACPI thermal zone, and that is the fallback,
+labelled `thermal zone`: on a laptop it tracks the CPU closely, on a desktop it is often a
+mainboard sensor that barely moves. **The zone is not the package**, which is exactly why the row
+tells you which one you are looking at rather than presenting them as the same claim.
+
+Where a machine cannot answer at all the row says so rather than inventing a number: `no sensor`
+when nothing on it exposes one, and `needs admin` in the one remaining case where a sensor exists
+but is not readable unelevated.
+
+To find out what *your* machine can answer without running the whole application,
+`tests\tempprobe.bat` prints the reading and its source and stops.
+
+> Earlier versions read the thermal zone through the `MSAcpi_ThermalZoneTemperature` WMI class,
+> which needs administrator — so run normally, the row said `needs admin` and never showed a
+> number. It now reads the same zone through the performance counter of the same name, which does
+> not.
+
+**The busiest app per meter.** Turn on *Name the busiest app* and each readout says which process
+is responsible: the top process by CPU, by working set, by disk I/O, and — via the per-process GPU
+engine counters — by GPU. Network has no cheap per-process source, so it stays blank. This is the
+one option here that costs meaningfully more: it snapshots every process on the machine each tick,
+so it is off by default.
+
+**Put the readouts in whatever order you like.** The panel used to draw them in
+the order they were declared, so CPU was always first and Network always last
+whatever you cared about. Right-click any readout in the menu and it opens onto
+its own tick and four moves — up, down, to the top, to the bottom — and the
+Monitor tab has the same eight rows with **Move up** and **Move down** under
+them. Which readouts are *shown* is a separate thing from where they sit, so
+hiding one and bringing it back puts it where it was rather than at the end.
+The order is stored by name (`monitor_order = cpu, gpu, ram`), so it survives
+anything being added to the panel later.
+
+**Drag it anywhere.** Its position is saved the moment you let go, so it survives a restart — or a
+crash. Or don't drag it: **Move to** in the right-click menu has the nine
+places you were probably aiming for — the four corners, the four edges and the
+middle of whichever screen it is already on.
+
+**Pin it** and two things happen: it can no longer be dragged, and clicks pass straight through to
+whatever is behind it. That is the setting to use once it is where you want it, so you never nudge
+it by accident while reaching for something underneath. Unpin from the tray menu or the Monitor
+tab (a pinned monitor can't be right-clicked, by definition).
+
+**Or send it to the desktop.** *Sit on the desktop, behind every window* drops the panel to the
+bottom of the z-order, one step above the wallpaper: it is there when the desktop is clear and
+every window covers it, so it stops being something you have to work around. It keeps its real
+translucency and rounded corners either way.
+
+**Eight styles**, independent of the colours — any style can wear any theme:
+
+| | |
+| --- | --- |
+| **Rows** | the default: name, reading, history graph and a bar, one row each |
+| **Cards** | each metric on its own raised card with a coloured rail down the left |
+| **Compact** | one dense line per metric — name, bar, reading. The smallest panel |
+| **Rings** | a circular gauge per metric with the reading in the middle |
+| **Arcs** | dial gauges with a 240° sweep and the name underneath |
+| **Bars** | vertical column meters side by side, like a mixing desk |
+| **Graph** | chart first: a large history graph per metric, reading overlaid |
+| **Ticker** | a single thin line — a dot, a name and a number each, for a screen edge |
+
+**It reads as a panel, not a rectangle.** The whole thing now sits on a soft drop shadow, which is
+what separates it from a busy wallpaper. It costs nothing per frame: the shadow, the gradient, the
+gloss and the border are the same pixels every frame, so they are drawn once into a bitmap and
+blitted — which is also why the panel now paints roughly three times faster than it did before the
+shadow existed.
+
+**A reading close to its ceiling warms up.** Above about 72% a bar, ring or column slides towards
+amber and then red, so a pinned CPU is visible without reading the number. The text keeps its own
+colour — moving both made the panel look like it was flickering — and the themes whose whole point
+is a single hue (Graphite, Terminal, Amber) opt out entirely.
+
+**The CPU bar is one segment per thread.** An averaged bar cannot tell one pinned thread from a
+machine that is evenly busy, and those mean opposite things: the first is a program stuck in a loop
+and the second is a machine working. Each logical processor gets a segment of the same bar, and its
+brightness is its load — so one core at 97% in a row of idle ones is visible at a glance, in
+exactly the pixels the single bar used to occupy.
+
+Past about thirty threads the segments stop being distinguishable, so cores are folded together in
+pairs, then fours, until they fit — and a folded segment shows the **busiest** of its cores, not
+their mean. Averaging is what the plain bar already did. `monitor_cores = false` in the config file
+puts the single bar back.
+
+**Graphs mark their peak.** A faint dotted line sits at the highest point of the visible window,
+because a graph that has been flat for a minute and one that spiked thirty seconds ago look the
+same once the spike has scrolled into the middle distance.
+
+**A frame nothing would change is not drawn.** The panel compares a signature of everything it is
+about to paint — sizes, colours, eased percentages, and the text of every reading — against the
+last frame, and skips the repaint when they match. On an idle machine that is most of them.
+
+**Any colour you like, per metric.** The theme sets a colour for each readout, and the swatch
+beside each metric on the **Monitor** tab overrides it — click it for the standard colour picker.
+An overridden swatch gets a bright rim so you can see at a glance which ones you have changed, and
+*Use theme colours* puts them all back. Metrics you have not touched keep following the theme, so
+switching from Midnight to Nord still recolours everything except your own choices. The config
+file stores them one per line (`monitor_color_gpu = #FF3B30`, or `theme`).
+
+**It glides rather than jumps.** A once-a-second sample used to move the bars and gauges in
+once-a-second steps. They now ease into each new reading over 300 ms, using the same curve the
+window animation uses. *Glide between readings* in the right-click menu turns it off.
+
+**Right-click it** for everything else without opening settings: which metrics to show and in what
+order, where on the screen it sits, the style, the theme, graphs on or off, the busiest app, the
+glide, vertical or horizontal, pin, desktop, hide.
+
+**Sixteen themes.** The panel, the border, the text, the bars and the graphs all come from the
+theme, so each one is a genuinely different readout rather than a recoloured accent:
+
+| | |
+| --- | --- |
+| **Midnight** | the default — near-black glass, one colour per metric |
+| **Graphite** | no colour at all; the readouts are told apart by weight |
+| **Nord** · **Dracula** · **Solarized** · **Gruvbox** | the familiar editor palettes |
+| **Tokyo Night** · **Catppuccin** · **Rosé Pine** | the newer ones — indigo, pastel, and muted rose |
+| **Ocean** · **Ember** | deep navy with cyan, or charcoal warmed by orange |
+| **Terminal** · **Amber** | one colour on black, square corners, like a phosphor screen |
+| **Neon** | saturated cyan and magenta, big corners |
+| **Frost** · **Paper** | light panels with dark text, for a light wallpaper |
+
+Pick a theme and a style from the overlay's right-click menu, or from the **Monitor** tab, which
+previews the pair live — at the current opacity, with the style and the busiest-app lines you have
+selected — before you Apply. The config file stores names (`monitor_theme = nord`,
+`monitor_style = rings`), not numbers.
+
+The **Monitor** tab also has opacity, size, and how often it samples. It only samples while it is
+on screen — hide it and the cost returns to zero.
+
+Where the numbers come from: CPU from `GetSystemTimes`, memory from `GlobalMemoryStatusEx`,
+GPU / VRAM / disk / network from the same performance counters Task Manager reads, total VRAM from
+DXGI, per-process figures from a single `NtQuerySystemInformation` snapshot, GPU temperature from
+NVML or ADL, and CPU temperature from LibreHardwareMonitor if it is running and the
+`Thermal Zone Information` performance counters otherwise — the last two on a thread of their own.
+A counter your machine does not expose shows `n/a` rather than a made-up zero.
+
+---
+
+## Screen space for a bar
+
+Windows 11 only supports its taskbar along the bottom edge — Microsoft removed the option to move
+it, and the old registry tricks are ignored (verified on build 26200). Only a tool that patches
+Explorer, such as ExplorerPatcher, can move it, and this app deliberately will not do that.
+
+What it does offer is on the **Layout** tab: reserve pixels on any edge, and tiled windows keep
+clear of them. If you run a bar of your own, anywhere on screen, the tiling fits around it.
+
+---
+
+## Notes and limitations
+
+- **Drag a window to move it, and it lands where you aimed it.** Pick a tiled
+  window up by its title bar and drop it on the **left, right, top or bottom**
+  half of another one, and it takes that side of it — the window that was there
+  moves over to make room. Drop it on the right and it goes on the right; it
+  will not decide to go underneath instead.
+
+  While you drag, a translucent rectangle shows exactly which space the window
+  is about to take, so a drop near a corner is never a guess. Each window is cut
+  along its diagonals into four triangles, and the pointer takes the one it is
+  standing in — so the whole right-hand wedge of a tile means "right", corners
+  included, and there is no dead zone in the middle.
+
+  Drop on bare desktop, in a gap, or on an empty workspace and the window takes
+  that whole edge of the screen instead — a full-height column down the side,
+  or a full-width row across the top or bottom. Drag it onto another monitor and
+  it lands there, placed the same way. Dragging a window's *border* resizes it
+  as usual and never rearranges anything.
+
+  Turn the whole gesture off with **Drag a window onto one side of another to
+  move it there** on the Behaviour tab (`drag_to_rearrange` in the config), and
+  a dragged window just snaps back where it was.
+
+- **Or hold `Alt` and drag anywhere on the window.** Windows gives a window
+  exactly one drag handle, and a tiled window's title bar is a few pixels tall
+  to aim at - if it has one at all. Holding the modifier makes the whole window
+  that handle: left to move it, right to resize it from the nearest corner.
+
+  It does not run a drag of its own. It hands the window the same message a
+  real title-bar click delivers, so what follows is Windows' own move loop and
+  everything above - the drop indicator, the drop side, dragging onto another
+  monitor - happens exactly as it does from the title bar.
+
+  It only ever picks up windows ProWindows is arranging, which means an app on
+  the **Never arrange these apps** list keeps its own `Alt`+drag - that is
+  rather the point of having excluded it. Turn it off entirely with **Hold the
+  modifier and drag anywhere on a window to move it** on the Behaviour tab
+  (`mod_drag` in the config).
+
+- **Games and fullscreen apps stop it completely.** While anything is running
+  fullscreen — a game, a video, a presentation — ProWindows does nothing at all:
+  no arranging, no animation, no focus borders, and the system monitor overlay
+  is taken down. Everything it normally does is a cross-process call that costs a
+  game frames, and on some drivers a window-attribute change is enough to drop it
+  out of exclusive fullscreen. It notices borderless-windowed games as well as
+  true fullscreen ones, and picks up again within a second or two of you leaving.
+  Turn it off with **Stop completely while a game or other fullscreen app is
+  running** on the Behaviour tab if you ever need to.
+
+- **Windows that run as administrator need ProWindows to as well.** Windows will
+  not let a normal program move a window belonging to an elevated one, and it
+  fails silently rather than reporting anything. Those windows are left out of
+  the layout — no tile is reserved for them, so the rest of the screen still
+  fills up properly — and the count is shown in the tray tooltip and the status
+  line, so a window sitting on top of everything is explained rather than
+  mysterious.
+
+  To include them, the tray menu has **Restart as administrator** for right now,
+  and **Always start as administrator** to make it stick. The second one
+  registers a logon task with Windows Task Scheduler, which is the only way to
+  start elevated without a UAC prompt every single time; creating it asks for
+  administrator rights once and never again. The same switch is on the Behaviour
+  tab under Startup.
+
+- **Windows that won't fit are given room, not squeezed.** Some applications
+  refuse to go below a minimum size — Steam is the usual example. Instead of
+  handing one a slot it will overflow, the layout asks each window what it will
+  accept and moves the split: the window gets the width it needs and its
+  neighbour gives it up. It works the other way too, so a window that refuses to
+  grow hands its surplus to whoever can use it rather than leaving bare desktop.
+
+  When even that is not enough — the window's minimum is larger than the screen,
+  or larger than what is left once everything else has its minimum — it is taken
+  out of the tiling and left floating where you put it, rather than allowed to
+  overhang and cover its neighbours. It comes back into the tiling by itself as
+  soon as there is room: close a window, or move it to a bigger screen.
+
+  These minimums can only be discovered by handing a window a size and watching
+  what it does with it, so they are remembered in `config.ini` (the `learned =`
+  lines) and applied straight away next time. Delete a line to make ProWindows
+  measure that application again.
+
+- **Transient dialogs float instead of taking a tile.** A file-copy or delete
+  progress window looks tileable — it is top-level, titled and has a resize
+  frame — but it keeps its own small size, so tiling it left most of a slot
+  empty until it went away. Those float now, along with anything else that turns
+  out not to use the space it is given.
+- **Workspaces are the app's own**, not Windows' virtual desktops. Windows on
+  *other* Windows virtual desktops are ignored, so the two coexist safely.
+- Store/UWP apps are handled through their `ApplicationFrameWindow` host and
+  tile normally; suspended ones are ignored until they wake.
+- Multi-monitor and mixed-DPI setups are supported (per-monitor DPI aware v2).
+  Monitors are ordered left to right, so "next monitor" matches what you see.
+
+---
+
+## Project layout
+
+```
+tests/           layout geometry assertions, and a read-only window probe
+src/common.*     paths, logging, shared types
+src/config.*     INI parsing, keybind and action grammar
+src/defaults.cpp writes config.ini back out, preserving custom bindings
+src/winutil.*    Win32 helpers: classification, DWM frame-accurate placement
+src/layout.*     BSP tree and the four layout algorithms
+src/wm.*         monitors, workspaces, event handling, all the actions
+src/hotkeys.*    RegisterHotKey, plus the keyboard-hook fallback
+src/sysinfo.*    CPU / RAM / GPU / disk / network sampling
+src/launcher.*   the search bar: its window, the app catalogue, the row menu
+src/search.*     what the search bar finds: file index, settings pages, calculator
+src/montheme.*   the overlay's colour schemes and styles, as tables of data
+src/monpaint.*   the overlay's geometry and painting, one function per style
+src/monitor.*    the floating system-load overlay: window, z-order, menu
+src/dragguide.*  the drop indicator shown while a tiled window is dragged
+src/theme.*      dark palette and the custom drawing behind it
+src/moddrag.*    hold the modifier and drag anywhere on a window
+src/settings.*   settings shell, Layout, Behaviour and General pages
+src/settings_keys.cpp  Window keys, Open apps and Monitor pages, plus key capture
+src/settings_search.cpp  the Search page: sources, indexed folders, the ceiling
+src/app.h        the few services the settings pages need from the shell
+src/main.cpp     entry point, tray UI, event hooks
+res/app.rc       icon, manifest, and every dialog template
+res/gen_icon.py  regenerates res/app.ico from code
+build.bat        one-step MSVC build
+```
+
+See [MAP.md](MAP.md) for how it all fits together, the invariants worth knowing, and the
+things that surprised us along the way.
+
+The settings window keeps no state of its own. It reads the live `Config` when
+it opens and writes it back on Apply, which then saves and reloads through the
+ordinary config path — so changing the modifier key re-registers every hotkey,
+and changing a rule re-classifies every window, with no separate code path to
+fall out of sync.
+
+The one Win32 subtlety worth knowing about is in `PlaceWindow()`: Windows 11
+windows have an invisible resize border, so `GetWindowRect` is several pixels
+larger than what you actually see. Every placement is therefore corrected by the
+difference between `GetWindowRect` and the DWM extended frame bounds, which is
+why the gaps come out visually even instead of subtly wrong.

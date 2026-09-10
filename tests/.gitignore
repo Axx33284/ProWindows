@@ -1,0 +1,3 @@
+# Harness output. Rebuilt by run.bat, monshot.bat, launchshot.bat and uishot.bat.
+build/
+shots/

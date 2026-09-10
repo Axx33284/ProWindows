@@ -1,0 +1,976 @@
+// ProWindows - entry point, tray UI and event plumbing.
+#include "common.h"
+#include "config.h"
+#include "wm.h"
+#include "winutil.h"
+#include "hotkeys.h"
+#include "moddrag.h"
+#include "app.h"
+#include "settings.h"
+#include "monitor.h"
+#include "launcher.h"
+#include "dragguide.h"
+#include "search.h"
+#include "theme.h"
+#include "resource.h"
+#include <commctrl.h>
+
+#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "shlwapi.lib")
+
+namespace awa {
+
+// ---------------------------------------------------------------- menu ids
+enum : UINT {
+    IDM_TILING = 100, IDM_GAPS, IDM_RETILE, IDM_RELOAD, IDM_EDITCFG,
+    IDM_OPENDIR, IDM_AUTOSTART, IDM_RESTOREALL, IDM_EXIT,
+    IDM_SETTINGS, IDM_SHORTCUTS, IDM_MONITOR, IDM_MONITOR_PIN, IDM_ELEVATE,
+    IDM_ELEVAUTO, IDM_DIAG,
+    IDM_LAYOUT_BASE = 200,
+    IDM_WORKSPACE_BASE = 300,
+};
+
+// ---------------------------------------------------------------- globals
+static HINSTANCE       g_inst      = nullptr;
+static HWND            g_wnd       = nullptr;
+static Config          g_cfg;
+static WindowManager   g_wm;
+static NOTIFYICONDATAW g_nid       = {};
+static bool            g_trayAdded = false;
+static UINT            g_taskbarCreatedMsg = 0;
+static std::vector<HWINEVENTHOOK> g_hooks;
+static bool            g_shuttingDown = false;
+static HPOWERNOTIFY    g_powerNotify  = nullptr;
+
+// ---------------------------------------------------------------- autostart
+static const wchar_t kRunKey[]   = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static const wchar_t kRunValue[] = L"ProWindows";
+
+static void SetAutostart(bool on);
+// Defined with the rest of the overlay's state, below; used from here up.
+static void UpdateOverlayVisibility();
+
+// The command line currently registered to run at logon, or empty.
+static std::wstring AutostartCommand() {
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return L"";
+    wchar_t buf[MAX_PATH * 2] = {};
+    DWORD size = sizeof(buf), type = 0;
+    const bool found =
+        RegQueryValueExW(key, kRunValue, nullptr, &type, (LPBYTE)buf, &size) == ERROR_SUCCESS;
+    RegCloseKey(key);
+    if (!found || type != REG_SZ) return L"";
+    return buf;
+}
+
+static bool AutostartEnabled() { return !AutostartCommand().empty(); }
+
+// Autostart records an absolute path. Copy the folder to another machine, move
+// it to another drive, or unpack a new release beside the old one, and that
+// path still names wherever the executable used to be - so the entry is there,
+// looks enabled in the settings window, and silently starts nothing. Since we
+// are the program it is supposed to be starting, we are also the only thing in
+// a position to notice, so put it right on the way past.
+static void RepairAutostartPath() {
+    const std::wstring have = AutostartCommand();
+    if (have.empty()) return;                    // not enabled; nothing to fix
+
+    const std::wstring want = L"\"" + ExePath() + L"\" --tray";
+    if (_wcsicmp(have.c_str(), want.c_str()) == 0) return;
+
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunKey, 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+        return;
+    RegSetValueExW(key, kRunValue, 0, REG_SZ, (const BYTE*)want.c_str(),
+                   (DWORD)((want.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    AWA_LOG(L"autostart path repaired: %s", want.c_str());
+}
+
+// The Run entry was written under the old name and points at an executable
+// that no longer exists. Clear it, and carry the user's choice over.
+static void MigrateLegacyAutostart() {
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_READ | KEY_SET_VALUE, &key)
+            != ERROR_SUCCESS)
+        return;
+
+    wchar_t buf[MAX_PATH * 2] = {};
+    DWORD size = sizeof(buf), type = 0;
+    const bool had = RegQueryValueExW(key, L"AutoWindowsArrange", nullptr, &type,
+                                      (LPBYTE)buf, &size) == ERROR_SUCCESS;
+    if (had) RegDeleteValueW(key, L"AutoWindowsArrange");
+    RegCloseKey(key);
+
+    if (had && !AutostartEnabled()) SetAutostart(true);
+}
+
+static void SetAutostart(bool on) {
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunKey, 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+        return;
+    if (on) {
+        std::wstring cmd = L"\"" + ExePath() + L"\" --tray";
+        RegSetValueExW(key, kRunValue, 0, REG_SZ, (const BYTE*)cmd.c_str(),
+                       (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
+    } else {
+        RegDeleteValueW(key, kRunValue);
+    }
+    RegCloseKey(key);
+}
+
+// ---------------------------------------------------------------- tray
+static void TrayTooltip(wchar_t* out, size_t cch) {
+    const wchar_t* state = g_wm.GameMode()   ? L"paused for fullscreen app"
+                         : g_wm.TilingEnabled() ? L"tiling on"
+                                                : L"tiling paused";
+    const int blocked = g_wm.BlockedCount();
+    if (blocked > 0) {
+        swprintf_s(out, cch,
+                   L"%s %s\nLayout: %s  |  Workspace %d  |  %s\n"
+                   L"%d window%s cannot be arranged (running as administrator)",
+                   kAppName, kVersion, LayoutName(g_wm.ActiveLayout()),
+                   g_wm.ActiveWorkspace() + 1, state,
+                   blocked, blocked == 1 ? L"" : L"s");
+    } else {
+        swprintf_s(out, cch, L"%s %s\nLayout: %s  |  Workspace %d  |  %s",
+                   kAppName, kVersion, LayoutName(g_wm.ActiveLayout()),
+                   g_wm.ActiveWorkspace() + 1, state);
+    }
+}
+
+// Holds a notice raised before the tray icon exists. The first window scan
+// happens during startup, and it is exactly that scan which discovers windows
+// running as administrator - so the one message the user most needs to see was
+// also the one guaranteed to be thrown away.
+static std::wstring g_pendingBalloon;
+static void TrayBalloon(const wchar_t* title, const wchar_t* text);
+
+static void TrayAdd() {
+    g_nid = {};
+    g_nid.cbSize           = sizeof(g_nid);
+    g_nid.hWnd             = g_wnd;
+    g_nid.uID              = 1;
+    g_nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_AWA_TRAY;
+    g_nid.hIcon = (HICON)LoadImageW(g_inst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                    GetSystemMetrics(SM_CXSMICON),
+                                    GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+    if (!g_nid.hIcon) g_nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    TrayTooltip(g_nid.szTip, ARRAYSIZE(g_nid.szTip));
+    g_trayAdded = Shell_NotifyIconW(NIM_ADD, &g_nid) != FALSE;
+
+    if (g_trayAdded && !g_pendingBalloon.empty()) {
+        const std::wstring held = std::move(g_pendingBalloon);
+        g_pendingBalloon.clear();
+        TrayBalloon(kAppName, held.c_str());
+    }
+}
+
+static void TrayUpdate() {
+    if (!g_trayAdded) return;
+    g_nid.uFlags = NIF_TIP;
+    TrayTooltip(g_nid.szTip, ARRAYSIZE(g_nid.szTip));
+    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+}
+
+static void TrayRemove() {
+    if (!g_trayAdded) return;
+    Shell_NotifyIconW(NIM_DELETE, &g_nid);
+    g_trayAdded = false;
+}
+
+static void TrayBalloon(const wchar_t* title, const wchar_t* text) {
+    if (!g_trayAdded) {
+        if (g_pendingBalloon.empty() && text) g_pendingBalloon = text;
+        return;
+    }
+    NOTIFYICONDATAW n = {};
+    n.cbSize = sizeof(n);
+    n.hWnd   = g_wnd;
+    n.uID    = 1;
+    n.uFlags = NIF_INFO;
+    // Truncate rather than overflow: the balloon carries user-supplied text
+    // (a launch command), and the _s variants abort the process on overflow.
+    wcsncpy_s(n.szInfoTitle, title, _TRUNCATE);
+    wcsncpy_s(n.szInfo, text, _TRUNCATE);
+    n.dwInfoFlags = NIIF_INFO;
+    Shell_NotifyIconW(NIM_MODIFY, &n);
+}
+
+// ---------------------------------------------------------------- actions
+static void RunAction(const Keybind& kb) {
+    switch (kb.action) {
+        case ACT_FOCUS_DIR:         g_wm.ActFocusDir((Dir)kb.arg); break;
+        case ACT_SWAP_DIR:          g_wm.ActSwapDir((Dir)kb.arg); break;
+        case ACT_RESIZE_DIR:        g_wm.ActResizeDir((Dir)kb.arg); break;
+        case ACT_FOCUS_NEXT:        g_wm.ActFocusCycle(+1); break;
+        case ACT_FOCUS_PREV:        g_wm.ActFocusCycle(-1); break;
+        case ACT_WORKSPACE:         g_wm.ActSwitchWorkspace(kb.arg); break;
+        case ACT_MOVE_TO_WORKSPACE: g_wm.ActMoveToWorkspace(kb.arg); break;
+        case ACT_CYCLE_LAYOUT:      g_wm.ActCycleLayout(); break;
+        case ACT_SET_LAYOUT:        g_wm.ActSetLayout((LayoutKind)kb.arg); break;
+        case ACT_TOGGLE_FLOAT:      g_wm.ActToggleFloat(); break;
+        case ACT_TOGGLE_FULLSCREEN: g_wm.ActToggleFullscreen(); break;
+        case ACT_CLOSE_WINDOW:      g_wm.ActCloseFocused(); break;
+        case ACT_MINIMIZE:          g_wm.ActMinimizeFocused(); break;
+        case ACT_PROMOTE:           g_wm.ActPromote(); break;
+        case ACT_TOGGLE_SPLIT:      g_wm.ActToggleSplit(); break;
+        case ACT_SWAP_SPLIT:        g_wm.ActSwapSplit(); break;
+        case ACT_FOCUS_LAST:        g_wm.ActFocusLast(); break;
+        case ACT_WORKSPACE_REL:     g_wm.ActWorkspaceRelative(kb.arg, false); break;
+        case ACT_WORKSPACE_USED:    g_wm.ActWorkspaceRelative(kb.arg, true); break;
+        case ACT_TOGGLE_TILING:     g_wm.ActToggleTiling(); break;
+        case ACT_TOGGLE_GAPS:       g_wm.ActToggleGaps(); break;
+        case ACT_LAUNCHER:          LauncherToggle(); return;
+        case ACT_FOCUS_MONITOR:     g_wm.ActFocusMonitor(kb.arg); break;
+        case ACT_MOVE_TO_MONITOR:   g_wm.ActMoveToMonitor(kb.arg); break;
+        case ACT_RETILE:            AppRetileNow(); break;
+        case ACT_RELOAD_CONFIG:     PostMessageW(g_wnd, WM_COMMAND, IDM_RELOAD, 0); return;
+        case ACT_QUIT:              PostMessageW(g_wnd, WM_COMMAND, IDM_EXIT, 0); return;
+        case ACT_LAUNCH:
+            if (!LaunchCommand(kb.command)) {
+                const std::wstring text = L"Could not open:\n" + kb.command;
+                TrayBalloon(kAppName, text.c_str());
+            }
+            return;
+        default: return;
+    }
+    TrayUpdate();
+    SettingsRefreshStatus();
+}
+
+// ---------------------------------------------------------------- config
+static void LoadConfig() {
+    const std::wstring path = ConfigPath();
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+        Config::WriteDefaultFile(path);
+
+    g_cfg = Config();
+    g_cfg.LoadDefaults();
+    g_cfg.LoadFromFile(path);
+    LogEnable(g_cfg.debug);
+    AWA_LOG(L"config loaded (%d bindings)", (int)g_cfg.binds.size());
+}
+
+// Defined further down, with the rest of the diagnostics. Declared here so the
+// app.h implementations below can hand the settings window the same code the
+// tray menu runs rather than a second copy of it.
+static void WriteDiagnostics();
+
+static void ReloadConfig(bool announce) {
+    HotkeysUnregister();
+    LoadConfig();
+    HotkeysRegister(g_wnd, &g_cfg);
+    ModDragApplyConfig(&g_cfg);   // the gesture follows the modifier
+    g_wm.ApplyConfigChanged();
+
+    UpdateOverlayVisibility();
+    MonitorApplyConfig();
+    SearchApplyConfig();
+
+    if (g_cfg.focusFollowsMouse) SetTimer(g_wnd, TIMER_MOUSE, 120, nullptr);
+    else                         KillTimer(g_wnd, TIMER_MOUSE);
+
+    TrayUpdate();
+    SettingsRefresh();
+    if (announce) TrayBalloon(kAppName, L"Settings reloaded.");
+}
+
+// ---------------------------------------------------------------- app.h impl
+Config&        AppConfig() { return g_cfg; }
+WindowManager& AppWm()     { return g_wm; }
+
+void AppApplySettings() {
+    g_cfg.SaveToFile(ConfigPath());
+    ReloadConfig(false);
+}
+
+void AppShowShortcuts()  { SettingsOpenTab(PAGE_SHORTCUTS); }
+void AppUpdateTray()     { TrayUpdate(); }
+bool AppAutostartEnabled()    { return AutostartEnabled(); }
+void AppSetAutostart(bool on) { SetAutostart(on); }
+int  AppHotkeyConflicts()     { return HotkeysBlockedCount(); }
+
+void AppOpenConfigFile() {
+    ShellExecuteW(nullptr, L"open", L"notepad.exe", ConfigPath().c_str(),
+                  nullptr, SW_SHOWNORMAL);
+}
+
+void AppOpenConfigFolder() {
+    ShellExecuteW(nullptr, L"open", ConfigDir().c_str(), nullptr, nullptr,
+                  SW_SHOWNORMAL);
+}
+
+void AppWriteDiagnostics()     { WriteDiagnostics(); }
+void AppReloadFromDisk()       { ReloadConfig(true); }
+
+void AppRestoreHiddenWindows() {
+    g_wm.RestoreAllWindows();
+    g_wm.RetileNow();
+    TrayUpdate();
+}
+
+void AppRestoreDefaults(HWND owner) {
+    // This throws away every keybinding, every exclusion and every learned
+    // window limit, and there is no undo short of a backup nobody took. It is
+    // the one button in the settings window that asks first.
+    const int answer = MessageBoxW(owner,
+        L"Every setting goes back to how it shipped: keyboard shortcuts, the "
+        L"apps you excluded, the monitor's colours, the search folders, and "
+        L"the window sizes ProWindows has learned.\r\n\r\n"
+        L"This cannot be undone. Continue?",
+        L"Restore default settings", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (answer != IDYES) return;
+
+    // Built from a fresh Config rather than by resetting fields on the live
+    // one: a member added later is then defaulted by the compiler instead of
+    // being quietly left at whatever the user had.
+    g_cfg = Config();
+    g_cfg.LoadDefaults();
+    g_cfg.SaveToFile(ConfigPath());
+    ReloadConfig(false);
+    TrayBalloon(kAppName, L"Every setting is back to its default.");
+}
+
+std::wstring AppAboutText() {
+    std::wstring text = std::wstring(kAppName) + L" " + kVersion;
+    text += SelfIsElevated() ? L"  -  running as administrator"
+                             : L"  -  running as a normal user";
+    text += L"\r\n";
+
+    wchar_t exe[MAX_PATH * 2] = {};
+    if (GetModuleFileNameW(nullptr, exe, (DWORD)ARRAYSIZE(exe))) {
+        text += exe;
+        text += L"\r\n";
+    }
+    text += ConfigPath();
+
+    const int blocked = g_wm.BlockedCount();
+    if (blocked > 0) {
+        text += L"\r\n";
+        text += std::to_wstring(blocked);
+        text += (blocked == 1)
+            ? L" window runs as administrator and cannot be arranged from here."
+            : L" windows run as administrator and cannot be arranged from here.";
+    }
+    return text;
+}
+
+void AppRetileNow() {
+    g_wm.ScanExistingWindows();
+    g_wm.RetileNow();
+    TrayUpdate();
+}
+
+void AppTrayBalloon(const wchar_t* title, const wchar_t* text) {
+    TrayBalloon(title, text);
+}
+
+void AppSaveConfig() { g_cfg.SaveToFile(ConfigPath()); }
+
+// The screen is off (or the machine has gone to sleep). Nobody can see the
+// overlay, so nothing about it is worth spending anything on.
+static bool g_displayOff = false;
+
+// One place that decides whether the overlay exists at all, because three
+// separate things now have an opinion about it and each of them used to set it
+// directly - so whichever ran last won, and switching away from a game with
+// the screen off brought the panel back to repaint at nobody.
+static void UpdateOverlayVisibility() {
+    MonitorSetVisible(g_cfg.monitorEnabled && !g_wm.GameMode() && !g_displayOff);
+}
+
+void AppGameModeChanged(bool on) {
+    if (on) {
+        // Everything of ours that wakes up on a timer, stopped for the
+        // duration. The overlay in particular is a topmost layered window that
+        // repaints several times a second and holds a PDH query open; tearing
+        // it down costs a game nothing and gives it back a composition layer.
+        KillTimer(g_wnd, TIMER_MOUSE);
+        // Nothing else will tell us the game has gone.
+        SetTimer(g_wnd, TIMER_GAMECHK, 1500, nullptr);
+    } else {
+        KillTimer(g_wnd, TIMER_GAMECHK);
+        if (g_cfg.focusFollowsMouse) SetTimer(g_wnd, TIMER_MOUSE, 120, nullptr);
+    }
+    UpdateOverlayVisibility();
+    TrayUpdate();
+}
+
+// GUID_CONSOLE_DISPLAY_STATE. Written out rather than included: the symbol
+// lives behind INITGUID in one SDK header and is an extern in another, and
+// this is sixteen bytes.
+static const GUID kConsoleDisplayState =
+    { 0x6fe69556, 0x704a, 0x47a0, { 0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47 } };
+
+static void SetDisplayOff(bool off) {
+    if (g_displayOff == off) return;
+    g_displayOff = off;
+    AWA_LOG(L"display %s", off ? L"off - suspending the overlay" : L"on");
+    UpdateOverlayVisibility();
+}
+void AppRefreshSettings() { SettingsRefresh(); }
+void AppOpenMonitorSettings() { SettingsOpenTab(PAGE_MONITOR); }
+
+// ---------------------------------------------------------------- win events
+static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
+                                  LONG idObject, LONG idChild, DWORD, DWORD) {
+    if (!hwnd || idObject != OBJID_WINDOW || idChild != CHILDID_SELF) return;
+    if (g_shuttingDown) return;
+    g_wm.OnWinEvent(event, hwnd);
+}
+
+static void InstallHooks() {
+    const DWORD flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+    struct Range { DWORD lo, hi; };
+    // Exactly the events OnWinEvent acts on, and no others. Every event in a
+    // subscribed range is a cross-process callback the OS has to marshal to
+    // this thread, so a range that spans events we drop on the floor is pure
+    // cost - and 0x0003..0x0017 swept up menus, scrolling, capture changes,
+    // drag starts and alert sounds to be discarded on arrival.
+    const Range ranges[] = {
+        { EVENT_SYSTEM_FOREGROUND,     EVENT_SYSTEM_FOREGROUND    },  // 0x0003
+        { EVENT_SYSTEM_MOVESIZESTART,  EVENT_SYSTEM_MOVESIZEEND   },  // 0x000A .. 0x000B
+        { EVENT_SYSTEM_MINIMIZESTART,  EVENT_SYSTEM_MINIMIZEEND   },  // 0x0016 .. 0x0017
+        { EVENT_OBJECT_DESTROY,        EVENT_OBJECT_HIDE          },  // 0x8001 .. 0x8003
+        // A window being given its title. Applications create the window
+        // first and name it afterwards, so this is the moment a great many of
+        // them stop looking like something to ignore and start looking like
+        // something to arrange. Without it that window waits until the user
+        // clicks on it. OnWinEvent answers this one from a single hash lookup
+        // unless it is a window we are already waiting on, which matters -
+        // a desktop produces a lot of title changes.
+        { EVENT_OBJECT_NAMECHANGE,     EVENT_OBJECT_NAMECHANGE    },  // 0x800C
+        { EVENT_OBJECT_CLOAKED,        EVENT_OBJECT_UNCLOAKED     },  // 0x8017 .. 0x8018
+    };
+    for (const auto& r : ranges) {
+        HWINEVENTHOOK h = SetWinEventHook(r.lo, r.hi, nullptr, WinEventProc, 0, 0, flags);
+        if (h) g_hooks.push_back(h);
+    }
+}
+
+static void RemoveHooks() {
+    for (HWINEVENTHOOK h : g_hooks) UnhookWinEvent(h);
+    g_hooks.clear();
+}
+
+// ---------------------------------------------------------------- diagnostics
+// "It does not work on my other machine" is not a report anyone can act on, and
+// the things that actually differ between two Windows installs - the build, the
+// scaling, which shortcuts another program already owns, whether the tiler is
+// running at the same integrity level as the windows it is being asked to move -
+// are all invisible from the desktop. This writes them all down in one file.
+static std::wstring DiagnosticsText() {
+    std::wstring out;
+    wchar_t line[1024];
+
+    auto add = [&](const wchar_t* fmt, auto... args) {
+        swprintf_s(line, fmt, args...);
+        out += line;
+        out += L"\r\n";
+    };
+
+    add(L"%s %s diagnostics", kAppName, kVersion);
+    add(L"executable      : %s", ExePath().c_str());
+    add(L"settings        : %s", ConfigPath().c_str());
+
+    // The real build number. GetVersionEx lies to unmanifested callers, and the
+    // manifest only ever admits to the versions it lists; the registry does not.
+    {
+        wchar_t build[64] = L"?", name[256] = L"?";
+        DWORD size = sizeof(build);
+        RegGetValueW(HKEY_LOCAL_MACHINE,
+                     L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                     L"CurrentBuild", RRF_RT_REG_SZ, nullptr, build, &size);
+        size = sizeof(name);
+        RegGetValueW(HKEY_LOCAL_MACHINE,
+                     L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                     L"ProductName", RRF_RT_REG_SZ, nullptr, name, &size);
+        add(L"windows         : %s (build %s)", name, build);
+    }
+
+    add(L"running elevated: %s", SelfIsElevated() ? L"yes" : L"no");
+    add(L"integrity level : 0x%04X", OwnProcessIntegrity());
+    add(L"elevated logon  : %s", ElevatedAutostartInstalled() ? L"task installed"
+                                                              : L"not installed");
+    add(L"autostart entry : %s", AutostartCommand().empty()
+                                     ? L"(none)" : AutostartCommand().c_str());
+    add(L"process dpi     : %u", DpiForWindow(g_wnd));
+
+    out += L"\r\nmonitors:\r\n";
+    for (const auto& m : EnumMonitors()) {
+        add(L"  %s %d,%d %dx%d   work %d,%d %dx%d",
+            m.primary ? L"*" : L" ",
+            m.full.x, m.full.y, m.full.w, m.full.h,
+            m.work.x, m.work.y, m.work.w, m.work.h);
+    }
+
+    add(L"\nwindows managed : %d", g_wm.ManagedCount());
+    add(L"blocked by uipi : %d  (running as administrator; cannot be moved)",
+        g_wm.BlockedCount());
+    add(L"fullscreen pause: %s%s", g_cfg.pauseForFullscreen ? L"on" : L"off",
+        g_wm.GameMode() ? L" (active right now)" : L"");
+
+    // The single most common difference between two machines: another program
+    // already owns one of these chords, so the shortcut silently does nothing.
+    out += L"\r\nshortcuts:\r\n";
+    for (const auto& kb : g_cfg.binds) {
+        const wchar_t* how =
+            kb.route == BindRoute::Hotkey  ? L"ok" :
+            kb.route == BindRoute::Hook    ? L"claimed via keyboard hook" :
+            kb.route == BindRoute::Blocked ? L"BLOCKED - another program owns it"
+                                           : L"not registered";
+        add(L"  %-28s %-34s %s", DescribeChord(kb.mods, kb.vk).c_str(),
+            DescribeAction(kb).c_str(), how);
+    }
+
+    out += L"\r\nlearned window sizes:\r\n";
+    if (g_cfg.learnedLimits.empty()) out += L"  (none yet)\r\n";
+    for (const auto& e : g_cfg.learnedLimits) {
+        add(L"  %-40s min %dx%d max %dx%d%s", e.first.c_str(),
+            e.second.minW, e.second.minH, e.second.maxW, e.second.maxH,
+            e.second.tooLarge ? L"  [never tiled: will not fit]" : L"");
+    }
+    return out;
+}
+
+static void WriteDiagnostics() {
+    const std::wstring path = ConfigDir() + L"\\diagnostics.txt";
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"w, ccs=UTF-8") != 0 || !f) {
+        TrayBalloon(kAppName, L"Could not write the diagnostics file.");
+        return;
+    }
+    fputws(DiagnosticsText().c_str(), f);
+    fclose(f);
+    ShellExecuteW(nullptr, L"open", L"notepad.exe", path.c_str(), nullptr,
+                  SW_SHOWNORMAL);
+}
+
+// ---------------------------------------------------------------- tray menu
+static void ShowTrayMenu() {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+
+    wchar_t header[128];
+    swprintf_s(header, L"%s %s", kAppName, kVersion);
+    AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, header);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    AppendMenuW(menu, MF_STRING, IDM_SETTINGS, L"Settings...");
+    SetMenuDefaultItem(menu, IDM_SETTINGS, FALSE);
+    AppendMenuW(menu, MF_STRING, IDM_SHORTCUTS, L"Keyboard shortcuts...");
+    AppendMenuW(menu, MF_STRING | (g_cfg.monitorEnabled ? MF_CHECKED : 0),
+                IDM_MONITOR, L"System monitor");
+    if (g_cfg.monitorEnabled)
+        AppendMenuW(menu, MF_STRING | (g_cfg.monitorPinned ? MF_CHECKED : 0),
+                    IDM_MONITOR_PIN, L"    Pin the monitor");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    AppendMenuW(menu, MF_STRING | (g_wm.TilingEnabled() ? MF_CHECKED : 0),
+                IDM_TILING, L"Tiling active");
+    AppendMenuW(menu, MF_STRING | (g_wm.GapsEnabled() ? MF_CHECKED : 0),
+                IDM_GAPS, L"Gaps");
+
+    HMENU layouts = CreatePopupMenu();
+    const LayoutKind cur = g_wm.ActiveLayout();
+    for (int i = 0; i < (int)LayoutKind::COUNT; ++i)
+        AppendMenuW(layouts, MF_STRING | (cur == (LayoutKind)i ? MF_CHECKED : 0),
+                    IDM_LAYOUT_BASE + i, LayoutName((LayoutKind)i));
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)layouts, L"Layout");
+
+    HMENU spaces = CreatePopupMenu();
+    for (int i = 0; i < g_cfg.workspaceCount; ++i) {
+        wchar_t label[32];
+        swprintf_s(label, L"Workspace %d", i + 1);
+        AppendMenuW(spaces, MF_STRING | (g_wm.ActiveWorkspace() == i ? MF_CHECKED : 0),
+                    IDM_WORKSPACE_BASE + i, label);
+    }
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)spaces, L"Workspace");
+
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, IDM_RETILE,  L"Re-arrange now");
+    AppendMenuW(menu, MF_STRING, IDM_RELOAD,  L"Reload settings");
+    AppendMenuW(menu, MF_STRING, IDM_OPENDIR, L"Open settings folder");
+    AppendMenuW(menu, MF_STRING, IDM_DIAG,    L"Diagnostics report...");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0),
+                IDM_AUTOSTART, L"Start with Windows");
+    AppendMenuW(menu, MF_STRING, IDM_RESTOREALL, L"Show all hidden windows");
+
+    // Only worth offering when it would change anything. Running elevated is
+    // the only way to arrange windows that are themselves elevated.
+    if (!SelfIsElevated())
+        AppendMenuW(menu, MF_STRING, IDM_ELEVATE, L"Restart as administrator");
+
+    // Making that stick. Checking the state costs a schtasks call, so it is
+    // only asked for when the menu is actually being built.
+    {
+        const bool haveTask = ElevatedAutostartInstalled();
+        UINT flags = MF_STRING | (haveTask ? MF_CHECKED : 0);
+        // Creating or removing the task needs administrator rights, so the
+        // item is shown greyed rather than hidden: the user can see the option
+        // exists and what it would take to use it.
+        if (!SelfIsElevated() && !haveTask) flags |= MF_GRAYED;
+        AppendMenuW(menu, flags, IDM_ELEVAUTO,
+                    SelfIsElevated() || haveTask
+                        ? L"Always start as administrator"
+                        : L"Always start as administrator (restart as admin first)");
+    }
+
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, IDM_EXIT, L"Exit");
+
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(g_wnd);
+    TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, 0, g_wnd, nullptr);
+    PostMessageW(g_wnd, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+}
+
+// ---------------------------------------------------------------- window proc
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == g_taskbarCreatedMsg && g_taskbarCreatedMsg) {
+        g_trayAdded = false;
+        TrayAdd();
+        // Explorer restarting destroys the desktop window, and with it any
+        // overlay owned by it.
+        MonitorReattach();
+        return 0;
+    }
+
+    switch (msg) {
+        case WM_AWA_ANIMTICK:
+            // Posted by the animation's own high-resolution ticker thread.
+            g_wm.AnimTickHandled();
+            g_wm.AnimStep();
+            return 0;
+
+        case WM_AWA_TRAY:
+            if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU)
+                ShowTrayMenu();
+            else if (LOWORD(lp) == WM_LBUTTONUP || LOWORD(lp) == WM_LBUTTONDBLCLK)
+                SettingsOpen(g_inst);
+            return 0;
+
+        case WM_HOTKEY:
+            if (const Keybind* kb = HotkeyForId((int)wp)) RunAction(*kb);
+            return 0;
+
+        case WM_AWA_HOOKKEY:
+            if (const Keybind* kb = HotkeyForHookIndex(wp)) RunAction(*kb);
+            return 0;
+
+        // A retile that skipped the debounce because the desktop had been
+        // still. Identical to the timer's arm of it, minus the wait.
+        case WM_AWA_MODDRAG:
+            ModDragBegin(wp);
+            return 0;
+
+        case WM_AWA_RETILE:
+            if (!g_wm.RetilePending()) return 0;    // the timer beat us to it
+            g_wm.RetileNow();
+            TrayUpdate();
+            return 0;
+
+        case WM_TIMER:
+            if (wp == TIMER_RETILE) {
+                KillTimer(hwnd, TIMER_RETILE);
+                g_wm.RetileNow();
+                TrayUpdate();
+            } else if (wp == TIMER_ANIM) {
+                g_wm.AnimStep();
+            } else if (wp == TIMER_MOUSE) {
+                if (g_wm.GameMode()) return 0;
+                POINT pt;
+                GetCursorPos(&pt);
+                if (HWND under = WindowFromPoint(pt)) {
+                    under = GetAncestor(under, GA_ROOT);
+                    if (under && under != GetForegroundWindow())
+                        g_wm.OnForeground(under);
+                }
+            } else if (wp == TIMER_GAMECHK) {
+                g_wm.UpdateGameMode(true);
+            } else if (wp == TIMER_DRAG) {
+                g_wm.OnDragTick();
+            } else if (wp == TIMER_PENDING) {
+                g_wm.RetryPending();
+            }
+            return 0;
+
+        case WM_COMMAND:
+            switch (LOWORD(wp)) {
+                case IDM_SETTINGS:  SettingsOpen(g_inst); break;
+                case IDM_SHORTCUTS: SettingsOpenTab(PAGE_SHORTCUTS); break;
+                case IDM_MONITOR:
+                    g_cfg.monitorEnabled = !g_cfg.monitorEnabled;
+                    UpdateOverlayVisibility();
+                    AppSaveConfig();
+                    SettingsRefresh();
+                    break;
+                case IDM_MONITOR_PIN:
+                    MonitorSetPinned(!g_cfg.monitorPinned);
+                    break;
+                case IDM_TILING:    g_wm.ActToggleTiling(); TrayUpdate();
+                                    SettingsRefreshStatus(); break;
+                case IDM_GAPS:      g_wm.ActToggleGaps(); TrayUpdate(); break;
+                case IDM_RETILE:    AppRetileNow(); break;
+                case IDM_RELOAD:    ReloadConfig(true); break;
+                case IDM_EDITCFG:   AppOpenConfigFile(); break;
+                case IDM_OPENDIR:
+                    ShellExecuteW(nullptr, L"open", ConfigDir().c_str(),
+                                  nullptr, nullptr, SW_SHOWNORMAL);
+                    break;
+                case IDM_AUTOSTART:
+                    SetAutostart(!AutostartEnabled());
+                    SettingsRefresh();
+                    break;
+                case IDM_RESTOREALL: g_wm.RestoreAllWindows(); g_wm.RetileNow(); break;
+                case IDM_DIAG:      WriteDiagnostics(); break;
+                case IDM_ELEVAUTO:
+                    if (ElevatedAutostartInstalled()) {
+                        if (RemoveElevatedAutostart())
+                            TrayBalloon(kAppName,
+                                L"ProWindows will no longer start as administrator.");
+                        else
+                            TrayBalloon(kAppName,
+                                L"Could not remove the scheduled task. Restart "
+                                L"ProWindows as administrator and try again.");
+                    } else if (InstallElevatedAutostart()) {
+                        // The scheduled task now starts it at logon, so the Run
+                        // entry would only start a second, unelevated copy.
+                        SetAutostart(false);
+                        TrayBalloon(kAppName,
+                            L"ProWindows will start as administrator at every "
+                            L"logon, with no prompt, and will be able to arrange "
+                            L"windows that run as administrator.");
+                    } else {
+                        TrayBalloon(kAppName,
+                            L"That needs administrator rights. Use \"Restart as "
+                            L"administrator\" first, then try again.");
+                    }
+                    SettingsRefresh();
+                    break;
+                case IDM_ELEVATE:
+                    // Put every hidden window back before handing over: the new
+                    // instance knows nothing about what this one hid.
+                    g_wm.RestoreAllWindows();
+                    if (RestartElevated()) DestroyWindow(hwnd);
+                    else TrayBalloon(kAppName, L"Restart as administrator was declined.");
+                    break;
+                case IDM_EXIT:       DestroyWindow(hwnd); break;
+                default: {
+                    const UINT id = LOWORD(wp);
+                    if (id >= IDM_LAYOUT_BASE &&
+                        id < IDM_LAYOUT_BASE + (UINT)LayoutKind::COUNT) {
+                        g_wm.ActSetLayout((LayoutKind)(id - IDM_LAYOUT_BASE));
+                        TrayUpdate();
+                    } else if (id >= IDM_WORKSPACE_BASE && id < IDM_WORKSPACE_BASE + 9) {
+                        g_wm.ActSwitchWorkspace((int)(id - IDM_WORKSPACE_BASE));
+                        TrayUpdate();
+                    }
+                    break;
+                }
+            }
+            return 0;
+
+        case WM_DISPLAYCHANGE:
+            g_wm.OnDisplayChange();
+            return 0;
+
+        case WM_POWERBROADCAST:
+            // A machine left on overnight was still sampling CPU, GPU, disk and
+            // network once a second and repainting a layered window nobody was
+            // looking at. Nothing here changes what the user sees; it only
+            // stops when there is no user to see it.
+            if (wp == PBT_POWERSETTINGCHANGE) {
+                const auto* s = reinterpret_cast<const POWERBROADCAST_SETTING*>(lp);
+                if (s && IsEqualGUID(s->PowerSetting, kConsoleDisplayState) &&
+                    s->DataLength >= sizeof(DWORD)) {
+                    // 0 off, 1 on, 2 dimmed.
+                    SetDisplayOff(*reinterpret_cast<const DWORD*>(s->Data) == 0);
+                }
+            } else if (wp == PBT_APMSUSPEND) {
+                SetDisplayOff(true);
+            } else if (wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND) {
+                SetDisplayOff(false);
+                // Waking can bring displays back in a different arrangement.
+                g_wm.OnDisplayChange();
+            }
+            return TRUE;
+
+        case WM_SETTINGCHANGE:
+            if (wp == SPI_SETWORKAREA) g_wm.OnDisplayChange();
+            return 0;
+
+        case WM_DPICHANGED:
+            g_wm.OnDisplayChange();
+            return 0;
+
+        case WM_QUERYENDSESSION:
+            // Answer the question and nothing more. Any other application may
+            // still veto the session ending, and shutting the manager down
+            // here left it torn down - no ticker thread, every hidden window
+            // put back, the config already written - in a process that then
+            // carried on running.
+            return TRUE;
+
+        case WM_ENDSESSION:
+            // wParam is FALSE when the session is not ending after all.
+            if (wp) {
+                g_shuttingDown = true;
+                g_wm.Shutdown();
+                TrayRemove();
+            }
+            return 0;
+
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// ---------------------------------------------------------------- crash safety
+// Nothing here may touch a container.
+//
+// The manager mutates an unordered_map on every window event, so an unhandled
+// exception is most likely to arrive part way through one of those mutations -
+// and walking a half-updated map from here faults again, which leaves the user
+// with exactly the vanished windows this handler exists to prevent.
+// EmergencyUnhideAll reads a flat array of handles instead. Registered hotkeys
+// and the keyboard hook need no attention: Windows releases both when the
+// process dies, which is where this is going.
+static LONG WINAPI CrashHandler(EXCEPTION_POINTERS*) {
+    EmergencyUnhideAll();
+    TrayRemove();
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+} // namespace awa
+
+// ---------------------------------------------------------------- entry point
+int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
+    using namespace awa;
+
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, kMutexName);
+    if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (HWND existing = FindWindowW(kWndClass, nullptr))
+            PostMessageW(existing, WM_COMMAND, IDM_SETTINGS, 0);
+        return 0;
+    }
+
+    g_inst = inst;
+    // DPI awareness comes from the embedded manifest (PerMonitorV2). Calling
+    // SetProcessDpiAwarenessContext here would fail anyway - the manifest has
+    // already fixed it - and it is a hard import that only exists from Windows
+    // 10 1703 onwards, so it stopped the binary loading at all on anything
+    // older, including the Windows 8.1 the manifest says is supported.
+    SetUnhandledExceptionFilter(CrashHandler);
+    // Paired with the CoUninitialize at the end, which must only run if this
+    // succeeded: the calls are reference-counted, and an unmatched uninitialise
+    // tears the apartment down under whatever is still using it.
+    const HRESULT comInit =
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
+    INITCOMMONCONTROLSEX icc = { sizeof(icc),
+                                 ICC_STANDARD_CLASSES | ICC_BAR_CLASSES |
+                                 ICC_UPDOWN_CLASS | ICC_TAB_CLASSES |
+                                 ICC_LISTVIEW_CLASSES };
+    InitCommonControlsEx(&icc);
+    theme::Init();
+
+    const bool firstRun =
+        GetFileAttributesW(ConfigPath().c_str()) == INVALID_FILE_ATTRIBUTES;
+    LoadConfig();
+
+    WNDCLASSEXW wc = {};
+    wc.cbSize        = sizeof(wc);
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = inst;
+    wc.lpszClassName = kWndClass;
+    wc.hIcon         = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APPICON));
+    if (!RegisterClassExW(&wc)) return 1;
+
+    // A real (never shown) top-level window: message-only windows do not receive
+    // WM_DISPLAYCHANGE / WM_SETTINGCHANGE broadcasts.
+    g_wnd = CreateWindowExW(WS_EX_TOOLWINDOW, kWndClass, kAppName, WS_POPUP,
+                            0, 0, 0, 0, nullptr, nullptr, inst, nullptr);
+    if (!g_wnd) return 1;
+
+    g_taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
+
+    g_wm.Init(g_wnd, &g_cfg);
+    TrayAdd();
+    HotkeysRegister(g_wnd, &g_cfg);
+    ModDragInit(g_wnd);
+    ModDragApplyConfig(&g_cfg);
+    InstallHooks();
+    DragGuideInit(inst, &g_cfg);
+    MonitorInit(inst, &g_cfg);
+    // MonitorInit shows the overlay straight from the config; if a game is
+    // already running it must not.
+    UpdateOverlayVisibility();
+    // Ask to be told when the screen goes off, so the overlay can stop. The
+    // registration is held so it can be given back at the end rather than left
+    // pointing at a window that is about to be destroyed.
+    g_powerNotify = RegisterPowerSettingNotification(g_wnd, &kConsoleDisplayState,
+                                                     DEVICE_NOTIFY_WINDOW_HANDLE);
+    // Both start scanning immediately, so the first chord is instant. The file
+    // index walk is the slower of the two and runs on its own thread.
+    LauncherInit(inst, &g_cfg);
+    SearchInit(&g_cfg);
+    MigrateLegacyAutostart();
+    RepairAutostartPath();
+    if (g_cfg.focusFollowsMouse)  SetTimer(g_wnd, TIMER_MOUSE, 120, nullptr);
+
+    const bool startHidden = g_cfg.startMinimized ||
+                             (cmdLine && (wcsstr(cmdLine, L"--tray") ||
+                                          wcsstr(cmdLine, L"/tray")));
+    if (!startHidden) SettingsOpen(inst);
+    else TrayBalloon(kAppName, L"Running in the tray - click the icon for settings.");
+
+    if (firstRun && startHidden)
+        TrayBalloon(kAppName, L"Tiling is active. Click the tray icon to set it up.");
+
+    AWA_LOG(L"%s %s started%s", kAppName, kVersion, startHidden ? L" (tray)" : L"");
+
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        HWND dlg = SettingsWindow();
+        if (dlg && IsWindow(dlg) && IsDialogMessageW(dlg, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    g_shuttingDown = true;
+    if (g_powerNotify) {
+        UnregisterPowerSettingNotification(g_powerNotify);
+        g_powerNotify = nullptr;
+    }
+    MonitorShutdown();
+    DragGuideShutdown();
+    LauncherShutdown();
+    SearchShutdown();
+    SettingsDestroy();
+    theme::Shutdown();
+    RemoveHooks();
+    ModDragShutdown();
+    HotkeysShutdown();
+    g_wm.Shutdown();
+    TrayRemove();
+    if (SUCCEEDED(comInit)) CoUninitialize();
+    if (mutex) { ReleaseMutex(mutex); CloseHandle(mutex); }
+    return 0;
+}

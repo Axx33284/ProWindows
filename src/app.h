@@ -1,0 +1,61 @@
+// Services the settings window needs from the application shell.
+// Implemented in main.cpp; keeps settings.cpp free of the tray/hotkey plumbing.
+#pragma once
+#include "common.h"
+#include "config.h"
+#include "wm.h"
+
+namespace awa {
+
+Config&        AppConfig();
+WindowManager& AppWm();
+
+// Writes the current Config to disk, then reloads it so hotkeys, rules and the
+// layout all pick the new values up.
+void AppApplySettings();
+
+void AppShowShortcuts();
+void AppOpenConfigFile();
+void AppRetileNow();
+void AppUpdateTray();
+void AppTrayBalloon(const wchar_t* title, const wchar_t* text);
+
+// Writes the current Config straight to disk without a reload. Used by the
+// monitor overlay, which changes settings from its own context menu.
+void AppSaveConfig();
+
+// Pulls the settings window's controls back into step with the live Config.
+void AppRefreshSettings();
+
+// Opens the settings window on the Monitor tab.
+void AppOpenMonitorSettings();
+
+bool AppAutostartEnabled();
+void AppSetAutostart(bool on);
+
+// The maintenance actions the tray menu offers, so the General settings page
+// can offer them too without a second implementation of any of them. Each one
+// is the same code the menu item runs.
+void AppOpenConfigFolder();
+void AppWriteDiagnostics();     // writes diagnostics.txt and opens it
+void AppReloadFromDisk();       // re-reads config.ini, re-registers hotkeys
+void AppRestoreHiddenWindows(); // the workspace-hiding safety net
+// Throws every setting away and starts again from the built-in defaults.
+// Asks first: it discards keybindings, exclusions and learned window limits.
+void AppRestoreDefaults(HWND owner);
+// A short account of what this install is: version, where it is, whether it is
+// elevated, and how many windows it is not allowed to touch.
+std::wstring AppAboutText();
+
+// The window manager has entered or left the parked state it uses while a
+// fullscreen application owns the screen. The shell responds by stopping its
+// own periodic work - the focus-follows-mouse poll, the system monitor
+// overlay's sampling and repaint - and by arranging for someone to notice when
+// the game goes away, since no window events arrive while it is running.
+void AppGameModeChanged(bool on);
+
+// How many bindings the OS refused at registration time (shown in the status
+// line, since a stolen chord is otherwise silently missing).
+int  AppHotkeyConflicts();
+
+} // namespace awa

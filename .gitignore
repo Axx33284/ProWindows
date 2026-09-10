@@ -1,0 +1,27 @@
+# Build output
+build/
+tests/build/
+
+# Rendered test artefacts. Regenerate with tests\monshot.bat / uishot.bat.
+tests/shots/
+
+# Stale reference renders that used to live in the project root. They predate
+# the current painter; tests\monshot.bat writes the current ones to tests\shots.
+/skin-*.png
+/style-*.png
+
+# MSVC intermediates
+*.obj
+*.res
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.idb
+*.nativecodeanalysis.xml
+
+# Local editor / OS noise
+.vs/
+*.user
+Thumbs.db
+desktop.ini
