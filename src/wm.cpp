@@ -514,6 +514,8 @@ void WindowManager::RetryPending() {
 void WindowManager::RemoveWindow(HWND h) {
     blocked_.erase(h);
     ForgetPending(h);
+    scratch_.erase(std::remove(scratch_.begin(), scratch_.end(), h), scratch_.end());
+    if (scratchShown_ == h) scratchShown_ = nullptr;
 
     auto it = managed_.find(h);
     if (it == managed_.end()) return;
@@ -570,7 +572,21 @@ void WindowManager::MoveWindowToWorkspace(HWND h, int monitorIndex, int workspac
     if (monitorIndex < 0 || monitorIndex >= (int)monitors_.size()) return;
     Monitor& dstMon = monitors_[monitorIndex];
     if (workspaceIndex < 0 || workspaceIndex >= (int)dstMon.workspaces.size()) return;
-    if (mw->monitor == monitorIndex && mw->workspace == workspaceIndex) return;
+
+    // Being sent to a workspace is how a window leaves the scratchpad - the
+    // same escape route i3 has, and the only one. Without this a parked window
+    // could be moved onto a workspace and still be skipped by every pass, which
+    // is a window that exists, is visible, and is arranged by nothing.
+    const bool leavingScratchpad = mw->scratch;
+    if (leavingScratchpad) {
+        mw->scratch = false;
+        scratch_.erase(std::remove(scratch_.begin(), scratch_.end(), h), scratch_.end());
+        if (scratchShown_ == h) scratchShown_ = nullptr;
+        AWA_LOG(L"scratchpad: released %p onto workspace %d", (void*)h, workspaceIndex + 1);
+    }
+
+    if (!leavingScratchpad &&
+        mw->monitor == monitorIndex && mw->workspace == workspaceIndex) return;
 
     if (Workspace* src = WorkspaceFor(*mw)) {
         src->tiled.erase(std::remove(src->tiled.begin(), src->tiled.end(), h), src->tiled.end());
@@ -814,6 +830,9 @@ LayoutParams WindowManager::ParamsFor(const Monitor& mon, const Workspace& ws) c
 
     p.gapInner    = gapsEnabled_ ? cfg_->gapInner : 0;
     p.gapOuter    = gapsEnabled_ ? cfg_->gapOuter : 0;
+    // Filled in by RetileMonitor, which is the only place that knows how many
+    // windows are actually taking part.
+    p.smartGaps   = cfg_->smartGaps;
     p.masterRatio = ws.masterRatio;
     p.masterCount = ws.masterCount;
     return p;
@@ -1165,7 +1184,7 @@ void WindowManager::RetileMonitor(int monitorIndex) {
     HWND fullscreen = nullptr;
     for (HWND h : ws.tiled) {
         ManagedWindow* mw = Find(h);
-        if (!mw || mw->hidden || mw->minimized) continue;
+        if (!mw || mw->hidden || mw->minimized || mw->scratch) continue;
         if (mw->fullscreen) { fullscreen = h; continue; }
         // A window we have proved we cannot move, or that will not use the
         // space it is given, must not be given a tile: reserving one is
@@ -2074,6 +2093,7 @@ void WindowManager::FocusAndRemember(HWND h) {
     // foreground window - would otherwise make ActFocusLast a no-op.
     if (focused_ && focused_ != h) lastFocused_ = focused_;
     FocusWindow(h);
+    WarpCursorTo(h);
     focused_ = h;
     if (ManagedWindow* mw = Find(h)) {
         activeMonitor_ = mw->monitor;
@@ -2230,16 +2250,33 @@ void WindowManager::ActSwitchWorkspace(int index) {
     // ShowWindow on another process's window, which pumps this thread's sent
     // messages - and a window event arriving in there erases from `managed_`
     // under the iterator this loop is holding.
+    // Sticky windows travel rather than hide. Moving them onto the incoming
+    // workspace - instead of teaching the layout about a third kind of window -
+    // means they arrive as ordinary tiles and every pass downstream, tree
+    // included, needs to know nothing about them.
+    std::vector<HWND> travelling;
     std::vector<std::pair<HWND, bool>> flips;
     flips.reserve(managed_.size());
     for (const auto& kv : managed_) {
         const ManagedWindow& mw = kv.second;
-        if (mw.monitor != activeMonitor_) continue;
+        if (mw.monitor != activeMonitor_ || mw.scratch) continue;
+        if (mw.sticky) { travelling.push_back(kv.first); continue; }
         if (mw.workspace == prev)  flips.push_back({ kv.first, true });
         if (mw.workspace == index) flips.push_back({ kv.first, false });
     }
     for (const auto& f : flips)
         if (ManagedWindow* mw = Find(f.first)) SetHidden(mw, f.second);
+
+    for (HWND h : travelling) {
+        ManagedWindow* mw = Find(h);
+        if (!mw || mw->workspace == index) continue;
+        DetachFromWorkspace(h);
+        mw->workspace = index;
+        Workspace& dst = mon->workspaces[index];
+        if (mw->floating) dst.floats.push_back(h);
+        else              dst.tiled.push_back(h);
+        SetHidden(mw, false);
+    }
 
     RetileNow();
 
@@ -2259,10 +2296,16 @@ void WindowManager::ActMoveToWorkspace(int index) {
     if (!cur) return;
     Monitor* mon = ActiveMonitor();
     if (!mon || index < 0 || index >= (int)mon->workspaces.size()) return;
+    const bool staying = (mon->active == index);
     MoveWindowToWorkspace(cur, activeMonitor_, index, false);
 
-    Workspace* ws = ActiveWorkspaceOf(activeMonitor_);
-    if (ws) {
+    // Focus moves on to whatever is left behind - but only when the window has
+    // actually gone somewhere else. Sending it to the workspace it is already
+    // on (which is how a window leaves the scratchpad) must not hand focus to
+    // whichever window happens to be first in the list.
+    if (staying) {
+        FocusAndRemember(cur);
+    } else if (Workspace* ws = ActiveWorkspaceOf(activeMonitor_)) {
         HWND next = ws->tiled.empty() ? nullptr : ws->tiled.front();
         if (next) FocusAndRemember(next);
     }
@@ -2422,6 +2465,12 @@ void WindowManager::ActWorkspaceRelative(int delta, bool onlyUsed) {
 
 WindowManager::Snapshot WindowManager::TakeSnapshot() {
     Snapshot s;
+    // The same answer the actions use. `focused_` alone is not it: FocusedManaged
+    // falls back to the real foreground window when nothing has been focused
+    // through us yet, so reporting the raw field would say "nothing is focused"
+    // about the very window the next command is going to act on.
+    HWND focus = (focused_ && Find(focused_)) ? focused_ : GetForegroundWindow();
+    if (focus && !Find(focus)) focus = nullptr;
     s.activeLayout    = ActiveLayout();
     s.activeMonitor   = activeMonitor_;
     s.activeWorkspace = ActiveWorkspace();
@@ -2465,7 +2514,9 @@ WindowManager::Snapshot WindowManager::TakeSnapshot() {
         w.hidden     = mw.hidden;
         w.fullscreen = mw.fullscreen;
         w.immovable  = mw.immovable;
-        w.focused    = (kv.first == focused_);
+        w.sticky     = mw.sticky;
+        w.scratch    = mw.scratch;
+        w.focused    = (kv.first == focus);
         w.rect       = VisibleRect(kv.first);
         s.windows.push_back(w);
 
@@ -2548,6 +2599,152 @@ void WindowManager::SetTilingEnabled(bool on) {
     tilingEnabled_ = on;
     AWA_LOG(L"tiling %s", on ? L"on" : L"off");
     if (on) RetileNow();
+}
+
+// Lifts a window out of whatever workspace is holding it, leaving it in
+// `managed_` but taking no part in any layout. Shared by the scratchpad and by
+// sticky, which both need to move a window between workspaces without the
+// bookkeeping that MoveWindowToWorkspace does around focus and visibility.
+void WindowManager::DetachFromWorkspace(HWND h) {
+    ManagedWindow* mw = Find(h);
+    if (!mw) return;
+    if (Workspace* ws = WorkspaceFor(*mw)) {
+        ws->tiled.erase(std::remove(ws->tiled.begin(), ws->tiled.end(), h), ws->tiled.end());
+        ws->floats.erase(std::remove(ws->floats.begin(), ws->floats.end(), h), ws->floats.end());
+        ws->tree.Remove(h);
+        if (ws->lastFocused == h)
+            ws->lastFocused = ws->tiled.empty() ? nullptr : ws->tiled.front();
+    }
+}
+
+void WindowManager::WarpCursorTo(HWND h) {
+    if (!cfg_ || !cfg_->cursorWarp || !h || !IsWindow(h)) return;
+    const Rect r = VisibleRect(h);
+    if (r.empty()) return;
+    SetCursorPos(r.cx(), r.cy());
+}
+
+bool WindowManager::ActFocusWindowById(HWND h) {
+    Busy guard(this);
+    ManagedWindow* mw = Find(h);
+    if (!mw || !IsWindow(h)) return false;
+
+    // Following it across a workspace boundary is the useful behaviour: a
+    // script that has just found the window it wants does not also want to be
+    // told it is on the wrong workspace.
+    if (Monitor* mon = MonitorAt(mw->monitor)) {
+        if (mon->active != mw->workspace && !mw->sticky && !mw->scratch) {
+            activeMonitor_ = mw->monitor;
+            ActSwitchWorkspace(mw->workspace);
+        }
+    }
+    if (mw->minimized) ShowWindow(h, SW_RESTORE);
+    FocusAndRemember(h);
+    WarpCursorTo(h);
+    return true;
+}
+
+void WindowManager::ActToggleSticky() {
+    Busy guard(this);
+    HWND cur = FocusedManaged();
+    if (!cur) return;
+    ManagedWindow* mw = Find(cur);
+    if (!mw || mw->scratch) return;         // the scratchpad is its own thing
+
+    mw->sticky = !mw->sticky;
+    AWA_LOG(L"sticky %p %s", (void*)cur, mw->sticky ? L"on" : L"off");
+    // Nothing else to do: a sticky window already sits on the workspace the
+    // user is looking at, and ActSwitchWorkspace brings it along from here on.
+    RequestRetile();
+}
+
+void WindowManager::ActScratchpadMove() {
+    Busy guard(this);
+    HWND cur = FocusedManaged();
+    if (!cur) return;
+    ManagedWindow* mw = Find(cur);
+    if (!mw || mw->scratch) return;
+
+    // A floating window keeps the size the user gave it. A tiled one has no
+    // size worth keeping: its rect is a slot the layout chose, and savedRect
+    // may be another one from before it was adopted. Clearing it hands the
+    // summon path its default - centred, a comfortable fraction of the screen -
+    // which is what i3 does the first time a window comes out of the
+    // scratchpad, and for the same reason: restoring a window to a 294-pixel
+    // column in the middle of the screen is not summoning it.
+    if (mw->floating) mw->savedRect = VisibleRect(cur);
+    else              mw->savedRect = Rect();
+
+    DetachFromWorkspace(cur);
+    mw->scratch = true;
+    mw->sticky  = false;
+    if (scratchShown_ == cur) scratchShown_ = nullptr;
+    scratch_.erase(std::remove(scratch_.begin(), scratch_.end(), cur), scratch_.end());
+    scratch_.push_back(cur);
+
+    SetHidden(mw, true);
+    if (focused_ == cur) focused_ = nullptr;
+    AWA_LOG(L"scratchpad: parked %p (%d waiting)", (void*)cur, (int)scratch_.size());
+
+    RequestRetile();
+    UpdateBorders();
+}
+
+void WindowManager::ActScratchpadToggle() {
+    Busy guard(this);
+
+    // Something is on screen: put it away again. Same key both ways, which is
+    // the whole ergonomic point of a scratchpad.
+    if (scratchShown_) {
+        HWND shown = scratchShown_;
+        scratchShown_ = nullptr;
+        if (ManagedWindow* mw = Find(shown)) {
+            // It was floating while it was up, so wherever the user left it is
+            // where it should come back.
+            mw->savedRect = VisibleRect(shown);
+            SetHidden(mw, true);
+        }
+        AWA_LOG(L"scratchpad: dismissed %p", (void*)shown);
+        UpdateBorders();
+        return;
+    }
+
+    // Drop anything that has closed since it was parked, then take the most
+    // recently sent - which is nearly always the one being asked for.
+    while (!scratch_.empty() && (!IsWindow(scratch_.back()) || !Find(scratch_.back())))
+        scratch_.pop_back();
+    if (scratch_.empty()) return;
+
+    HWND h = scratch_.back();
+    ManagedWindow* mw = Find(h);
+    if (!mw) return;
+
+    // Centred on the monitor the user is actually on, at a readable size, and
+    // above everything. It is a summoned window, not a tile: it deliberately
+    // takes no part in the layout while it is up.
+    Monitor* mon = ActiveMonitor();
+    if (mon) {
+        const Rect& work = mon->info.work;
+        Rect r = mw->savedRect;
+        if (r.empty() || r.w > work.w || r.h > work.h) {
+            r.w = (int)(work.w * 0.6);
+            r.h = (int)(work.h * 0.6);
+        }
+        r.x = work.x + (work.w - r.w) / 2;
+        r.y = work.y + (work.h - r.h) / 2;
+        mw->monitor = (int)(mon - &monitors_[0]);
+        SetHidden(mw, false);
+        PlaceWindow(h, r, nullptr);
+        mw->savedRect = r;
+    } else {
+        SetHidden(mw, false);
+    }
+
+    BringWindowToTop(h);
+    scratchShown_ = h;
+    FocusAndRemember(h);
+    WarpCursorTo(h);
+    AWA_LOG(L"scratchpad: summoned %p", (void*)h);
 }
 
 void WindowManager::ActToggleTiling() { SetTilingEnabled(!tilingEnabled_); }

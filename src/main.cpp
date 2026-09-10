@@ -227,6 +227,9 @@ static void RunAction(const Keybind& kb) {
         case ACT_PROMOTE:           g_wm.ActPromote(); break;
         case ACT_TOGGLE_SPLIT:      g_wm.ActToggleSplit(); break;
         case ACT_SWAP_SPLIT:        g_wm.ActSwapSplit(); break;
+        case ACT_TOGGLE_STICKY:     g_wm.ActToggleSticky(); break;
+        case ACT_SCRATCHPAD_MOVE:   g_wm.ActScratchpadMove(); break;
+        case ACT_SCRATCHPAD_TOGGLE: g_wm.ActScratchpadToggle(); break;
         case ACT_FOCUS_LAST:        g_wm.ActFocusLast(); break;
         case ACT_WORKSPACE_REL:     g_wm.ActWorkspaceRelative(kb.arg, false); break;
         case ACT_WORKSPACE_USED:    g_wm.ActWorkspaceRelative(kb.arg, true); break;
@@ -303,6 +306,8 @@ std::wstring JsonWindows(const WindowManager::Snapshot& s) {
         out += L",\"hidden\":" + JsonBool(w.hidden);
         out += L",\"fullscreen\":" + JsonBool(w.fullscreen);
         out += L",\"immovable\":" + JsonBool(w.immovable);
+        out += L",\"sticky\":" + JsonBool(w.sticky);
+        out += L",\"scratchpad\":" + JsonBool(w.scratch);
         out += L",\"focused\":" + JsonBool(w.focused);
         out += L",\"rect\":" + JsonRect(w.rect);
         out += L"}";
@@ -383,6 +388,22 @@ std::wstring IpcCommandHandler(const std::wstring& line) {
     const std::wstring lower = ToLower(verb);
 
     if (lower == L"get") return IpcQuery(ToLower(rest));
+
+    // `focus id <n>` is a control-channel command rather than a bindable
+    // action: there is no useful keyboard shortcut for "focus window 918274",
+    // but a script that has just read `get windows` wants exactly that.
+    if (lower == L"focus") {
+        std::wstring what = ToLower(rest);
+        if (what.compare(0, 3, L"id ") == 0 || what.compare(0, 3, L"id	") == 0) {
+            const std::wstring idText = Trim(rest.substr(3));
+            const unsigned long long id = _wcstoui64(idText.c_str(), nullptr, 10);
+            if (!id) return L"error: focus id needs a window id from 'get windows'";
+            if (!g_wm.ActFocusWindowById((HWND)(uintptr_t)id))
+                return L"error: no managed window with id " + idText;
+            TrayUpdate();
+            return L"ok";
+        }
+    }
 
     Keybind kb;
     if (!ParseAction(verb, rest, &kb.action, &kb.arg, &kb.command))

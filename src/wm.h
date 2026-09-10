@@ -15,6 +15,17 @@ struct ManagedWindow {
     bool fullscreen = false;
     bool minimized  = false;
     bool hidden     = false;    // hidden by us because its workspace is inactive
+
+    // Follows the user from workspace to workspace instead of staying on one.
+    // i3 calls it sticky, Hyprland calls it pin. Implemented by moving the
+    // window to whichever workspace is being switched to, rather than by
+    // special-casing it in the layout - so a sticky window is an ordinary tile
+    // everywhere it appears, and nothing downstream needs to know.
+    bool sticky     = false;
+
+    // Parked in the scratchpad: on no workspace at all, hidden, waiting to be
+    // summoned. See WindowManager::ActScratchpadToggle.
+    bool scratch    = false;
     Rect savedRect;             // geometry to restore when floating / un-fullscreening
 
     // What this window will actually accept. Seeded from WM_GETMINMAXINFO and
@@ -153,6 +164,21 @@ public:
     void ActToggleTiling();
     void ActToggleGaps();
 
+    // Focus one particular window. There is no keyboard shortcut for this and
+    // there could not be a useful one - it exists for the control channel, so a
+    // script can query `get windows` and then act on the one it wanted. i3 does
+    // the same thing through criteria like [con_id=...] focus.
+    // False when that window is not one we manage.
+    bool ActFocusWindowById(HWND h);
+
+    // Keep the focused window on every workspace, or stop.
+    void ActToggleSticky();
+
+    // i3's scratchpad, in two halves: send the focused window to the holding
+    // area, and summon or dismiss whatever is waiting there.
+    void ActScratchpadMove();
+    void ActScratchpadToggle();
+
     // Flip the split the focused window sits under, or exchange its two
     // halves. Dwindle only - Master, Grid and Monocle do not have a tree to
     // flip, and pretending otherwise would silently do nothing.
@@ -207,6 +233,7 @@ public:
             int  monitor = 0, workspace = 0;
             bool floating = false, minimized = false, hidden = false;
             bool fullscreen = false, focused = false, immovable = false;
+            bool sticky = false, scratch = false;
             Rect rect;
         };
         struct Ws {
@@ -470,6 +497,19 @@ private:
 
     std::vector<Monitor> monitors_;
     std::unordered_map<HWND, ManagedWindow> managed_;
+
+    // Windows parked in the scratchpad, oldest first, so summoning takes the
+    // one sent there most recently. Deliberately not per-monitor: the whole
+    // point is that it follows you, and i3's is global for the same reason.
+    std::vector<HWND> scratch_;
+    HWND scratchShown_ = nullptr;      // the one currently on screen, or null
+
+    // Takes a window out of whatever workspace lists and tree hold it, without
+    // removing it from `managed_`. Shared by the scratchpad and by sticky.
+    void DetachFromWorkspace(HWND h);
+
+    // Puts the pointer on a window, if cursor_warp is on.
+    void WarpCursorTo(HWND h);
 
     // Frame padding is measured once when the animation starts, so each tick is
     // a plain DeferWindowPos with no DWM round-trips.

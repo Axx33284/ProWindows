@@ -223,9 +223,14 @@ int IpcClientMain(const std::wstring& command) {
     // typing the command in a terminal still shows an answer - but the answer
     // goes to the console buffer rather than down a pipe, so it cannot be
     // captured. Convenience, not automation.
+    // GetFileType rather than comparing the handle: a process with no standard
+    // handles gets NULL, a broken one gets INVALID_HANDLE_VALUE, and a closed
+    // one gets a handle that fails on write. FILE_TYPE_UNKNOWN covers all three
+    // and is the check the API is designed for.
+    const HANDLE stdOut = GetStdHandle(STD_OUTPUT_HANDLE);
     bool attached = false;
-    bool haveOut  = GetStdHandle(STD_OUTPUT_HANDLE) != nullptr &&
-                    GetStdHandle(STD_OUTPUT_HANDLE) != INVALID_HANDLE_VALUE;
+    bool haveOut  = (stdOut != INVALID_HANDLE_VALUE) &&
+                    (GetFileType(stdOut) != FILE_TYPE_UNKNOWN);
     if (!haveOut && AttachConsole(ATTACH_PARENT_PROCESS)) {
         FILE* reopened = nullptr;
         if (freopen_s(&reopened, "CONOUT$", "w", stdout) == 0) {
@@ -301,6 +306,7 @@ std::wstring IpcHelpText() {
         L"anything you can bind you can also send.\n"
         L"\n"
         L"  focus left|right|up|down        move focus\n"
+        L"  focus id <n>                    focus one window, by id from get windows\n"
         L"  focusnext | focusprev           cycle focus on this workspace\n"
         L"  focuslast                       back to the previous window\n"
         L"  swap left|right|up|down         exchange two tiles\n"
@@ -314,6 +320,9 @@ std::wstring IpcHelpText() {
         L"  layout dwindle|master|grid|monocle\n"
         L"  cyclelayout                     next layout\n"
         L"  togglesplit | swapsplit         flip or mirror the split (dwindle only)\n"
+        L"  togglesticky                    keep this window on every workspace\n"
+        L"  movetoscratchpad                send this window to the scratchpad\n"
+        L"  scratchpad                      summon or dismiss the scratchpad\n"
         L"  togglefloat | togglefullscreen\n"
         L"  toggletiling | togglegaps\n"
         L"  minimize | close                the focused window\n"

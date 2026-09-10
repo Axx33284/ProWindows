@@ -58,6 +58,18 @@ enum Action : int {
     // ACT_WORKSPACE_USED skips the empty ones the way Hyprland's `e+1` does.
     ACT_WORKSPACE_REL,
     ACT_WORKSPACE_USED,
+
+    // Visible on every workspace instead of just its own. i3 calls it sticky,
+    // Hyprland calls it pin; the same idea either way, and the obvious home for
+    // a music player or a chat window you want to keep an eye on.
+    ACT_TOGGLE_STICKY,
+
+    // i3's scratchpad. Send a window away to a holding area that belongs to no
+    // workspace, then summon it over whatever you are looking at and dismiss it
+    // again with the same key. The useful half of a "quake terminal" without
+    // needing a terminal that supports one.
+    ACT_SCRATCHPAD_MOVE,
+    ACT_SCRATCHPAD_TOGGLE,
 };
 
 // How a binding actually reached us.
@@ -115,6 +127,19 @@ struct Config {
     // windows ProWindows is arranging, so an excluded app keeps its own
     // mod+drag - which is the point of having excluded it.
     bool  modDrag         = true;
+
+    // One window on a workspace does not need to be held away from the screen
+    // edges by anything: the gap is there to separate tiles from each other,
+    // and with nothing to separate it is just wasted screen. Hyprland calls
+    // this no_gaps_when_only and it is on by default there for good reason.
+    bool  smartGaps       = true;
+
+    // Put the pointer on a window when focus moves to it by keyboard. Without
+    // it the pointer stays wherever it was, which matters as soon as
+    // focus-follows-mouse is on as well - the two fight, and the window under
+    // the stationary pointer takes focus straight back.
+    bool  cursorWarp      = false;
+
     int   workspaceCount = 9;
     bool  animations     = true;
     int   animationMs    = 200;

@@ -126,6 +126,10 @@ struct LayoutParams {
     Rect       work;                 // monitor work area
     int        gapInner    = 8;
     int        gapOuter    = 8;
+    // One window has nothing to be separated from, so the gaps around it are
+    // only lost screen. Hyprland's no_gaps_when_only, and on for the same
+    // reason: a single maximised-ish window wants the whole work area.
+    bool       smartGaps   = true;
     float      masterRatio = 0.55f;
     int        masterCount = 1;
 };

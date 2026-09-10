@@ -130,7 +130,15 @@ bool Config::SaveToFile(const std::wstring& path) const {
                 L"# right-drag to resize it from the nearest corner. Only ever acts on\n"
                 L"# windows ProWindows arranges, so an excluded app keeps its own.\n"
                 L"mod_drag            = %s\n", Bool(modDrag));
+    fwprintf(f, L"# Drop the gaps when a workspace holds a single window. The gap\n"
+                L"# exists to separate tiles from one another; with nothing to\n"
+                L"# separate it is only wasted screen.\n"
+                L"smart_gaps          = %s\n", Bool(smartGaps));
     fwprintf(f, L"focus_follows_mouse = %s\n", Bool(focusFollowsMouse));
+    fwprintf(f, L"# Move the pointer onto a window when the keyboard focuses it.\n"
+                L"# Worth turning on with focus_follows_mouse, which otherwise\n"
+                L"# hands focus straight back to whatever the pointer is resting on.\n"
+                L"cursor_warp         = %s\n", Bool(cursorWarp));
     fwprintf(f, L"start_minimized     = %s\n\n", Bool(startMinimized));
 
     fwprintf(f, L"# Smooth movement when windows are re-arranged. Costs a little CPU\n");

@@ -168,6 +168,11 @@ bool ParseAction(const std::wstring& name, const std::wstring& argText,
     if (a == L"quit" || a == L"exit") { *act = ACT_QUIT; return true; }
     if (a == L"togglesplit")          { *act = ACT_TOGGLE_SPLIT; return true; }
     if (a == L"swapsplit")            { *act = ACT_SWAP_SPLIT; return true; }
+    if (a == L"togglesticky" || a == L"sticky" || a == L"pin") {
+        *act = ACT_TOGGLE_STICKY; return true;
+    }
+    if (a == L"movetoscratchpad")     { *act = ACT_SCRATCHPAD_MOVE; return true; }
+    if (a == L"scratchpad")           { *act = ACT_SCRATCHPAD_TOGGLE; return true; }
     if (a == L"focuslast" || a == L"focuscurrentorlast") {
         *act = ACT_FOCUS_LAST;
         return true;
@@ -273,6 +278,9 @@ std::wstring ActionSpecText(const Keybind& kb) {
         case ACT_LAUNCHER:          return L"launcher";
         case ACT_TOGGLE_SPLIT:      return L"togglesplit";
         case ACT_SWAP_SPLIT:        return L"swapsplit";
+        case ACT_TOGGLE_STICKY:     return L"togglesticky";
+        case ACT_SCRATCHPAD_MOVE:   return L"movetoscratchpad";
+        case ACT_SCRATCHPAD_TOGGLE: return L"scratchpad";
         case ACT_FOCUS_LAST:        return L"focuslast";
         case ACT_WORKSPACE_REL:
             swprintf_s(buf, L"workspacerel, %s", kb.arg < 0 ? L"prev" : L"next"); return buf;
@@ -344,6 +352,9 @@ std::wstring DescribeAction(const Keybind& kb) {
                               : L"Send window to the next monitor";
         case ACT_TOGGLE_SPLIT:      return L"Flip this split: side by side / stacked";
         case ACT_SWAP_SPLIT:        return L"Swap the two halves of this split";
+        case ACT_TOGGLE_STICKY:     return L"Keep this window on every workspace";
+        case ACT_SCRATCHPAD_MOVE:   return L"Send this window to the scratchpad";
+        case ACT_SCRATCHPAD_TOGGLE: return L"Show or hide the scratchpad window";
         case ACT_FOCUS_LAST:        return L"Back to the last window (and back again)";
         case ACT_WORKSPACE_REL:
             return kb.arg < 0 ? L"Switch to the previous workspace"
@@ -761,6 +772,8 @@ bool Config::LoadFromFile(const std::wstring& path) {
         else if (k == L"override_windows_shortcuts")
             overrideReserved = ParseBool(v, overrideReserved);
         else if (k == L"mod_drag")       modDrag = ParseBool(v, modDrag);
+        else if (k == L"smart_gaps")     smartGaps = ParseBool(v, smartGaps);
+        else if (k == L"cursor_warp")    cursorWarp = ParseBool(v, cursorWarp);
         else if (k == L"debug")          debug = ParseBool(v, debug);
         else if (k == L"ignore_process") { for (auto& s : SplitList(v)) ignoreProcess.push_back(s); }
         else if (k == L"ignore_class")   { for (auto& s : SplitList(v)) ignoreClass.push_back(s); }

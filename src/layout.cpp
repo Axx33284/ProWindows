@@ -724,8 +724,13 @@ void ComputeLayout(const LayoutParams& p, const std::vector<HWND>& order,
 
     // Windows tile `area` edge to edge; each one then shrinks by half the inner
     // gap, so neighbours end up `gapInner` apart and the screen edge `gapOuter`.
-    const int half = p.gapInner / 2;
-    const Rect area = p.work.shrink(p.gapOuter - half);
+    //
+    // Unless there is only one of them, in which case there is no neighbour to
+    // be `gapInner` away from and no reason to hold it off the screen edge
+    // either: it simply takes the work area.
+    const bool alone = (p.smartGaps && order.size() == 1);
+    const int half = alone ? 0 : p.gapInner / 2;
+    const Rect area = alone ? p.work : p.work.shrink(p.gapOuter - half);
     if (area.empty()) return;
 
     // Limits describe the WINDOW; the algorithms below divide up SLOTS, which

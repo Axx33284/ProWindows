@@ -109,6 +109,65 @@ try {
     Ctl toggletiling | Out-Null; Start-Sleep -Milliseconds 350
     Check "toggletiling flips it back"   (State).tiling $before
 
+    # --- scratchpad and sticky need a window of our own to act on, so that the
+    # test never depends on what happens to be open on the machine running it.
+    Write-Host "`n-- scratchpad and sticky"
+    $testwin = "$PSScriptRoot\build\testwin.exe"
+    if (Test-Path $testwin) {
+        $tw = Start-Process $testwin -ArgumentList "--name CTLTEST" -PassThru
+        Start-Sleep -Milliseconds 1200
+        function Win { (State).windows | Where-Object { $_.title -eq "CTLTEST" } }
+        Check "the test window was adopted" (@(Win).Count) 1
+
+        Ctl movetoscratchpad | Out-Null; Start-Sleep -Milliseconds 700
+        $w = Win
+        Check "parked: marked scratchpad"   $w.scratchpad "True"
+        Check "parked: hidden"              $w.hidden     "True"
+
+        Ctl scratchpad | Out-Null; Start-Sleep -Milliseconds 900
+        $w = Win
+        Check "summoned: visible"           $w.hidden  "False"
+        Check "summoned: focused"           $w.focused "True"
+        # Centred at a fraction of the work area, not left at whatever slot the
+        # layout had given it.
+        $work = (State).monitors[0].workArea
+        Check "summoned: sized to the screen" (($w.rect.w -gt $work.w * 0.4) -and ($w.rect.w -lt $work.w * 0.9)) "True"
+
+        Ctl scratchpad | Out-Null; Start-Sleep -Milliseconds 700
+        Check "dismissed: hidden again"     (Win).hidden "True"
+
+        # Sending it to a workspace is the only way out of the scratchpad, so
+        # it had better work - otherwise a parked window is parked for good.
+        Ctl scratchpad | Out-Null; Start-Sleep -Milliseconds 700
+        Ctl movetoworkspace ((State).activeWorkspace) | Out-Null; Start-Sleep -Milliseconds 800
+        $w = Win
+        Check "movetoworkspace releases it" $w.scratchpad "False"
+        Check "released: not hidden"        $w.hidden     "False"
+
+        # A window that is out of the scratchpad can be made sticky. One that is
+        # still in it cannot, which is why this comes after the release.
+        #
+        # Focused by id rather than by hoping: every action works on whatever
+        # has focus, so a test that does not set it is testing another window.
+        Ctl focus id (Win).id | Out-Null; Start-Sleep -Milliseconds 400
+        Check "focus id targets our window" (Win).focused "True"
+        Ctl togglesticky | Out-Null; Start-Sleep -Milliseconds 500
+        Check "sticky flag set"             (Win).sticky "True"
+        $here = (State).activeWorkspace
+        $there = if ($here -eq 1) { 4 } else { 1 }
+        Ctl workspace $there | Out-Null; Start-Sleep -Milliseconds 900
+        $w = Win
+        Check "sticky followed the switch"  $w.workspace $there
+        Check "sticky stayed visible"       $w.hidden "False"
+        Ctl workspace $here | Out-Null; Start-Sleep -Milliseconds 900
+        Check "sticky came back too"        (Win).workspace $here
+
+        if ($tw -and -not $tw.HasExited) { Stop-Process -Id $tw.Id -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Milliseconds 500
+    } else {
+        Write-Host "  SKIP  scratchpad/sticky (tests\build\testwin.exe not built)" -ForegroundColor Yellow
+    }
+
     Write-Host "`n-- errors are errors"
     & $Ctl frobnicate 2>&1 | Out-Null
     Check "unknown command exits 1"      $LASTEXITCODE 1
