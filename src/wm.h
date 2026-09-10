@@ -195,6 +195,41 @@ public:
     // safe to call from the event path.
     void  UpdateGameMode(bool force = false);
 
+    // ---- state, for anything that needs to report it ---------------------
+    // One flat picture of what the manager currently believes, taken in one
+    // go. The control channel and the settings window both want this, and
+    // handing either of them the live tables would mean handing them pointers
+    // that the next window event invalidates.
+    struct Snapshot {
+        struct Win {
+            HWND hwnd = nullptr;
+            std::wstring title, cls, proc;
+            int  monitor = 0, workspace = 0;
+            bool floating = false, minimized = false, hidden = false;
+            bool fullscreen = false, focused = false, immovable = false;
+            Rect rect;
+        };
+        struct Ws {
+            int  monitor = 0, index = 0, windows = 0;
+            bool active = false;
+            LayoutKind layout = LayoutKind::Dwindle;
+        };
+        struct Mon {
+            int  index = 0, activeWorkspace = 0;
+            bool primary = false;
+            Rect full, work;
+        };
+        std::vector<Win> windows;
+        std::vector<Ws>  workspaces;
+        std::vector<Mon> monitors;
+        LayoutKind activeLayout   = LayoutKind::Dwindle;
+        int        activeMonitor  = 0;
+        int        activeWorkspace = 0;
+        bool       tiling = true, gaps = true, gameMode = false;
+        int        blocked = 0;
+    };
+    Snapshot TakeSnapshot();
+
 private:
     // -- helpers
     ManagedWindow* Find(HWND h);

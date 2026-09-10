@@ -12,6 +12,7 @@
 #include "dragguide.h"
 #include "search.h"
 #include "theme.h"
+#include "ipc.h"
 #include "resource.h"
 #include <commctrl.h>
 
@@ -248,6 +249,152 @@ static void RunAction(const Keybind& kb) {
     TrayUpdate();
     SettingsRefreshStatus();
 }
+
+// ---------------------------------------------------------------- control channel
+// Turns one `--msg` command into its reply. Runs on the UI thread, posted from
+// the pipe thread - see ipc.h for why it is posted and not sent.
+namespace {
+
+std::wstring JsonEscape(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size() + 8);
+    for (wchar_t c : s) {
+        switch (c) {
+            case L'"':  out += L"\\\""; break;
+            case L'\\': out += L"\\\\"; break;
+            case L'\n': out += L"\\n";  break;
+            case L'\r': out += L"\\r";  break;
+            case L'\t': out += L"\\t";  break;
+            default:
+                if (c < 0x20) {
+                    wchar_t esc[8];
+                    swprintf_s(esc, L"\\u%04x", (unsigned)c);
+                    out += esc;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
+
+std::wstring JsonStr(const std::wstring& s) { return L"\"" + JsonEscape(s) + L"\""; }
+std::wstring JsonBool(bool b) { return b ? L"true" : L"false"; }
+std::wstring JsonNum(long long v) { return std::to_wstring(v); }
+
+std::wstring JsonRect(const Rect& r) {
+    return L"{\"x\":" + JsonNum(r.x) + L",\"y\":" + JsonNum(r.y) +
+           L",\"w\":" + JsonNum(r.w) + L",\"h\":" + JsonNum(r.h) + L"}";
+}
+
+std::wstring JsonWindows(const WindowManager::Snapshot& s) {
+    std::wstring out = L"[";
+    for (size_t i = 0; i < s.windows.size(); ++i) {
+        const auto& w = s.windows[i];
+        if (i) out += L",";
+        out += L"{\"id\":" + JsonNum((long long)(uintptr_t)w.hwnd);
+        out += L",\"title\":" + JsonStr(w.title);
+        out += L",\"class\":" + JsonStr(w.cls);
+        out += L",\"process\":" + JsonStr(w.proc);
+        out += L",\"monitor\":" + JsonNum(w.monitor);
+        out += L",\"workspace\":" + JsonNum(w.workspace + 1);
+        out += L",\"floating\":" + JsonBool(w.floating);
+        out += L",\"minimized\":" + JsonBool(w.minimized);
+        out += L",\"hidden\":" + JsonBool(w.hidden);
+        out += L",\"fullscreen\":" + JsonBool(w.fullscreen);
+        out += L",\"immovable\":" + JsonBool(w.immovable);
+        out += L",\"focused\":" + JsonBool(w.focused);
+        out += L",\"rect\":" + JsonRect(w.rect);
+        out += L"}";
+    }
+    return out + L"]";
+}
+
+std::wstring JsonWorkspaces(const WindowManager::Snapshot& s) {
+    std::wstring out = L"[";
+    for (size_t i = 0; i < s.workspaces.size(); ++i) {
+        const auto& w = s.workspaces[i];
+        if (i) out += L",";
+        out += L"{\"number\":" + JsonNum(w.index + 1);
+        out += L",\"monitor\":" + JsonNum(w.monitor);
+        out += L",\"active\":" + JsonBool(w.active);
+        out += L",\"windows\":" + JsonNum(w.windows);
+        out += L",\"layout\":" + JsonStr(LayoutName(w.layout));
+        out += L"}";
+    }
+    return out + L"]";
+}
+
+std::wstring JsonMonitors(const WindowManager::Snapshot& s) {
+    std::wstring out = L"[";
+    for (size_t i = 0; i < s.monitors.size(); ++i) {
+        const auto& m = s.monitors[i];
+        if (i) out += L",";
+        out += L"{\"index\":" + JsonNum(m.index);
+        out += L",\"primary\":" + JsonBool(m.primary);
+        out += L",\"activeWorkspace\":" + JsonNum(m.activeWorkspace + 1);
+        out += L",\"bounds\":" + JsonRect(m.full);
+        out += L",\"workArea\":" + JsonRect(m.work);
+        out += L"}";
+    }
+    return out + L"]";
+}
+
+std::wstring IpcQuery(const std::wstring& what) {
+    if (what == L"version")
+        return L"{\"name\":" + JsonStr(kAppName) + L",\"version\":" + JsonStr(kVersion) +
+               L",\"elevated\":" + JsonBool(SelfIsElevated()) + L"}";
+
+    const WindowManager::Snapshot s = g_wm.TakeSnapshot();
+    if (what == L"windows")    return JsonWindows(s);
+    if (what == L"workspaces") return JsonWorkspaces(s);
+    if (what == L"monitors")   return JsonMonitors(s);
+    if (what == L"state") {
+        return L"{\"version\":" + JsonStr(kVersion) +
+               L",\"tiling\":" + JsonBool(s.tiling) +
+               L",\"gaps\":" + JsonBool(s.gaps) +
+               L",\"gameMode\":" + JsonBool(s.gameMode) +
+               L",\"blocked\":" + JsonNum(s.blocked) +
+               L",\"activeMonitor\":" + JsonNum(s.activeMonitor) +
+               L",\"activeWorkspace\":" + JsonNum(s.activeWorkspace + 1) +
+               L",\"activeLayout\":" + JsonStr(LayoutName(s.activeLayout)) +
+               L",\"monitors\":" + JsonMonitors(s) +
+               L",\"workspaces\":" + JsonWorkspaces(s) +
+               L",\"windows\":" + JsonWindows(s) + L"}";
+    }
+    return L"error: unknown query '" + what + L"'. Try: windows, workspaces, "
+           L"monitors, state, version";
+}
+
+std::wstring IpcCommandHandler(const std::wstring& line) {
+    // Accept both "workspace 3" and the config file's own "workspace, 3", so
+    // a line can be pasted straight from config.ini into --msg and back.
+    std::wstring text = Trim(line);
+    if (text.empty()) return IpcHelpText();
+    if (text == L"help") return IpcHelpText();
+
+    std::wstring verb = text, rest;
+    const size_t cut = text.find_first_of(L" ,\t");
+    if (cut != std::wstring::npos) {
+        verb = Trim(text.substr(0, cut));
+        rest = Trim(text.substr(cut + 1));
+        if (!rest.empty() && rest[0] == L',') rest = Trim(rest.substr(1));
+    }
+    const std::wstring lower = ToLower(verb);
+
+    if (lower == L"get") return IpcQuery(ToLower(rest));
+
+    Keybind kb;
+    if (!ParseAction(verb, rest, &kb.action, &kb.arg, &kb.command))
+        return L"error: unknown command '" + text + L"'. Try: help";
+
+    // Straight through the same dispatch the keyboard uses, so a command and a
+    // shortcut cannot end up doing subtly different things.
+    RunAction(kb);
+    return L"ok";
+}
+
+} // namespace
 
 // ---------------------------------------------------------------- config
 static void LoadConfig() {
@@ -678,6 +825,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ModDragBegin(wp);
             return 0;
 
+        // A `--msg` command, posted by the control channel's pipe thread. It
+        // runs here, from the main loop, for the same reason every other action
+        // does: between passes, never inside one.
+        case WM_AWA_IPC:
+            IpcExecute(wp);
+            return 0;
+
         case WM_AWA_RETILE:
             if (!g_wm.RetilePending()) return 0;    // the timer beat us to it
             g_wm.RetileNow();
@@ -864,6 +1018,47 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS*) {
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
     using namespace awa;
 
+    // `--msg` is a client, not a second copy of the application: it has to be
+    // handled before the single-instance mutex, because the whole point is to
+    // talk to the instance that already holds it.
+    //
+    // `--config <dir>` has to be read here too, and for a stricter reason: the
+    // settings folder is resolved once, on first use, and half of startup uses
+    // it. Anything later is too late.
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv) {
+            std::wstring command;
+            bool isClient = false;
+            for (int i = 1; i < argc; ++i) {
+                const std::wstring a = argv[i];
+                if ((a == L"--config" || a == L"-c") && i + 1 < argc) {
+                    SetConfigDirOverride(argv[i + 1]);
+                    ++i;
+                    continue;
+                }
+                if (a == L"--msg" || a == L"-m") {
+                    isClient = true;
+                    // Everything after it is the command, so both
+                    // `--msg "workspace 3"` and `--msg workspace 3` work.
+                    for (int j = i + 1; j < argc; ++j) {
+                        if (!command.empty()) command += L' ';
+                        command += argv[j];
+                    }
+                    break;
+                }
+                if (a == L"--help" || a == L"-h" || a == L"/?") {
+                    isClient = true;
+                    command  = L"help";
+                    break;
+                }
+            }
+            LocalFree(argv);
+            if (isClient) return IpcClientMain(command);
+        }
+    }
+
     HANDLE mutex = CreateMutexW(nullptr, TRUE, kMutexName);
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
         if (HWND existing = FindWindowW(kWndClass, nullptr))
@@ -931,6 +1126,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
     // index walk is the slower of the two and runs on its own thread.
     LauncherInit(inst, &g_cfg);
     SearchInit(&g_cfg);
+    // Last, so a command arriving on the first millisecond finds a manager
+    // that is actually ready to answer it.
+    IpcStart(g_wnd, IpcCommandHandler);
     MigrateLegacyAutostart();
     RepairAutostartPath();
     if (g_cfg.focusFollowsMouse)  SetTimer(g_wnd, TIMER_MOUSE, 120, nullptr);
@@ -955,6 +1153,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
     }
 
     g_shuttingDown = true;
+    IpcStop();          // before the window goes; in-flight commands finish first
     if (g_powerNotify) {
         UnregisterPowerSettingNotification(g_powerNotify);
         g_powerNotify = nullptr;

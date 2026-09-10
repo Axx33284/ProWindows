@@ -111,8 +111,8 @@ static bool ParseModMask(const std::wstring& s, UINT* out) {
 }
 
 // ---------------------------------------------------------------- action names
-static bool ParseAction(const std::wstring& name, const std::wstring& argText,
-                        Action* act, int* arg, std::wstring* command) {
+bool ParseAction(const std::wstring& name, const std::wstring& argText,
+                 Action* act, int* arg, std::wstring* command) {
     std::wstring a = ToLower(Trim(name));
     std::wstring v = ToLower(Trim(argText));
     *arg = 0;

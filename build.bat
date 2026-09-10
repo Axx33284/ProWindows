@@ -95,6 +95,7 @@ cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UN
        "%ROOT%src\appicon.cpp" ^
        "%ROOT%src\launcher.cpp" ^
        "%ROOT%src\search.cpp" ^
+       "%ROOT%src\ipc.cpp" ^
        "%ROOT%src\settings.cpp" ^
        "%ROOT%src\settings_keys.cpp" ^
        "%ROOT%src\settings_search.cpp" ^
@@ -105,6 +106,24 @@ cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UN
              "%OUTDIR%\app.res"
 
 set CLERR=%errorlevel%
+
+REM ---------------------------------------------------------------- control CLI
+REM  prowindowsctl.exe - the console front end. Separate executable because a
+REM  /SUBSYSTEM:WINDOWS binary has no stdout, so `ProWindows.exe --msg` can
+REM  print to a terminal but cannot be piped or captured. Same code underneath.
+if "%CLERR%"=="0" (
+    echo       plus prowindowsctl.exe...
+    cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UNICODE ^
+           /O1 /Os /Oi /Gy /MT /GR- ^
+           "%ROOT%src\ctl_main.cpp" ^
+           "%ROOT%src\ipc.cpp" ^
+           "%ROOT%src\common.cpp" ^
+           /Fe:"prowindowsctl.exe" ^
+           /link /OPT:REF /OPT:ICF /INCREMENTAL:NO /MANIFEST:NO ^
+                 /SUBSYSTEM:CONSOLE
+    set CLERR=%errorlevel%
+)
+
 del /q *.obj >nul 2>&1
 popd
 

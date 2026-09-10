@@ -2420,6 +2420,70 @@ void WindowManager::ActWorkspaceRelative(int delta, bool onlyUsed) {
     }
 }
 
+WindowManager::Snapshot WindowManager::TakeSnapshot() {
+    Snapshot s;
+    s.activeLayout    = ActiveLayout();
+    s.activeMonitor   = activeMonitor_;
+    s.activeWorkspace = ActiveWorkspace();
+    s.tiling          = tilingEnabled_;
+    s.gaps            = gapsEnabled_;
+    s.gameMode        = gameMode_;
+    s.blocked         = (int)blocked_.size();
+
+    for (size_t mi = 0; mi < monitors_.size(); ++mi) {
+        const Monitor& m = monitors_[mi];
+        Snapshot::Mon mon;
+        mon.index           = (int)mi;
+        mon.activeWorkspace = m.active;
+        mon.primary         = m.info.primary;
+        mon.full            = m.info.full;
+        mon.work            = m.info.work;
+        s.monitors.push_back(mon);
+
+        for (size_t wi = 0; wi < m.workspaces.size(); ++wi) {
+            Snapshot::Ws ws;
+            ws.monitor = (int)mi;
+            ws.index   = (int)wi;
+            ws.active  = ((int)wi == m.active);
+            ws.layout  = m.workspaces[wi].layout;
+            ws.windows = 0;      // counted below, from `managed_`
+            s.workspaces.push_back(ws);
+        }
+    }
+
+    for (const auto& kv : managed_) {
+        const ManagedWindow& mw = kv.second;
+        Snapshot::Win w;
+        w.hwnd       = kv.first;
+        w.title      = WindowTitle(kv.first);
+        w.cls        = WindowClass(kv.first);
+        w.proc       = ProcessName(kv.first);
+        w.monitor    = mw.monitor;
+        w.workspace  = mw.workspace;
+        w.floating   = mw.floating;
+        w.minimized  = mw.minimized;
+        w.hidden     = mw.hidden;
+        w.fullscreen = mw.fullscreen;
+        w.immovable  = mw.immovable;
+        w.focused    = (kv.first == focused_);
+        w.rect       = VisibleRect(kv.first);
+        s.windows.push_back(w);
+
+        for (auto& ws : s.workspaces)
+            if (ws.monitor == mw.monitor && ws.index == mw.workspace) { ++ws.windows; break; }
+    }
+
+    // Stable output, so a caller diffing two snapshots sees real changes
+    // rather than unordered_map iteration order.
+    std::sort(s.windows.begin(), s.windows.end(),
+              [](const Snapshot::Win& a, const Snapshot::Win& b) {
+                  if (a.monitor   != b.monitor)   return a.monitor   < b.monitor;
+                  if (a.workspace != b.workspace) return a.workspace < b.workspace;
+                  return a.hwnd < b.hwnd;
+              });
+    return s;
+}
+
 void WindowManager::PublishManagedWindows() const {
     std::vector<HWND> live;
     live.reserve(managed_.size());

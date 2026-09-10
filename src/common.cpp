@@ -2,6 +2,11 @@
 #include <shlobj.h>
 #include <cstdarg>
 
+// ComputeConfigDir asks the shell where %APPDATA% is, so anything that links
+// common.cpp needs these - including prowindowsctl, which links nothing else.
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "shell32.lib")
+
 namespace awa {
 
 // ---------------------------------------------------------------- string utils
@@ -88,7 +93,18 @@ static void MigrateLegacySettings(const std::wstring& roaming,
     }
 }
 
+// Set by --config before anything reads ConfigDir(). Not guarded: it is
+// written once on the way in, before any other thread exists.
+static std::wstring g_configOverride;
+
+void SetConfigDirOverride(const std::wstring& dir) { g_configOverride = dir; }
+
 static std::wstring ComputeConfigDir() {
+    if (!g_configOverride.empty()) {
+        CreateDirectoryW(g_configOverride.c_str(), nullptr);
+        return g_configOverride;
+    }
+
     PWSTR roaming = nullptr;
     std::wstring dir;
     std::wstring roamingRoot;

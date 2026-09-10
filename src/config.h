@@ -276,6 +276,14 @@ struct Config {
 
 bool ParseKeySpec(const std::wstring& spec, UINT defaultMod, UINT* mods, UINT* vk);
 
+// Turns an action name and its argument - "workspace" and "3" - into something
+// the manager can run. Shared by the config file's `bind =` lines and by the
+// control channel, so `ProWindows.exe --msg "workspace 3"` and
+// `bind = alt+3, workspace, 3` cannot drift into meaning different things.
+// That is the same arrangement i3 has with i3-msg, and the reason it works.
+bool ParseAction(const std::wstring& name, const std::wstring& argText,
+                 Action* act, int* arg, std::wstring* command);
+
 // Exclusions that are always in force (shell surfaces, overlays, and windows
 // that simply cannot be tiled sensibly). Kept apart from the user's own lists
 // so the settings window shows only what the user added, and so saving the

@@ -50,6 +50,12 @@ enum : UINT {
     // The mod-drag mouse hook saw its chord. wParam: 1 move, 2 resize. The
     // hook does nothing else - see moddrag.h.
     WM_AWA_MODDRAG   = WM_APP + 7,
+    // A control-channel command is waiting. wParam is the request token; see
+    // ipc.h. Deliberately POSTED rather than sent: a sent message would be
+    // dispatched while the manager is parked inside a cross-process call, and
+    // running a command there is the reentrancy this codebase just stopped
+    // doing. Posted means it runs from the main loop, between passes.
+    WM_AWA_IPC       = WM_APP + 8,
 };
 
 // Timers
@@ -117,6 +123,18 @@ std::vector<std::wstring> SplitList(const std::wstring& s, wchar_t sep = L',');
 // %APPDATA%\ProWindows (created on first use). Returned by reference: it is
 // resolved once, thread-safely, and never changes for the life of the process.
 const std::wstring& ConfigDir();
+
+// Points the settings folder somewhere else. Must be called before anything
+// asks for ConfigDir, which in practice means the first few lines of wWinMain -
+// after that the answer is already cached and this does nothing.
+//
+// This exists so the tests can run against a throwaway folder instead of the
+// real settings. %APPDATA% cannot be used for that: the folder is resolved with
+// SHGetKnownFolderPath, which reads the user's profile rather than the
+// environment, so overriding the variable looks like it works and does not.
+// It is a reasonable thing to want anyway - a portable install on a stick, or
+// two configurations side by side.
+void SetConfigDirOverride(const std::wstring& dir);
 std::wstring ConfigPath();         // ...\config.ini
 std::wstring LogPath();            // ...\log.txt
 std::wstring ExePath();
