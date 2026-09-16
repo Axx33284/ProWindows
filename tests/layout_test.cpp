@@ -207,17 +207,16 @@ int main() {
     }
 
     // ---------------------------------------------------------------- 9
-    // The case geometry cannot fix, recorded so nobody wastes a day trying.
+    // The case that used to be recorded here as "geometry cannot fix".
     //
     // Three windows in dwindle sit in nested VERTICAL splits, so every one of
     // them spans the full height. A window with a maximum HEIGHT - a file-copy
-    // dialog is the real example - cannot be satisfied by moving a split,
-    // because there is no horizontal split to move. It will sit in a tall slot
-    // with empty space under it however clever the solver is.
+    // dialog is the real example - could not be satisfied by moving a split,
+    // because there was no horizontal split to move: it sat in a tall slot
+    // with empty desktop under it.
     //
-    // That is why wm.cpp drops such a window out of tiling once it has watched
-    // it refuse the space, and why the shell's transient dialog classes float
-    // by default. The layout's only job here is to remain a valid tiling.
+    // The split it sits under is now turned to run the other way, so the
+    // height it cannot use goes to its sibling instead of to nobody.
     {
         std::vector<HWND> order{ W(0), W(1), W(2) };
         ConsMap cons;
@@ -227,6 +226,74 @@ int main() {
         Plan p = Run(LayoutKind::Dwindle, work, order, &cons);
         CheckSane(p, work, "dwindle/cross-axis");
         CheckCovers(p, work, "dwindle/cross-axis");
+        Check(p.Of(W(2)).h <= 200,
+              "dwindle/cross-axis: the short window is not given height it cannot use");
+        Check(p.Of(W(1)).h >= 1080 - 200,
+              "dwindle/cross-axis: its sibling takes the height back");
+        Check(p.Of(W(1)).w == p.Of(W(2)).w,
+              "dwindle/cross-axis: the pair is stacked, not side by side");
+    }
+
+    // ---------------------------------------------------------------- 9b
+    // Turning a split is only ever done to gain something. A wide window with
+    // a maximum WIDTH already sits in the right kind of split; nothing may
+    // move. And a board with no limits at all is never touched (see 8).
+    {
+        std::vector<HWND> order{ W(0), W(1) };
+        ConsMap cons;
+        SizeLimits narrow; narrow.maxW = 300;
+        cons[W(1)] = narrow;
+
+        Plan p = Run(LayoutKind::Dwindle, work, order, &cons);
+        CheckSane(p, work, "dwindle/keep");
+        Check(p.Of(W(0)).y == p.Of(W(1)).y && p.Of(W(1)).w <= 300,
+              "dwindle/keep: a split already running the right way is left alone");
+    }
+
+    // ---------------------------------------------------------------- 9c
+    // Two windows that cannot stand side by side but can stack: the split is
+    // turned so that both get their minimum rather than both overflowing.
+    {
+        std::vector<HWND> order{ W(0), W(1) };
+        ConsMap cons;
+        SizeLimits wide; wide.minW = 1200;
+        cons[W(0)] = wide;
+        cons[W(1)] = wide;
+
+        Plan p = Run(LayoutKind::Dwindle, work, order, &cons);
+        CheckSane(p, work, "dwindle/turn-to-fit");
+        CheckCovers(p, work, "dwindle/turn-to-fit");
+        Check(p.Of(W(0)).w >= 1200 && p.Of(W(1)).w >= 1200,
+              "dwindle/turn-to-fit: both get their minimum width by stacking");
+        Check(SqueezedWindows(order, p.v, cons).empty(),
+              "dwindle/turn-to-fit: nothing is reported squeezed");
+    }
+
+    // ---------------------------------------------------------------- 9d
+    // And when neither way round fits, the plan says so, so the caller can
+    // take a window out rather than let two of them overlap on screen.
+    {
+        std::vector<HWND> order{ W(0), W(1) };
+        ConsMap cons;
+        SizeLimits huge; huge.minW = 1200; huge.minH = 700;
+        cons[W(0)] = huge;
+        cons[W(1)] = huge;
+
+        Plan p = Run(LayoutKind::Dwindle, work, order, &cons);
+        CheckSane(p, work, "dwindle/squeezed");
+        const std::vector<HWND> squeezed = SqueezedWindows(order, p.v, cons);
+        Check(!squeezed.empty(), "dwindle/squeezed: an impossible pair is reported");
+
+        // Without one of them, the other has the board and is no longer squeezed.
+        std::vector<HWND> alone{ W(0) };
+        Plan q = Run(LayoutKind::Dwindle, work, alone, &cons);
+        Check(SqueezedWindows(alone, q.v, cons).empty(),
+              "dwindle/squeezed: on its own, it fits");
+
+        // A window the plan left out entirely counts as squeezed too.
+        std::vector<HWND> ghost{ W(0), W(9) };
+        Check(SqueezedWindows(ghost, q.v, cons).size() == 1,
+              "squeezed: an unplaced window is reported");
     }
 
     // ---------------------------------------------------------------- 10
@@ -269,15 +336,27 @@ int main() {
         Check(plan.Of(W(2)).w <= 406, "live board: the capped window is still capped");
 
         // The point of the case: nobody is left on the floor while a sibling
-        // hoards the slack.
-        int narrowest = 1 << 20, widest = 0;
+        // hoards the slack. Every ordinary window gets comfortably more than
+        // its minimum on both axes.
+        int narrowest = 1 << 20;
+        bool roomy = true;
         for (const auto& e : plan.v) {
             if (e.first == W(1)) continue;          // the big one is meant to be big
             narrowest = (std::min)(narrowest, e.second.w);
-            widest    = (std::max)(widest, e.second.w);
+            const SizeLimits& l = cons[e.first];
+            if (e.second.w < l.minW * 2 || e.second.h < l.minH * 2) roomy = false;
         }
         Check(narrowest >= 200, "live board: no window is squeezed to its bare minimum");
-        Check(widest <= narrowest * 3, "live board: the slack is shared, not hoarded");
+        Check(roomy, "live board: the slack is shared, not hoarded");
+
+        // The capped dialog used to stand in a full-height column and leave
+        // 406 x 755 pixels of bare desktop under it. Turning the split it sits
+        // under is what this board was kept to show could not be done; now
+        // its unusable share is a fraction of that.
+        const Rect d = plan.Of(W(2));
+        const long long unusable = (long long)d.w * d.h -
+            (long long)(std::min)(d.w, 406) * (std::min)(d.h, 253);
+        Check(unusable < 100000, "live board: the capped dialog wastes far less of its slot");
     }
 
     // ------------------------------------------------------------------ 11

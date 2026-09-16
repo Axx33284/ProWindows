@@ -185,6 +185,35 @@ const MonitorSkin kSkins[] = {
       RGB(192, 143, 190), RGB(235, 111, 146), RGB(246, 193, 119),
       RGB(156, 207, 216), RGB(235, 188, 186) }
 },
+// The two bare skins have no panel: they are the look of an in-game overlay,
+// text straight on the screen with a shadow under it. They are meant for the
+// OSD and HUD styles and work with every other style too, just without the
+// glass. The panel colours are still filled in for the settings-page swatches
+// and the fallback painter.
+{
+    L"afterburner", L"Afterburner",
+    L"No panel. RivaTuner's default orange text, the in-game OSD look.",
+    RGB(0, 0, 0), RGB(0, 0, 0), RGB(0, 0, 0), 0, 0,
+    RGB(255, 160, 0), RGB(214, 134, 0), RGB(255, 160, 0),
+    RGB(255, 160, 0), 60, 40, 235, 0,
+    false,   // load tint: one hue, like the real thing
+    { RGB(255, 160, 0), RGB(255, 160, 0), RGB(255, 160, 0),
+      RGB(255, 160, 0), RGB(255, 160, 0), RGB(255, 160, 0),
+      RGB(255, 160, 0), RGB(255, 160, 0) },
+    true,    // bare
+},
+{
+    L"benchmark", L"Benchmark",
+    L"No panel. Green GPU, blue CPU, white numbers - the benchmark-video look.",
+    RGB(0, 0, 0), RGB(0, 0, 0), RGB(0, 0, 0), 0, 0,
+    RGB(225, 225, 225), RGB(170, 170, 170), RGB(255, 255, 255),
+    RGB(255, 255, 255), 60, 44, 235, 0,
+    true,    // load tint
+    { RGB(0, 190, 255), RGB(235, 235, 235), RGB(118, 210, 0),
+      RGB(118, 210, 0), RGB(0, 190, 255), RGB(118, 210, 0),
+      RGB(255, 200, 60), RGB(255, 120, 200) },
+    true,    // bare
+},
 };
 
 constexpr int kSkinCount = (int)(sizeof(kSkins) / sizeof(kSkins[0]));
@@ -207,6 +236,10 @@ const MonitorStyleInfo kStyles[] = {
       L"Each metric on its own raised card, with a coloured rail and a graph." },
     { L"ticker", L"Ticker",
       L"A single thin line - a dot, a name and a number each. Sits on an edge." },
+    { L"osd", L"OSD",
+      L"MSI Afterburner's on-screen display: monospace text, one line each." },
+    { L"hud", L"HUD",
+      L"The benchmark-video HUD: one line per device, all its readings across." },
 };
 
 constexpr int kStyleCount = (int)(sizeof(kStyles) / sizeof(kStyles[0]));
@@ -331,7 +364,8 @@ int MonitorStyleIndexById(const std::wstring& id) {
 
 bool MonitorStyleUsesGraphs(int style) {
     return style == MON_STYLE_ROWS || style == MON_STYLE_GRAPH ||
-           style == MON_STYLE_CARDS;
+           style == MON_STYLE_CARDS || style == MON_STYLE_OSD ||
+           style == MON_STYLE_HUD;
 }
 
 } // namespace awa

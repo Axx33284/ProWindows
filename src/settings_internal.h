@@ -72,4 +72,8 @@ INT_PTR CALLBACK PageGeneralProc(HWND, UINT, WPARAM, LPARAM);
 void PageGeneralLoad(HWND page);
 void PageGeneralSave(HWND page);
 
+INT_PTR CALLBACK PageClockProc(HWND, UINT, WPARAM, LPARAM);
+void PageClockLoad(HWND page);
+void PageClockSave(HWND page);
+
 } // namespace awa

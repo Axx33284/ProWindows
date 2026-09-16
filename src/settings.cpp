@@ -35,6 +35,7 @@ static Page g_pages[] = {
     { IDD_PAGE_APPS,      L"Open apps",      PageAppsProc,      nullptr },
     { IDD_PAGE_SEARCH,    L"Search",         PageSearchProc,    nullptr },
     { IDD_PAGE_MONITOR,   L"Monitor",        PageMonitorProc,   nullptr },
+    { IDD_PAGE_CLOCK,     L"Clock",          PageClockProc,     nullptr },
     { IDD_PAGE_GENERAL,   L"General",        PageGeneralProc,   nullptr },
 };
 // Keep the table and the PageIndex names in step.
@@ -332,7 +333,7 @@ void DrawLayoutPreview(const DRAWITEMSTRUCT* dis, LayoutKind kind) {
     // The preview is a miniature desktop, so it uses the app's own palette
     // rather than the system one - system colours are light here.
     FillRect(dc, &box, theme::BrushBg());
-    theme::RoundRect(dc, box, 6, theme::Bg, theme::Border, true);
+    theme::Chamfer(dc, box, 8, theme::Bg, 255, theme::Border, 255);
 
     const int pad = 6;
     RECT area = { box.left + pad, box.top + pad, box.right - pad, box.bottom - pad };
@@ -398,9 +399,8 @@ void DrawLayoutPreview(const DRAWITEMSTRUCT* dis, LayoutKind kind) {
             r.bottom -= gap;
         }
         const bool focused = (kind == LayoutKind::Monocle) ? (i == count - 1) : (i == 0);
-        theme::RoundRect(dc, r, 3,
-                         focused ? theme::Accent : theme::PanelAlt,
-                         focused ? theme::AccentHover : theme::Border, true);
+        theme::Chamfer(dc, r, 3, focused ? theme::Accent : theme::PanelAlt, 255,
+                       focused ? theme::AccentHover : theme::Border, 255);
     }
 }
 
@@ -843,6 +843,7 @@ void LoadAllPages() {
     if (g_pages[PAGE_APPS].hwnd)      PageAppsLoad(g_pages[PAGE_APPS].hwnd);
     if (g_pages[PAGE_SEARCH].hwnd)    PageSearchLoad(g_pages[PAGE_SEARCH].hwnd);
     if (g_pages[PAGE_MONITOR].hwnd)   PageMonitorLoad(g_pages[PAGE_MONITOR].hwnd);
+    if (g_pages[PAGE_CLOCK].hwnd)     PageClockLoad(g_pages[PAGE_CLOCK].hwnd);
     if (g_pages[PAGE_GENERAL].hwnd)   PageGeneralLoad(g_pages[PAGE_GENERAL].hwnd);
 }
 
@@ -854,6 +855,7 @@ void ApplyNow() {
     if (g_pages[PAGE_APPS].hwnd)      PageAppsSave(g_pages[PAGE_APPS].hwnd);
     if (g_pages[PAGE_SEARCH].hwnd)    PageSearchSave(g_pages[PAGE_SEARCH].hwnd);
     if (g_pages[PAGE_MONITOR].hwnd)   PageMonitorSave(g_pages[PAGE_MONITOR].hwnd);
+    if (g_pages[PAGE_CLOCK].hwnd)     PageClockSave(g_pages[PAGE_CLOCK].hwnd);
     if (g_pages[PAGE_GENERAL].hwnd)   PageGeneralSave(g_pages[PAGE_GENERAL].hwnd);
 
     const Config snapshot = AppConfig();
@@ -916,20 +918,11 @@ void SettingsRefresh() {
 // onto every child, which used to wipe the title font out again a line after it
 // was set.
 static void ApplyShellChrome(HWND dlg) {
-    if (HFONT base = (HFONT)SendMessageW(dlg, WM_GETFONT, 0, 0)) {
-        LOGFONTW lf{};
-        if (GetObjectW(base, sizeof(lf), &lf)) {
-            lf.lfWeight = FW_SEMIBOLD;
-            lf.lfHeight = (LONG)(lf.lfHeight * 1.35);
-            HFONT fresh = CreateFontIndirectW(&lf);
-            if (fresh) {
-                SendDlgItemMessageW(dlg, IDC_TITLE, WM_SETFONT, (WPARAM)fresh, TRUE);
-                // Only once the control has let go of the old one.
-                if (g_titleFont) DeleteObject(g_titleFont);
-                g_titleFont = fresh;
-            }
-        }
-    }
+    // The window's name, in the display face the headings use, as capitals.
+    // The theme owns that font, so nothing here has to be freed.
+    SendDlgItemMessageW(dlg, IDC_TITLE, WM_SETFONT, (WPARAM)theme::FontDisplay(), TRUE);
+    SetDlgItemTextW(dlg, IDC_TITLE, theme::Caps(kAppName).c_str());
+    if (g_titleFont) { DeleteObject(g_titleFont); g_titleFont = nullptr; }
 
     // The strip has to reach past the icon and the status line. Taking that
     // from the tab control's own position keeps it right at every DPI and font
@@ -963,6 +956,10 @@ static INT_PTR CALLBACK ShellProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
             theme::PrepareDialog(dlg);
             theme::DarkTitleBar(dlg);
             ApplyShellChrome(dlg);
+            // The version in the title bar: several copies of this program
+            // can live side by side, and the window is the only way to tell
+            // which one is running.
+            SetWindowTextW(dlg, (std::wstring(kAppName) + L" " + kVersion).c_str());
 
             HWND tabs = GetDlgItem(dlg, IDC_TABS);
 

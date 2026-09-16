@@ -41,7 +41,7 @@ cl.exe /nologo /std:c++17 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UNICODE ^
        "%ROOT%src\config.cpp" ^
        "%ROOT%src\defaults.cpp" ^
        "%ROOT%src\winutil.cpp" ^
-       "%ROOT%src\montheme.cpp" ^
+       "%ROOT%src\montheme.cpp" "%ROOT%src\clocktheme.cpp" ^
        /Fe:layout_test.exe ^
        /link /SUBSYSTEM:CONSOLE user32.lib shell32.lib ole32.lib dwmapi.lib ^
        advapi32.lib shlwapi.lib

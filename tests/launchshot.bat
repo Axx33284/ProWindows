@@ -33,7 +33,7 @@ cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UN
     "%ROOT%\tests\launchshot.cpp" ^
     "%ROOT%\src\launcher.cpp" "%ROOT%\src\appicon.cpp" "%ROOT%\src\search.cpp" ^
     "%ROOT%\src\theme.cpp" "%ROOT%\src\winutil.cpp" "%ROOT%\src\common.cpp" ^
-    "%ROOT%\src\config.cpp" "%ROOT%\src\defaults.cpp" "%ROOT%\src\montheme.cpp" ^
+    "%ROOT%\src\config.cpp" "%ROOT%\src\defaults.cpp" "%ROOT%\src\montheme.cpp" "%ROOT%\src\clocktheme.cpp" ^
     /Fe:"%ROOT%\tests\build\launchshot.exe" ^
     /link /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1

@@ -27,6 +27,7 @@ struct BspNode {
     // switched between windowed modes.
     int minW = 0, minH = 0, maxW = kNoLimit, maxH = kNoLimit;
     int leaves = 1;                // windows in this subtree
+    bool constrained = false;      // any leaf below has a limit worth honouring
 
     bool IsLeaf() const { return a == nullptr && b == nullptr; }
 };
@@ -106,6 +107,14 @@ public:
     // moved off its ratio only as far as the constraints demand, so a window
     // that cannot shrink takes the space from its sibling instead of spilling
     // over it, and one that cannot grow hands its surplus back.
+    //
+    // A split can only hand surplus back *along* its own axis. A window with a
+    // maximum height sitting in a side-by-side split has nowhere to put the
+    // height it cannot use, and no ratio fixes that - so this pass also turns
+    // a split the other way round when doing so lets the windows under it use
+    // more of the screen, or fit at all. The tree keeps the orientation it
+    // chose: `vertical` is what the layout actually did, not only what was
+    // asked for, and `Describe` and `ToggleSplit` see the same thing you do.
     void Compute(const Rect& area, const ConsMap* cons,
                  std::vector<std::pair<HWND, Rect>>* out);
 
@@ -145,5 +154,15 @@ void ComputeLayout(const LayoutParams& p,
                    BspTree& tree,
                    std::vector<std::pair<HWND, Rect>>* out,
                    const ConsMap* cons = nullptr);
+
+// The windows a plan could not give what they need: a slot narrower or
+// shorter than the window's own minimum, or no slot at all. Every one of these
+// is a window that will refuse its rect and end up lying across a neighbour,
+// which is the one thing a tiling must never do - so the caller takes them out
+// of the tiling and lays the board out again without them. Both arguments are
+// in window pixels: `plan` after the gaps are taken off, `cons` as measured.
+std::vector<HWND> SqueezedWindows(const std::vector<HWND>& order,
+                                  const std::vector<std::pair<HWND, Rect>>& plan,
+                                  const ConsMap& cons);
 
 } // namespace awa

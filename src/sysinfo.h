@@ -51,18 +51,48 @@ struct SampleWants {
     bool topApps = false;
 };
 
+// Threading. Sample() and Close() belong to one thread - the overlay's
+// sampling thread, see monitor.cpp - and are never called from anywhere else.
+// Configure() may be called from any thread: it hands the new wants over
+// under a lock and they take effect at the start of the next Sample().
+//
+// The reason there is a sampling thread at all: PdhCollectQueryData on the
+// GPU Engine wildcard counter enumerates every process's GPU engines and is
+// not bounded - tens of milliseconds is normal, and opening the counter for
+// the first time after logon can take seconds while the counter provider
+// starts up. Doing that on the UI thread meant a stall in every animation
+// that happened to overlap a sample, and a frozen tray icon at startup.
+//
+// Temperatures are not this class's business: thermal.* runs its own thread
+// and is controlled from the UI thread by monitor.cpp. Sample() only reads
+// what that thread last published.
 class SystemSampler {
 public:
-    ~SystemSampler();
+    SystemSampler();
+    // Deliberately does not close anything. This is a static object, so the
+    // destructor runs at process exit, possibly while an abandoned sampling
+    // thread is still inside a PDH call; closing the query under it would
+    // fault. The thread closes what it opened on its own way out, and the OS
+    // reclaims anything that thread never got to.
+    ~SystemSampler() = default;
 
+    // Any thread. Takes effect on the next Sample().
     void Configure(const SampleWants& want);
 
-    // Reads every configured counter. Cheap enough for a once-a-second timer.
+    // Sampling thread only. Reads every configured counter.
     void Sample(SystemLoad* out);
 
+    // Sampling thread only. Releases the counters; the next Sample() reopens
+    // whatever is still wanted.
     void Close();
 
 private:
+    // Handed over by Configure(), picked up by Sample().
+    CRITICAL_SECTION lock_;
+    SampleWants pending_;
+    bool        pendingDirty_ = false;
+    void ApplyPending();
+
     SampleWants want_;
     bool openedPdh_ = false;
 

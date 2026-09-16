@@ -38,7 +38,7 @@ popd
 
 cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UNICODE ^
     /O2 /MT /Fo:"%ROOT%\tests\build\ui\\" ^
-    "%ROOT%\tests\uishot.cpp" ^
+    "%ROOT%\tests\rowdragshot.cpp" ^
     "%ROOT%\src\settings.cpp" "%ROOT%\src\settings_keys.cpp" ^
     "%ROOT%\src\settings_search.cpp" "%ROOT%\src\theme.cpp" ^
     "%ROOT%\src\monitor.cpp" "%ROOT%\src\monpaint.cpp" "%ROOT%\src\montheme.cpp" ^
@@ -48,11 +48,11 @@ cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UN
     "%ROOT%\src\wm.cpp" "%ROOT%\src\layout.cpp" "%ROOT%\src\dragguide.cpp" "%ROOT%\src\moddrag.cpp" ^
     "%ROOT%\src\winutil.cpp" "%ROOT%\src\common.cpp" ^
     "%ROOT%\src\config.cpp" "%ROOT%\src\defaults.cpp" "%ROOT%\src\hotkeys.cpp" ^
-    /Fe:"%ROOT%\tests\build\uishot.exe" ^
+    /Fe:"%ROOT%\tests\build\rowdragshot.exe" ^
     /link /SUBSYSTEM:CONSOLE "%ROOT%\tests\build\ui\app.res"
 if errorlevel 1 exit /b 1
 
-"%ROOT%\tests\build\uishot.exe" "%ROOT%\tests\shots"
+"%ROOT%\tests\build\rowdragshot.exe" "%ROOT%\tests\shots"
 exit /b %errorlevel%
 
 :try

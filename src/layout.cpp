@@ -313,6 +313,7 @@ void BspTree::MeasureRec(BspNode* n, const ConsMap* cons) {
         // window visible enough to drag out of the way.
         n->minW = n->minH = kMinLeafPx;
         n->maxW = n->maxH = kNoLimit;
+        n->constrained = false;
         if (cons && n->hwnd) {
             auto it = cons->find(n->hwnd);
             if (it != cons->end()) {
@@ -320,6 +321,7 @@ void BspTree::MeasureRec(BspNode* n, const ConsMap* cons) {
                 n->minH = (std::max)(kMinLeafPx, it->second.minH);
                 n->maxW = it->second.maxW;
                 n->maxH = it->second.maxH;
+                n->constrained = it->second.constrained();
             }
         }
         if (n->maxW < n->minW) n->maxW = n->minW;
@@ -330,7 +332,8 @@ void BspTree::MeasureRec(BspNode* n, const ConsMap* cons) {
 
     MeasureRec(n->a, cons);
     MeasureRec(n->b, cons);
-    n->leaves = n->a->leaves + n->b->leaves;
+    n->leaves      = n->a->leaves + n->b->leaves;
+    n->constrained = n->a->constrained || n->b->constrained;
 
     const auto addSat = [](int x, int y) {
         const long long sum = (long long)x + (long long)y;
@@ -406,18 +409,93 @@ int ConstrainedSplit(int total, float ratio, int minA, int maxA, int minB, int m
     return (std::max)(lo, (std::min)(hi, first));
 }
 
+// The two child rects a split of `n` produces inside `r`, the way the
+// constrained walk would cut it if the split ran `vertical`. One place, so the
+// walk and the judgement below cannot disagree about where the cut lands.
+void CutNode(const BspNode* n, const Rect& r, bool vertical, Rect* ra, Rect* rb) {
+    if (vertical) {
+        int first = ConstrainedSplit(r.w, n->ratio,
+                                     n->a->minW, n->a->maxW,
+                                     n->b->minW, n->b->maxW,
+                                     n->a->leaves, n->b->leaves);
+        first = (std::max)(1, (std::min)(r.w - 1, first));
+        *ra = Rect(r.x, r.y, first, r.h);
+        *rb = Rect(r.x + first, r.y, r.w - first, r.h);
+    } else {
+        int first = ConstrainedSplit(r.h, n->ratio,
+                                     n->a->minH, n->a->maxH,
+                                     n->b->minH, n->b->maxH,
+                                     n->a->leaves, n->b->leaves);
+        first = (std::max)(1, (std::min)(r.h - 1, first));
+        *ra = Rect(r.x, r.y, r.w, first);
+        *rb = Rect(r.x, r.y + first, r.w, r.h - first);
+    }
+}
+
+// ---------------------------------------------------------------- orientation
+// What a subtree makes of a slot: does everything in it get its minimum, and
+// how many pixels of the slot does it have no use for.
+//
+// A window with a maximum size uses min(slot, max) of each axis and leaves the
+// rest as bare desktop. A split can only give that surplus to the sibling if
+// it runs along the limited axis; across it, the surplus is simply lost. The
+// only cure is to run the split the other way, and that is a decision the
+// tree cannot make for itself - it was built by "split the longer edge",
+// which knows nothing about limits. So the constrained walk judges each split
+// both ways round, in the slot it actually has, and takes the better one.
+struct Fit {
+    bool      feasible = true;   // every minimum below is met
+    long long waste    = 0;      // pixels of the slot nothing below can use
+};
+
+bool BetterFit(const Fit& x, const Fit& y) {       // strictly better
+    if (x.feasible != y.feasible) return x.feasible;
+    return x.waste < y.waste;
+}
+
+// The judgement looks a few levels down - a child is only as good as the
+// choice *it* will get to make - and past that trusts the aggregate limits,
+// which are a fair guess and keep the cost bounded on a deep dwindle spiral.
+constexpr int kJudgeDepth = 3;
+
+Fit JudgeSplit(const BspNode* n, const Rect& r, bool vertical, int depth);
+
+Fit JudgeNode(const BspNode* n, const Rect& r, int depth) {
+    if (n->IsLeaf() || depth <= 0 || !n->constrained) {
+        Fit f;
+        f.feasible = (n->minW <= r.w && n->minH <= r.h);
+        const long long useW = (std::min)((long long)r.w, (long long)n->maxW);
+        const long long useH = (std::min)((long long)r.h, (long long)n->maxH);
+        f.waste = (long long)r.w * r.h - useW * useH;
+        return f;
+    }
+    const Fit stored = JudgeSplit(n, r, n->vertical, depth);
+    const Fit other  = JudgeSplit(n, r, !n->vertical, depth);
+    return BetterFit(other, stored) ? other : stored;
+}
+
+Fit JudgeSplit(const BspNode* n, const Rect& r, bool vertical, int depth) {
+    Rect ra, rb;
+    CutNode(n, r, vertical, &ra, &rb);
+    const Fit fa = JudgeNode(n->a, ra, depth - 1);
+    const Fit fb = JudgeNode(n->b, rb, depth - 1);
+    Fit f;
+    f.feasible = fa.feasible && fb.feasible;
+    f.waste    = fa.waste + fb.waste;
+    return f;
+}
+
 } // namespace
 
 void BspTree::Compute(const Rect& area, const ConsMap* cons,
                       std::vector<std::pair<HWND, Rect>>* out) {
     if (!cons || cons->empty()) { ComputeRec(root_, area, out); return; }
 
-    MeasureRec(root_, cons);
-
     // Top-down, using the measurements. Written as an explicit stack-free
     // recursion by lambda so the constrained path stays beside the plain one.
     struct Walk {
         std::vector<std::pair<HWND, Rect>>* out;
+        bool turned = false;         // some split was set the other way round
         void Go(BspNode* n, const Rect& r) {
             if (!n) return;
             n->rect = r;
@@ -425,26 +503,38 @@ void BspTree::Compute(const Rect& area, const ConsMap* cons,
                 if (n->hwnd) out->push_back({ n->hwnd, r });
                 return;
             }
-            if (n->vertical) {
-                int first = ConstrainedSplit(r.w, n->ratio,
-                                             n->a->minW, n->a->maxW,
-                                             n->b->minW, n->b->maxW,
-                                             n->a->leaves, n->b->leaves);
-                first = (std::max)(1, (std::min)(r.w - 1, first));
-                Go(n->a, Rect(r.x, r.y, first, r.h));
-                Go(n->b, Rect(r.x + first, r.y, r.w - first, r.h));
-            } else {
-                int first = ConstrainedSplit(r.h, n->ratio,
-                                             n->a->minH, n->a->maxH,
-                                             n->b->minH, n->b->maxH,
-                                             n->a->leaves, n->b->leaves);
-                first = (std::max)(1, (std::min)(r.h - 1, first));
-                Go(n->a, Rect(r.x, r.y, r.w, first));
-                Go(n->b, Rect(r.x, r.y + first, r.w, r.h - first));
+            // A split with nothing limited beneath it is left exactly as it
+            // is, so a board of ordinary windows lays out as it always has.
+            // One with a limit beneath it is tried both ways and turned only
+            // when the other way is strictly better: the same waste is a tie,
+            // and a tie keeps whatever the user (or dwindle) chose.
+            if (n->constrained) {
+                const Fit stored = JudgeSplit(n, r, n->vertical, kJudgeDepth);
+                const Fit other  = JudgeSplit(n, r, !n->vertical, kJudgeDepth);
+                if (BetterFit(other, stored)) {
+                    n->vertical = !n->vertical;
+                    turned = true;
+                }
             }
+            Rect ra, rb;
+            CutNode(n, r, n->vertical, &ra, &rb);
+            Go(n->a, ra);
+            Go(n->b, rb);
         }
     } walk{ out };
-    walk.Go(root_, area);
+
+    // The measurements a split is cut by are summed under the orientation its
+    // children had when they were measured. Turning a child changes what its
+    // subtree needs and can use, so its parent is worth cutting again with the
+    // new numbers. Twice is enough in practice; the cap is so a board with two
+    // equally bad choices cannot keep the pass going round.
+    for (int pass = 0; pass < 3; ++pass) {
+        out->clear();
+        walk.turned = false;
+        MeasureRec(root_, cons);
+        walk.Go(root_, area);
+        if (!walk.turned) break;
+    }
 }
 
 // ---------------------------------------------------------------- layouts
@@ -782,6 +872,25 @@ void ComputeLayout(const LayoutParams& p, const std::vector<HWND>& order,
     if (out->size() != asked)
         AWA_LOG(L"layout: %d window(s) had no room in %dx%d and were left unplaced",
                 (int)(asked - out->size()), area.w, area.h);
+}
+
+std::vector<HWND> SqueezedWindows(const std::vector<HWND>& order,
+                                  const std::vector<std::pair<HWND, Rect>>& plan,
+                                  const ConsMap& cons) {
+    std::vector<HWND> squeezed;
+    for (HWND h : order) {
+        auto lim = cons.find(h);
+        const int needW = (lim != cons.end()) ? lim->second.minW : 0;
+        const int needH = (lim != cons.end()) ? lim->second.minH : 0;
+
+        const Rect* got = nullptr;
+        for (const auto& e : plan) if (e.first == h) { got = &e.second; break; }
+
+        // Unplaced is the layout admitting it had nowhere to put it - the
+        // same thing as a slot it cannot use, seen from the other side.
+        if (!got || got->w < needW || got->h < needH) squeezed.push_back(h);
+    }
+    return squeezed;
 }
 
 } // namespace awa

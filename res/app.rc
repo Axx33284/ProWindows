@@ -262,6 +262,61 @@ BEGIN
 END
 
 /////////////////////////////////////////////////////////////////////////////
+// Clock
+
+IDD_PAGE_CLOCK DIALOGEX 0, 0, 340, 362
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    CONTROL         "Show the desktop clock",
+                    IDC_CLK_ENABLED, "Button", BS_AUTOCHECKBOX | WS_TABSTOP,
+                    8, 6, 214, 12
+    CONTROL         "Pin it in place (locked, and clicks pass through)",
+                    IDC_CLK_PINNED, "Button", BS_AUTOCHECKBOX | WS_TABSTOP,
+                    8, 22, 224, 12
+    CONTROL         "Sit on the desktop, behind every window",
+                    IDC_CLK_DESKTOP, "Button", BS_AUTOCHECKBOX | WS_TABSTOP,
+                    8, 38, 224, 12
+    PUSHBUTTON      "Reset position", IDC_CLK_RESET_POS, 238, 20, 94, 16
+
+    GROUPBOX        "Style", IDC_STATIC, 8, 58, 158, 92
+    COMBOBOX        IDC_CLK_STYLE, 18, 76, 138, 240,
+                    CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "", IDC_CLK_STYLE_DESC, 18, 96, 138, 48
+
+    GROUPBOX        "Theme", IDC_STATIC, 174, 58, 158, 92
+    COMBOBOX        IDC_CLK_THEME, 184, 76, 138, 240,
+                    CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "", IDC_CLK_THEME_DESC, 184, 96, 138, 48
+
+    GROUPBOX        "What to show", IDC_STATIC, 8, 156, 158, 96
+    CONTROL         "24-hour time", IDC_CLK_24H, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 18, 174, 138, 12
+    CONTROL         "Seconds", IDC_CLK_SECONDS, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 18, 192, 138, 12
+    CONTROL         "The date", IDC_CLK_DATE, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 18, 210, 138, 12
+    CONTROL         "The day of the week", IDC_CLK_WEEKDAY, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 18, 228, 138, 12
+
+    GROUPBOX        "Appearance", IDC_STATIC, 174, 156, 158, 96
+    LTEXT           "Opacity", IDC_STATIC, 184, 178, 30, 9
+    CONTROL         "", IDC_CLK_OPACITY, "msctls_trackbar32",
+                    TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 214, 174, 80, 16
+    LTEXT           "92%", IDC_CLK_OPACITY_VAL, 298, 178, 28, 9
+    LTEXT           "Size", IDC_STATIC, 184, 204, 30, 9
+    CONTROL         "", IDC_CLK_SCALE, "msctls_trackbar32",
+                    TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 214, 200, 80, 16
+    LTEXT           "100%", IDC_CLK_SCALE_VAL, 298, 204, 30, 9
+    LTEXT           "Drag the clock anywhere, then pin it. Right-click it for all of this.",
+                    IDC_STATIC, 184, 226, 140, 22
+
+    GROUPBOX        "Preview", IDC_STATIC, 8, 258, 324, 100
+    CONTROL         "", IDC_CLK_PREVIEW, "Static", SS_OWNERDRAW,
+                    18, 272, 304, 78
+END
+
+/////////////////////////////////////////////////////////////////////////////
 // Page 6 - Search bar
 
 IDD_PAGE_SEARCH DIALOGEX 0, 0, 340, 350

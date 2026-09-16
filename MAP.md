@@ -47,16 +47,20 @@ build.bat
 | `src\wm.*` | Monitors, workspaces, event handling, animation, and every user action. |
 | `src\hotkeys.*` | `RegisterHotKey` plus the `WH_KEYBOARD_LL` fallback. |
 | `src\moddrag.*` | Hold the modifier and drag anywhere on a window. A `WH_MOUSE_LL` hook on a thread of its own; it starts the *system's* move loop rather than running one. |
-| `src\sysinfo.*` | CPU / RAM / GPU / disk / network sampling for the overlay. |
+| `src\sysinfo.*` | CPU / RAM / GPU / disk / network sampling for the overlay. Called only from the sampling thread in `monitor.cpp`. |
 | `src\thermal.*` | CPU and GPU temperature: the queue of sources Windows makes you try, on a thread of its own. |
 | `src\launcher.*` | The search bar's window: query, ranking, painting and the row menu. |
 | `src\appicon.*` | The shell icons the search bar draws, fetched on a thread of their own. |
 | `src\search.*` | What it finds. The file index and its walk thread, the ms-settings table, the calculator, and the fuzzy scorer every source shares. No Win32 UI. |
 | `src\montheme.*` | The overlay's colour schemes and layout styles. Tables of plain data. |
 | `src\monpaint.*` | The overlay's geometry and painting. Knows nothing about the config. |
-| `src\monitor.*` | The overlay's window: creation, drag, pin, z-order, context menu. |
+| `src\monitor.*` | The overlay's window: creation, drag, pin, z-order, context menu - and the thread that takes its readings. |
+| `src\clocktheme.*` | The clock's colour schemes and layouts. Tables of plain data, like `montheme`; a skin names its typeface too. |
+| `src\clockpaint.*` | The clock's eight layouts. Each is one function that lays itself out and, when asked, paints - so the measure and the drawing cannot disagree. The panel behind it is `PaintPanel` from `monpaint.h`. |
+| `src\clock.*` | The clock window. The monitor's drag, pin, desktop mode, snap points and context menu, with a timer that wakes on the next second or minute boundary and a frame signature that skips repaints nothing would change. |
+| `src\settings_clock.cpp` | The Clock page: style, theme, the four what-to-show switches, and a preview through the real painter. |
 | `src\dragguide.*` | The translucent rectangle shown while a tiled window is dragged, marking where it would land. |
-| `src\theme.*` | Dark palette and the custom drawing that makes Win32 controls look like it. |
+| `src\theme.*` | The settings window's look, after DOOM Eternal's menus: the palette, the condensed capitals, the cut-corner plates and slanted tabs, and the grain. Overlays are not themed by it. |
 | `src\settings.*` | Settings shell (header, tabs, Apply) plus the Layout, Behaviour and General pages. |
 | `src\settings_keys.cpp` | Window keys, Open apps and Monitor pages, and the key-capture editor. |
 | `src\settings_search.cpp` | The Search page: which sources are on, and how the file index is built. |
@@ -64,7 +68,7 @@ build.bat
 | `src\app.h` | The handful of services the settings pages need from the shell. |
 | `src\main.cpp` | Entry point, tray UI, event hooks, and the `app.h` implementations. |
 | `res\app.rc` | Icon, manifest, and every dialog template. The layout lives here, not in code. |
-| `tests\` | `run.bat` asserts on layout geometry; `probe.bat` prints how each live window would be classified without moving any of it; `tempprobe.bat` prints which temperature source this machine can answer from, and self-tests the two shared-memory readers; `monshot.bat`, `launchshot.bat` and `uishot.bat` render the three pieces of UI to PNG without starting the tiler; `searchprobe.bat` runs the file and program index alone and prints what it found, per drive, which is the only way to see whether the walk reaches this machine's other disks; `analyze.bat` runs MSVC `/analyze` over whichever sources you name. None is part of the product build. |
+| `tests\` | `run.bat` asserts on layout geometry; `probe.bat` prints how each live window would be classified without moving any of it; `tempprobe.bat` prints which temperature source this machine can answer from, and self-tests the two shared-memory readers; `monshot.bat`, `clockshot.bat`, `launchshot.bat`, `uishot.bat`, `bindshot.bat` and `rowdragshot.bat` render the pieces of UI to PNG without starting the tiler (`clocklive.bat` runs the real clock window for a few seconds and captures it off the screen) (`bindshot` presses real keys into the shortcut recorder, `rowdragshot` drags a Monitor-tab row with the real mouse, and `monshot` also renders a readout mid-drag); `searchprobe.bat` runs the file and program index alone and prints what it found, per drive, which is the only way to see whether the walk reaches this machine's other disks; `analyze.bat` runs MSVC `/analyze` over whichever sources you name. None is part of the product build. |
 
 ## Data flow
 
@@ -76,9 +80,25 @@ a window opens / closes / moves
    → RetileNow()
         AnimBegin()                 clears the animation queue
         for each monitor: ComputeLayout() → ApplyPlacements()
-        AnimCommit()                starts the 8 ms animation timer
-   → AnimStep() until t reaches 1, then lands exactly on the target rects
+        AnimCommit()                wakes the ticker thread
+   → AnimStep() per WM_AWA_ANIMTICK - one per refresh of the fastest display - until
+     t reaches 1, then lands exactly on the target rects
 ```
+
+The overlay's readings take their own path, and none of it is on the UI thread until the end:
+
+```
+monitor.cpp SampleThread (below normal priority, parked while the panel is hidden)
+   → SystemSampler::Sample()        PDH, NtQuerySystemInformation, the thermal probe's last answer
+   → g_freshLoad under g_loadLock, PostMessage(WM_AWA_SAMPLED)
+   → MonitorProc (UI thread)        moves it into g_load; PushHistory, BeginEase, Redraw
+```
+
+Threads, for the record - every one of them is a thread because the UI thread must not
+wait on what it does: the keyboard hook, the mouse hook (both highest priority; every
+keystroke and pointer movement on the machine passes through them), the animation ticker,
+the overlay's sampler, the thermal probe, the launcher's app scan, the icon loader, the
+file indexer, and the control channel's pipe server.
 
 Settings take a different path, and deliberately only one:
 
@@ -662,6 +682,172 @@ Apply → each page's Save() writes into the live Config
     The ids they replaced were per-metric and not in metric order, so
     `IDC_MON_CPU + 3` was Disk; that is the trap the renaming closes.
 
+50. **Never take the other application's input state to give it focus.**
+    `FocusWindow` used to `AttachThreadInput` this thread to the foreground
+    thread and the target thread, call `SetForegroundWindow` and `SetFocus`,
+    and detach. Attached threads pool their whole input state: keyboard state,
+    capture, the caret, and the cursor - including whether it is shown.
+    Windows hides the pointer while the user types and shows it on the next
+    movement; pool that with ours mid-keystroke and split it a moment later
+    and the hidden pointer can stay hidden. That is the whole of "the mouse
+    disappears when I type". Attaching also made `SetFocus` a synchronous call
+    into the other process, so a hung application hung the tiler. The fallback
+    was a synthetic Alt press, which lands in Explorer's and Office's menu bar
+    and, with Shift held, is the keyboard-layout switch.
+
+    What replaces both is one `SendInput` of a mouse event with no flags set -
+    nothing moves, nothing clicks, no application sees anything - which the
+    input system still records as "this process delivered the last input
+    event", the documented condition for `SetForegroundWindow`. komorebi and
+    GlazeWM arrived at the same call for the same reasons. Anything new that
+    needs the foreground goes through `FocusWindow`; nothing may attach.
+
+51. **Readings for the overlay are taken on the sampling thread, never on the
+    UI thread.** `PdhCollectQueryData` on the GPU Engine wildcard walks every
+    process's GPU engines and is unbounded - tens of milliseconds warm, and the
+    first `PdhAddCounter` after logon is seconds while the provider starts
+    (84 ms warm on the development machine, `scratchpad\pdhbench`). It ran on
+    the UI thread once a second, and the first time during startup, so every
+    animation that overlapped a reading hitched and the application sat frozen
+    at logon until the counters opened.
+
+    `SystemSampler::Sample()` and `Close()` belong to `monitor.cpp`'s
+    `SampleThread` and nothing else calls them; `Configure()` may be called
+    from anywhere and takes effect at the next reading. The thread parks on an
+    event while the panel is hidden (game mode, display off, switched off) and
+    lets the counters go, so a hidden panel costs nothing - which is what
+    invariant 24 promised and the timer could only approximate. The thermal
+    probe is still started and stopped from the UI thread: it has a thread of
+    its own with its own single-controller assumptions, and the sampler only
+    reads what it last published. `Redraw` draws nothing until the first
+    reading has landed - a layered window with no frame is simply invisible,
+    which is better than a frame of "--" replaced a moment later. If the
+    thread cannot be created the old inline path runs from `kTimerSample`; it
+    is kept for that and for nothing else.
+
+52. **The hook threads run at highest priority.** Every keystroke and every
+    pointer movement on the machine passes through `WH_KEYBOARD_LL` and
+    `WH_MOUSE_LL` before the application it was meant for sees it, and the
+    callback is delivered by pumping the installing thread. At normal priority
+    those threads waited for a timeslice behind the file indexer, the icon
+    sweep, a retile, and every other program on a machine that is busy - which
+    at logon is all of them - and typing felt sticky exactly then. Highest, not
+    time-critical: the callbacks are bounded (invariant 3), but a runaway at
+    time-critical would starve the UI thread that acts on what they post.
+
+53. **The animation ticks once per refresh of the fastest display.** It used to
+    tick every 4 ms whatever the screen. A frame the display cannot show is
+    still a `SetWindowPos` into every application on the board, and a relayout
+    in each - a full one for anything Chromium-based - so on a 60 Hz screen
+    three frames in four were pure cost. `MonitorInfo::refreshHz` comes from
+    `EnumDisplaySettings` in `EnumMonitors`, `ReloadMonitors` folds the fastest
+    into `animFrameMs_` (clamped to 4..16 ms), and the ticker reads it when an
+    animation starts. Measured: 31-32 frames per 200 ms animation on a 180 Hz
+    display, worst gap 6.5 ms.
+
+54. **A window whose limits are remembered is not asked for them again.**
+    `WM_GETMINMAXINFO` is a `SendMessageTimeout` with a 60 ms ceiling on the
+    UI thread, and at logon every application is busy starting and takes the
+    whole 60 ms. `RememberLimits` stores the *merged* numbers - declared and
+    observed - so a window seeded from `learnedLimits` in `AddWindow` has
+    `limitsAsked` set and `ConstraintsFor` skips the message. Ten familiar
+    windows at logon was over half a second of the tiler frozen to learn
+    nothing; it is now nothing.
+
+55. **`index.cache` is read on the index thread, and `g_wants` is always
+    recorded.** `SearchInit` used to parse the cache - half a megabyte through
+    `fgetws`, six thousand strings - on the UI thread before the message loop
+    had started. `StartIndex(0, true)` hands that to the thread, which reads
+    the cache at ordinary priority (one sequential read; the sooner it is in
+    the sooner files are searchable) and only then drops to background mode
+    for a walk, if one is needed. Startup to a running loop went from 317 ms
+    to 68 ms warm on the development machine.
+
+    The second half is a bug the first half happened to fix: `StartWalk` was
+    the only thing that set `g_wants`, and on a cache hit it was never called,
+    so `SearchApplyConfig`'s `SameWants(g_wants, wants)` compared against an
+    empty struct - and every Apply, of anything, on any tab, started a full
+    walk of the disk. `StartIndex` records `g_wants` on every path.
+
+56. **Win-event hooks go in before the first scan.** The scan and the first
+    pass take a while at logon, and a window that opened during them was
+    nobody's: too late for the scan, too early for the hooks, and unmanaged
+    until something else prompted a rescan. Events raised before the message
+    loop runs are queued; any delivered inside the pass are deferred by the
+    `Busy` guard exactly as they are for every later pass. `Classify` also
+    rejects a non-root window *before* it tests visibility, because a child
+    window is never going to become top-level and `EVENT_OBJECT_SHOW` arrives
+    for every child an application shows - testing visibility first put each
+    of them on `pending_` for two seconds of second looks.
+
+57. **A fixed buffer is never filled with a `_s` function that cannot truncate.** Invariant 14
+    said so and the tray tooltip did it anyway: `TrayTooltip` built `NOTIFYICONDATAW::szTip`
+    (128 characters) with `swprintf_s`, and the one combination that did not fit - game mode's
+    "paused for fullscreen app" together with a window running as administrator - was 137
+    characters. `swprintf_s` answers that by calling the invalid-parameter handler, and with no
+    handler installed that is a fast-fail: exception `0xC0000409`, no exception filter, nothing in
+    the log, and the tray icon simply gone. Two Watson buckets on the development machine, both at
+    `_invoke_watson`, both at the moment a game started with Task Manager open. Now: `_snwprintf_s`
+    with `_TRUNCATE` there, and `_set_invalid_parameter_handler` in `wWinMain` installing a handler
+    that logs and returns, which turns the whole class of mistake into an error code from the
+    function that made it. The handler is a net, not a licence.
+
+58. **The shell's own full-screen surfaces are not games.** `FullscreenAppActive` measures the
+    foreground window, and on Windows 11 the Alt+Tab switcher, Task View, the lock screen, the
+    snipping overlay and the logon screen all measure as full-screen. Each put the tiler into game
+    mode: the overlay torn down and rebuilt, window events dropped for the next second and a half,
+    and at logon nothing arranged until the user unlocked. Windows from `explorer.exe`, `LockApp`,
+    `LogonUI`, the shell experience hosts and the snipping tools are excused by process name, and
+    an `ApplicationFrameWindow` only counts when it is actually hosting a `CoreWindow`. A window
+    *we* made fullscreen (`ManagedWindow::fullscreen`, Alt+F) is excused in `UpdateGameMode`,
+    because pausing the tiler against its own fullscreen meant the next Alt+F could not undo it.
+
+59. **Hiding and showing a managed window is asynchronous.** `SetHidden` calls `ShowWindowAsync`.
+    `ShowWindow` sends `WM_SHOWWINDOW` into the other process and waits, and an application that
+    is hung or merely busy - a browser under load, a game loading - held the UI thread with it: no
+    shortcuts, no window events, no tray, for as long as it took. A workspace switch with one such
+    window on it looked exactly like the tiler freezing. The cost is that `IsWindowVisible` does
+    not flip on the spot, so the dead sweep at the top of `RetileMonitor` excuses a window for
+    `kShowGraceMs` after an un-hide (`ManagedWindow::shownAt`), and the `EVENT_OBJECT_SHOW` echo
+    clears the grace early.
+
+60. **"Immovable" and "too small" are verdicts with an expiry.** Two refused placements is also
+    what a window looks like while its application is hung, and applications recover. A window
+    written off as immovable is asked again a minute later (`kImmovableRetryMs`), and a window the
+    user has just moved or sized by hand (`OnMoveSizeEnd`) has both verdicts cleared, since it has
+    just demonstrated it can move and can take another size. A window that genuinely cannot be
+    moved costs two placements a minute, which is nothing.
+
+61. **The low-level hooks are re-installed once a minute.** Windows removes a hook whose callback
+    has been late too often and tells nobody; the Win+key bindings and mod-drag then silently stop
+    for the rest of the session. The hook threads (invariant 52) make that rare, not impossible -
+    a machine paging at logon can starve anything. Each hook thread now unhooks and re-hooks on a
+    thread timer, so a dropped hook is back within the minute.
+
+62. **The clock draws the monitor's panel.** `PaintPanel` in `monpaint.h` takes a `PanelLook` -
+    the gradient, border, gloss, radius and bareness - and both overlays build one from their own
+    skin. There is one shadow, one gloss and one chrome cache (four entries: each overlay's live
+    panel and its settings preview) rather than two versions that agree until one is edited. A
+    radius larger than the panel is clamped to a circle, which is how the analog and ring styles
+    get a round panel without a second code path.
+
+63. **The grain is a GDI pattern brush phased to the screen, not a GDI+ hatch.** Every control
+    erases its own background with the brush `WM_CTLCOLOR*` hands it, so a texture painted by the
+    dialog alone shows as a solid rectangle behind every check box and label. The grain is an 8 px
+    pattern brush instead, and every fill of it - the dialog's erase, the `WM_CTLCOLOR` answers,
+    the hand-painted button and combo backdrops - sets the brush origin from the window's *screen*
+    position (`GrainPhase`), so the lines run through every control unbroken, across a dialog and
+    its pages alike. Cards and the header are flat `Panel` and need none of this.
+
+64. **A different executable that finds the mutex taken offers to replace what holds it.** Every
+    version shares `kMutexName`, `kWndClass` and the config folder. Starting 1.3 while 1.2 was
+    running from another folder poked the running 1.2 and opened its settings, which is what "all
+    the versions run the same" looked like. `ReplaceRunningInstance` compares the running process's
+    image path with ours; the same file behaves as before, a different one asks, and on yes posts
+    `WM_CLOSE` to the hidden main window - `DefWindowProc` → `DestroyWindow` → the ordinary exit
+    path with `RestoreAllWindows`, in every version that has shipped - waits for the process, and
+    takes the mutex over. `RepairAutostartPath` then moves the Run entry to the new copy.
+
 ## Things that surprised us, recorded so they surprise nobody twice
 
 - **The shell owns almost every `Win`+letter chord.** `RegisterHotKey` was refused for all but
@@ -691,6 +877,11 @@ Apply → each page's Save() writes into the live Config
   but the real cause.
 - **A suspended UWP app is DWM-cloaked, not hidden.** Cloaked windows are skipped; they come back
   through `EVENT_OBJECT_UNCLOAKED` when the user returns to them.
+- **`CoCreateInstance(CLSID_VirtualDesktopManager)` fails at logon** while the shell that
+  serves it is still coming up - which is exactly when an autostarted copy of this program
+  first asks. It used to be asked once and the failure remembered for the session, so on
+  those boots every window on every virtual desktop was tiled onto the one being looked at.
+  `IsOnCurrentVirtualDesktop` retries every five seconds until it gets the object.
 - **`FindWindow(L"Progman", nullptr)` can return null** on this build even though a window of that
   class is enumerable. `GetShellWindow()` is asked first for that reason.
 - **Per-process CPU, memory and I/O come from one `NtQuerySystemInformation` call.** The documented
@@ -735,6 +926,41 @@ Apply → each page's Save() writes into the live Config
 - **The overlay builds its own fonts.** Borrowing `theme::FontUI()` and friends looked tidy but
   they are fixed-size, so the "Size" slider stretched the panel while the numbers stayed put.
   `monpaint.cpp` derives every font size from the same scale as the geometry.
+- **Every `testwin.exe` shares one window class, and learned limits are keyed by process and
+  class.** So the first test window to teach the tiler a minimum teaches it for every test window
+  that follows in the same session, whatever `--min` they were started with - a plain one opened
+  after a `--min 1200x600` one is treated as needing 1200x600 and parked. Use a real application
+  (Notepad) for the unconstrained window in a mixed board, and strip the `learned = testwin.exe`
+  line from `config.ini` between sessions.
+- **The shell's icons are bottom-up DIBs.** `IShellItemImageFactory::GetImage` hands back a DIB
+  section with a positive `biHeight`, which `AlphaBlend` draws correctly - so an icon looks fine
+  the first time and is only wrong when it comes back from `icons.cache`, where the rows had been
+  copied in memory order and rebuilt as top-down. Every icon on the second launch was upside down.
+  `ReadPixels` turns bottom-up sources over; the cache format version was bumped so old files are
+  discarded rather than read.
+- **A layered window is click-through wherever its alpha is zero.** The bare skins draw no
+  panel, and the first version of them could only be grabbed by the letters: everywhere else the
+  pointer went straight to the window underneath. One count of alpha over the panel rectangle
+  is invisible and makes it solid to the mouse. `MonDraw` paints it for every bare skin.
+- **A press on the overlay is two gestures until time tells them apart.** Press-and-go moves the
+  panel; press-and-hold (320 ms without moving more than four pixels) lifts the readout under
+  the pointer, and Ctrl lifts it at once. The panel drag starts on the press as it always did,
+  and `BeginReorder` puts the panel back where it was if the hold wins - which it can, because
+  the hold only wins when nothing has moved. The painter does the drag feedback itself:
+  `MonPaintCtx::drag` names the lifted cell, the slot it would drop into and where to draw it,
+  and `MonDraw` lays the rest out around a dotted hole. The frame signature includes all three,
+  or a lifted readout would sit still while the pointer moved.
+- **`ReleaseCapture()` tells you about itself.** The Monitor tab's row drag has to take the
+  capture off a pushed checkbox (so it lets go without a click) and then take it for itself. The
+  release delivers `WM_CAPTURECHANGED` to the very window that asked for it, and the subclass's
+  "somebody took the capture" handler ended the drag before it had started. The drag is marked
+  active only after the second `SetCapture`.
+- **The shortcut recorder cannot be an edit control.** `WM_KEYDOWN` never arrives for `Win+E` -
+  Explorer has it first - nor for anything ProWindows itself has registered, which fires the
+  action instead. The editor installs a `WH_KEYBOARD_LL` hook for its own lifetime, consulted
+  before the tiler's hook and before `RegisterHotKey`, and swallows what it records. It only does
+  so while the capture box has the focus in the foreground dialog, so the launcher page's Program
+  field and everything else on the desktop keep working.
 
 ## Testing
 
@@ -762,6 +988,17 @@ remember where they were.
   Note that owner-drawn controls do not always survive `PrintWindow` - the tab strip in particular
   can come back blank - so a missing control in one of those PNGs is worth confirming before it is
   believed.
+- `tests\rowdragshot.bat` is `uishot` for the Monitor tab's row drag, with the mouse actually
+  moved: it drags the first row down three rows with `SendInput`, prints the rows before and
+  after, and then makes a plain click on a row to prove a click is still a click. It switches the
+  monitor on in its stub config first - a disabled checkbox ignores the mouse, which is a
+  confusing way to find out the harness's defaults have it off.
+- `tests\bindshot.bat` is `uishot` for the shortcut recorder, with keys actually pressed: it opens
+  the editor for the first binding, injects Win+E, Win+Shift+F, Ctrl+Alt+T and Alt+Enter with
+  `SendInput` from a second thread, prints what the box showed after each, and captures it. The
+  recorder's hook swallows those chords, so nothing else on the desktop reacts - but it only
+  presses anything once it has confirmed the editor is the foreground window, since a Win+E that
+  got past it would open Explorer.
 - `tests\tempprobe.bat` prints what this machine can say about CPU and GPU temperature and which
   source answered, which is the whole of "why is the temperature blank on my machine".
   `tempprobe.bat --selftest` publishes synthetic Core Temp and HWiNFO blocks - including a

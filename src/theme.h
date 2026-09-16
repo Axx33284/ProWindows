@@ -1,9 +1,14 @@
-// ProWindows - dark theme.
+// ProWindows - the settings window's look.
 //
-// Same palette and card language as AutoKeys. Win32 common controls have no
-// dark mode we can rely on, so the look is built from three pieces: WM_CTLCOLOR*
-// for backgrounds and text, NM_CUSTOMDRAW for buttons / checkboxes / lists /
-// sliders, and owner-draw for combo boxes and tabs.
+// Modelled on DOOM Eternal's menus: near-black surfaces with a faint diagonal
+// grain, one hot orange for everything selected or important, condensed
+// capitals for headings, and panels with their corners cut rather than
+// rounded. The tab row is a run of slanted plates, the active one filled.
+// Win32 common controls have no dark mode we can rely on, so the look is
+// built from three pieces: WM_CTLCOLOR* for backgrounds and text,
+// NM_CUSTOMDRAW for lists and sliders, and owner-draw for buttons, check
+// boxes, combo boxes and tabs. The overlays (monitor, clock) have themes of
+// their own and are not touched by any of this.
 #pragma once
 #include "common.h"
 #include <commctrl.h>
@@ -12,20 +17,23 @@ namespace awa {
 namespace theme {
 
 // ---------------------------------------------------------------- palette
-constexpr COLORREF Bg          = RGB(24,  25,  28);
-constexpr COLORREF Panel       = RGB(32,  34,  38);
-constexpr COLORREF PanelAlt    = RGB(40,  42,  47);
-constexpr COLORREF Border      = RGB(56,  59,  65);
-constexpr COLORREF Field       = RGB(48,  51,  58);
-constexpr COLORREF Text        = RGB(233, 234, 237);
-constexpr COLORREF TextDim     = RGB(150, 155, 165);
-constexpr COLORREF Accent      = RGB(88,  140, 255);
-constexpr COLORREF AccentHover = RGB(110, 158, 255);
-constexpr COLORREF Good        = RGB(76,  200, 130);
-constexpr COLORREF Warn        = RGB(240, 175, 70);
-constexpr COLORREF Danger      = RGB(232, 92,  92);
-constexpr COLORREF RowAlt      = RGB(36,  38,  43);
-constexpr COLORREF RowSel      = RGB(52,  74,  122);
+constexpr COLORREF Bg          = RGB(13,  14,  16);
+constexpr COLORREF Panel       = RGB(22,  24,  27);
+constexpr COLORREF PanelAlt    = RGB(33,  36,  40);
+constexpr COLORREF Border      = RGB(58,  62,  68);
+constexpr COLORREF Field       = RGB(27,  29,  33);
+constexpr COLORREF Text        = RGB(232, 228, 220);   // warm off-white
+constexpr COLORREF TextDim     = RGB(142, 148, 154);
+constexpr COLORREF Accent      = RGB(245, 146, 30);    // the orange
+constexpr COLORREF AccentHover = RGB(255, 170, 62);
+// Text set on top of the accent: the selected menu item in the game is dark
+// on orange, not white on orange.
+constexpr COLORREF AccentText  = RGB(20,  16,  10);
+constexpr COLORREF Good        = RGB(122, 200, 108);
+constexpr COLORREF Warn        = RGB(245, 197, 66);
+constexpr COLORREF Danger      = RGB(214, 58,  42);
+constexpr COLORREF RowAlt      = RGB(26,  28,  32);
+constexpr COLORREF RowSel      = RGB(82,  50,  14);    // orange, dimmed to a row
 
 void Init();
 void Shutdown();
@@ -42,6 +50,15 @@ HFONT FontBold();
 HFONT FontTitle();
 HFONT FontSmall();
 HFONT FontNumber();       // larger semibold, for the monitor readouts
+// The condensed capitals: card titles, tabs and buttons in Heading, the
+// window's own name in Display. Bahnschrift ships with Windows 10 and 11;
+// on a machine without it these are Segoe UI Semibold, which is plainer but
+// reads the same.
+HFONT FontHeading();
+HFONT FontDisplay();
+
+// Capitals, for the places the design sets everything in them.
+std::wstring Caps(const std::wstring& text);
 
 HBRUSH BrushBg();
 HBRUSH BrushPanel();
@@ -50,6 +67,15 @@ HBRUSH BrushField();
 void DarkTitleBar(HWND wnd);
 
 // ---------------------------------------------------------------- shapes
+// A rectangle with its top-left and bottom-right corners cut at 45 degrees,
+// which is the panel shape the whole look is built from. `cut` is the size
+// of the cut in pixels; 0 is a plain rectangle.
+void Chamfer(HDC dc, const RECT& r, int cut, COLORREF fill, BYTE alpha,
+             COLORREF borderColor, BYTE borderAlpha);
+// A parallelogram leaning right by `slant` pixels - the tab plate.
+void Slant(HDC dc, const RECT& r, int slant, COLORREF fill, BYTE alpha,
+           COLORREF borderColor, BYTE borderAlpha);
+
 // Antialiased rounded rectangle. `borderColor` is skipped when fully clear.
 void RoundRect(HDC dc, const RECT& r, int radius, COLORREF fill,
                COLORREF borderColor, bool drawBorder);

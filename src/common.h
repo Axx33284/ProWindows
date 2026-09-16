@@ -33,7 +33,7 @@ constexpr wchar_t kAppName[]      = L"ProWindows";
 constexpr wchar_t kAppShort[]     = L"ProWindows";
 constexpr wchar_t kWndClass[]     = L"ProWindows_MsgWnd";
 constexpr wchar_t kMutexName[]    = L"Local\\ProWindows_SingleInstance";
-constexpr wchar_t kVersion[]      = L"1.2.0";
+constexpr wchar_t kVersion[]      = L"1.3.0";
 
 // Private window messages
 enum : UINT {
@@ -56,6 +56,10 @@ enum : UINT {
     // running a command there is the reentrancy this codebase just stopped
     // doing. Posted means it runs from the main loop, between passes.
     WM_AWA_IPC       = WM_APP + 8,
+    // The overlay's sampling thread has a fresh reading waiting. Posted to
+    // the overlay window; see monitor.cpp. The reading itself travels under
+    // a lock, not in the message, so a late one cannot outlive its data.
+    WM_AWA_SAMPLED   = WM_APP + 9,
 };
 
 // Timers

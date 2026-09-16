@@ -8,6 +8,7 @@
 #include "app.h"
 #include "settings.h"
 #include "monitor.h"
+#include "clock.h"
 #include "launcher.h"
 #include "dragguide.h"
 #include "search.h"
@@ -15,6 +16,7 @@
 #include "ipc.h"
 #include "resource.h"
 #include <commctrl.h>
+#include <cstdlib>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "user32.lib")
@@ -32,7 +34,7 @@ enum : UINT {
     IDM_TILING = 100, IDM_GAPS, IDM_RETILE, IDM_RELOAD, IDM_EDITCFG,
     IDM_OPENDIR, IDM_AUTOSTART, IDM_RESTOREALL, IDM_EXIT,
     IDM_SETTINGS, IDM_SHORTCUTS, IDM_MONITOR, IDM_MONITOR_PIN, IDM_ELEVATE,
-    IDM_ELEVAUTO, IDM_DIAG,
+    IDM_ELEVAUTO, IDM_DIAG, IDM_CLOCK, IDM_CLOCK_PIN,
     IDM_LAYOUT_BASE = 200,
     IDM_WORKSPACE_BASE = 300,
 };
@@ -130,22 +132,32 @@ static void SetAutostart(bool on) {
 }
 
 // ---------------------------------------------------------------- tray
+// The tooltip is NOTIFYICONDATAW::szTip, which is 128 characters. This used
+// to be built with swprintf_s, which does not truncate: handed a string that
+// does not fit it calls the invalid-parameter handler, and with no handler
+// installed that is a fast-fail - the process is gone, tray icon and all,
+// with nothing in the log. The one combination that did not fit was game mode
+// ("paused for fullscreen app") together with at least one window running as
+// administrator: 137 characters. So the tiler died at exactly the moment a
+// game started while Task Manager, an installer or an elevated launcher was
+// open, and the report read "it works at first and then just stops". Two
+// Watson buckets on this machine say so. Truncate, and say less.
 static void TrayTooltip(wchar_t* out, size_t cch) {
-    const wchar_t* state = g_wm.GameMode()   ? L"paused for fullscreen app"
+    const wchar_t* state = g_wm.GameMode()   ? L"paused: fullscreen app"
                          : g_wm.TilingEnabled() ? L"tiling on"
                                                 : L"tiling paused";
     const int blocked = g_wm.BlockedCount();
     if (blocked > 0) {
-        swprintf_s(out, cch,
-                   L"%s %s\nLayout: %s  |  Workspace %d  |  %s\n"
-                   L"%d window%s cannot be arranged (running as administrator)",
-                   kAppName, kVersion, LayoutName(g_wm.ActiveLayout()),
-                   g_wm.ActiveWorkspace() + 1, state,
-                   blocked, blocked == 1 ? L"" : L"s");
+        _snwprintf_s(out, cch, _TRUNCATE,
+                     L"%s %s\nLayout: %s  |  Workspace %d  |  %s\n"
+                     L"%d window%s need%s administrator rights",
+                     kAppName, kVersion, LayoutName(g_wm.ActiveLayout()),
+                     g_wm.ActiveWorkspace() + 1, state,
+                     blocked, blocked == 1 ? L"" : L"s", blocked == 1 ? L"s" : L"");
     } else {
-        swprintf_s(out, cch, L"%s %s\nLayout: %s  |  Workspace %d  |  %s",
-                   kAppName, kVersion, LayoutName(g_wm.ActiveLayout()),
-                   g_wm.ActiveWorkspace() + 1, state);
+        _snwprintf_s(out, cch, _TRUNCATE, L"%s %s\nLayout: %s  |  Workspace %d  |  %s",
+                     kAppName, kVersion, LayoutName(g_wm.ActiveLayout()),
+                     g_wm.ActiveWorkspace() + 1, state);
     }
 }
 
@@ -444,6 +456,7 @@ static void ReloadConfig(bool announce) {
 
     UpdateOverlayVisibility();
     MonitorApplyConfig();
+    ClockApplyConfig();
     SearchApplyConfig();
 
     if (g_cfg.focusFollowsMouse) SetTimer(g_wnd, TIMER_MOUSE, 120, nullptr);
@@ -555,7 +568,9 @@ static bool g_displayOff = false;
 // directly - so whichever ran last won, and switching away from a game with
 // the screen off brought the panel back to repaint at nobody.
 static void UpdateOverlayVisibility() {
-    MonitorSetVisible(g_cfg.monitorEnabled && !g_wm.GameMode() && !g_displayOff);
+    const bool allowed = !g_wm.GameMode() && !g_displayOff;
+    MonitorSetVisible(g_cfg.monitorEnabled && allowed);
+    ClockSetVisible(g_cfg.clockEnabled && allowed);
 }
 
 void AppGameModeChanged(bool on) {
@@ -589,6 +604,7 @@ static void SetDisplayOff(bool off) {
 }
 void AppRefreshSettings() { SettingsRefresh(); }
 void AppOpenMonitorSettings() { SettingsOpenTab(PAGE_MONITOR); }
+void AppOpenClockSettings()   { SettingsOpenTab(PAGE_CLOCK); }
 
 // ---------------------------------------------------------------- win events
 static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
@@ -743,6 +759,11 @@ static void ShowTrayMenu() {
     if (g_cfg.monitorEnabled)
         AppendMenuW(menu, MF_STRING | (g_cfg.monitorPinned ? MF_CHECKED : 0),
                     IDM_MONITOR_PIN, L"    Pin the monitor");
+    AppendMenuW(menu, MF_STRING | (g_cfg.clockEnabled ? MF_CHECKED : 0),
+                IDM_CLOCK, L"Clock");
+    if (g_cfg.clockEnabled)
+        AppendMenuW(menu, MF_STRING | (g_cfg.clockPinned ? MF_CHECKED : 0),
+                    IDM_CLOCK_PIN, L"    Pin the clock");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     AppendMenuW(menu, MF_STRING | (g_wm.TilingEnabled() ? MF_CHECKED : 0),
@@ -815,6 +836,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // Explorer restarting destroys the desktop window, and with it any
         // overlay owned by it.
         MonitorReattach();
+        ClockReattach();
         return 0;
     }
 
@@ -868,13 +890,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_wm.AnimStep();
             } else if (wp == TIMER_MOUSE) {
                 if (g_wm.GameMode()) return 0;
+                // Only a change of window is worth reporting. The pointer
+                // rests on the same window for seconds at a time, and handing
+                // it over on every tick meant a forced fullscreen check and a
+                // DWM border write eight times a second for nothing.
+                static HWND lastUnder = nullptr;
                 POINT pt;
                 GetCursorPos(&pt);
-                if (HWND under = WindowFromPoint(pt)) {
-                    under = GetAncestor(under, GA_ROOT);
-                    if (under && under != GetForegroundWindow())
-                        g_wm.OnForeground(under);
-                }
+                HWND under = WindowFromPoint(pt);
+                if (under) under = GetAncestor(under, GA_ROOT);
+                if (under == lastUnder) return 0;
+                lastUnder = under;
+                if (under && under != GetForegroundWindow())
+                    g_wm.OnForeground(under);
             } else if (wp == TIMER_GAMECHK) {
                 g_wm.UpdateGameMode(true);
             } else if (wp == TIMER_DRAG) {
@@ -896,6 +924,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 case IDM_MONITOR_PIN:
                     MonitorSetPinned(!g_cfg.monitorPinned);
+                    break;
+                case IDM_CLOCK:
+                    g_cfg.clockEnabled = !g_cfg.clockEnabled;
+                    UpdateOverlayVisibility();
+                    AppSaveConfig();
+                    SettingsRefresh();
+                    break;
+                case IDM_CLOCK_PIN:
+                    ClockSetPinned(!g_cfg.clockPinned);
                     break;
                 case IDM_TILING:    g_wm.ActToggleTiling(); TrayUpdate();
                                     SettingsRefreshStatus(); break;
@@ -1033,6 +1070,71 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS*) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+// The CRT's answer to a bad argument - a swprintf_s whose buffer is too
+// small, a _wcsicmp handed a null - is to call this, and with no handler
+// installed the default one is a fast-fail: the process is terminated on the
+// spot with exception 0xC0000409, no exception filter runs, and the log stays
+// silent. That is how the tray tooltip took the whole application down (see
+// TrayTooltip). A handler that returns turns the same mistake into an error
+// code from the function that made it, which every caller here already copes
+// with, and a line in the log saying which one it was.
+static void __cdecl InvalidParameterHandler(const wchar_t* expression,
+                                            const wchar_t* function,
+                                            const wchar_t* file, unsigned line,
+                                            uintptr_t) {
+    // Release builds pass nulls for all four; the log line still says it
+    // happened, which is the part that matters.
+    AWA_LOG(L"CRT invalid parameter: %s in %s (%s:%u) - continuing",
+            expression ? expression : L"?", function ? function : L"?",
+            file ? file : L"?", line);
+}
+
+// Another copy of ProWindows already holds the single-instance mutex. Several
+// versions of this program live side by side on a development machine, and
+// they all share the mutex, the window class and the config folder - so
+// starting 1.3 while 1.2 was still running from another folder simply poked
+// the running 1.2 and opened *its* settings window, which looked exactly like
+// every version being the same program. Now: the same executable opens the
+// running copy's settings as before; a different one is offered the choice of
+// replacing what is running.
+static bool ReplaceRunningInstance(HWND existing) {
+    std::wstring theirs;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(existing, &pid);
+    if (HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+        wchar_t path[MAX_PATH * 2] = {};
+        DWORD len = (DWORD)ARRAYSIZE(path);
+        if (QueryFullProcessImageNameW(proc, 0, path, &len)) theirs = path;
+        CloseHandle(proc);
+    }
+    const std::wstring ours = ExePath();
+    if (theirs.empty() || _wcsicmp(theirs.c_str(), ours.c_str()) == 0) {
+        PostMessageW(existing, WM_COMMAND, IDM_SETTINGS, 0);
+        return false;
+    }
+
+    std::wstring text = L"ProWindows is already running from:\n" + theirs +
+                        L"\n\nThis copy is:\n" + ours +
+                        L"\n\nStop the running copy and use this one instead?\n"
+                        L"(Its hidden windows are put back first. If it starts "
+                        L"with Windows, the startup entry is moved to this copy.)";
+    const int answer = MessageBoxW(nullptr, text.c_str(),
+                                   L"ProWindows is already running",
+                                   MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1 |
+                                   MB_SETFOREGROUND | MB_TOPMOST);
+    if (answer != IDYES) return false;
+
+    // WM_CLOSE on the hidden main window is DefWindowProc -> DestroyWindow ->
+    // the ordinary exit path, in every version that has ever shipped. Not
+    // TerminateProcess: that skips RestoreAllWindows.
+    PostMessageW(existing, WM_CLOSE, 0, 0);
+    if (HANDLE proc = OpenProcess(SYNCHRONIZE, FALSE, pid)) {
+        WaitForSingleObject(proc, 8000);
+        CloseHandle(proc);
+    }
+    return true;
+}
+
 } // namespace awa
 
 // ---------------------------------------------------------------- entry point
@@ -1082,10 +1184,32 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
 
     HANDLE mutex = CreateMutexW(nullptr, TRUE, kMutexName);
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (HWND existing = FindWindowW(kWndClass, nullptr))
-            PostMessageW(existing, WM_COMMAND, IDM_SETTINGS, 0);
-        return 0;
+        HWND existing = FindWindowW(kWndClass, nullptr);
+        bool replaced = existing && ReplaceRunningInstance(existing);
+        if (!replaced) {
+            CloseHandle(mutex);
+            return 0;
+        }
+        // The old copy has been asked to go. Take the mutex over once it has.
+        CloseHandle(mutex);
+        mutex = nullptr;
+        for (int i = 0; i < 100 && !mutex; ++i) {
+            mutex = CreateMutexW(nullptr, TRUE, kMutexName);
+            if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+                CloseHandle(mutex);
+                mutex = nullptr;
+                Sleep(100);
+            }
+        }
+        if (!mutex) {
+            MessageBoxW(nullptr, L"The running copy did not exit. Exit it from its "
+                                 L"tray icon and try again.", kAppName, MB_ICONWARNING);
+            return 0;
+        }
     }
+
+    // Installed before anything else runs: see InvalidParameterHandler.
+    _set_invalid_parameter_handler(InvalidParameterHandler);
 
     g_inst = inst;
     // DPI awareness comes from the embedded manifest (PerMonitorV2). Calling
@@ -1127,16 +1251,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
 
     g_taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
 
+    // Hooks before the first scan, not after. The scan and the first pass
+    // take a while at logon - every application is starting at once - and a
+    // window that opened during them used to be nobody's: too late for the
+    // scan, too early for the hooks. Events raised before the message loop
+    // runs are simply queued, and the manager's reentrancy guard already
+    // handles any that are delivered inside the pass itself.
+    InstallHooks();
     g_wm.Init(g_wnd, &g_cfg);
     TrayAdd();
     HotkeysRegister(g_wnd, &g_cfg);
     ModDragInit(g_wnd);
     ModDragApplyConfig(&g_cfg);
-    InstallHooks();
     DragGuideInit(inst, &g_cfg);
     MonitorInit(inst, &g_cfg);
-    // MonitorInit shows the overlay straight from the config; if a game is
-    // already running it must not.
+    ClockInit(inst, &g_cfg);
+    // MonitorInit and ClockInit show their overlays straight from the config;
+    // if a game is already running they must not.
     UpdateOverlayVisibility();
     // Ask to be told when the screen goes off, so the overlay can stop. The
     // registration is held so it can be given back at the end rather than left
@@ -1180,6 +1311,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
         g_powerNotify = nullptr;
     }
     MonitorShutdown();
+    ClockShutdown();
     DragGuideShutdown();
     LauncherShutdown();
     SearchShutdown();

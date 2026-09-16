@@ -238,6 +238,23 @@ struct Config {
         kMonColourFromTheme, kMonColourFromTheme,
     };
 
+    // ---- desktop clock ----
+    // The monitor's sibling: same window, same chrome, its own styles and
+    // themes. Stored by name like monitor_theme, for the same reason.
+    bool  clockEnabled   = false;
+    int   clockX         = INT_MIN;     // INT_MIN = never placed, pick a corner
+    int   clockY         = INT_MIN;
+    bool  clockPinned    = false;
+    bool  clockOnDesktop = false;
+    int   clockOpacity   = 92;          // percent
+    int   clockScale     = 100;         // percent
+    int   clockTheme     = 0;           // index into the ClockSkin table
+    int   clockStyle     = 0;           // ClockStyle
+    bool  clockHours24   = false;
+    bool  clockSeconds   = false;
+    bool  clockDate      = true;
+    bool  clockWeekday   = true;
+
     // search bar
     // Which sources the search bar draws on besides installed apps. Files are
     // the only one that costs anything: the index is built once on a background

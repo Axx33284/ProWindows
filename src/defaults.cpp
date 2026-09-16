@@ -2,6 +2,7 @@
 // then calls SaveToFile, so the file on disk always matches the UI.
 #include "config.h"
 #include "montheme.h"
+#include "clocktheme.h"
 
 namespace awa {
 
@@ -227,6 +228,29 @@ bool Config::SaveToFile(const std::wstring& path) const {
     fwprintf(f, L"monitor_gpu_temp = %s\n", Bool(monShowGpuTemp));
     fwprintf(f, L"monitor_disk     = %s\n", Bool(monShowDisk));
     fwprintf(f, L"monitor_net      = %s\n\n", Bool(monShowNet));
+
+    fwprintf(f, L"# ------------------------------------------------------------ clock\n");
+    fwprintf(f, L"# The desktop clock. Same window as the monitor: drag it, pin it,\n");
+    fwprintf(f, L"# or send it to the desktop behind every window.\n");
+    fwprintf(f, L"clock_enabled    = %s\n", Bool(clockEnabled));
+    fwprintf(f, L"clock_pinned     = %s\n", Bool(clockPinned));
+    fwprintf(f, L"clock_on_desktop = %s\n", Bool(clockOnDesktop));
+    fwprintf(f, L"clock_x          = %d\n", clockX);
+    fwprintf(f, L"clock_y          = %d\n", clockY);
+    fwprintf(f, L"clock_opacity    = %d\n", clockOpacity);
+    fwprintf(f, L"clock_scale      = %d\n", clockScale);
+    fwprintf(f, L"# clock_theme: one of");
+    for (int i = 0; i < ClockSkinCount(); ++i)
+        fwprintf(f, L"%s %s", i ? L"," : L"", ClockSkinAt(i).id);
+    fwprintf(f, L"\nclock_theme      = %s\n", ClockSkinAt(clockTheme).id);
+    fwprintf(f, L"# clock_style: one of");
+    for (int i = 0; i < ClockStyleCount(); ++i)
+        fwprintf(f, L"%s %s", i ? L"," : L"", ClockStyleAt(i).id);
+    fwprintf(f, L"\nclock_style      = %s\n", ClockStyleAt(clockStyle).id);
+    fwprintf(f, L"clock_24h        = %s\n", Bool(clockHours24));
+    fwprintf(f, L"clock_seconds    = %s\n", Bool(clockSeconds));
+    fwprintf(f, L"clock_date       = %s\n", Bool(clockDate));
+    fwprintf(f, L"clock_weekday    = %s\n\n", Bool(clockWeekday));
 
     fwprintf(f, L"# ------------------------------------------------------------ search bar\n");
     fwprintf(f, L"# What the search bar looks through besides installed apps.\n");

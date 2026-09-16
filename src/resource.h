@@ -149,6 +149,27 @@
 // when something looks wrong. IDC_CHK_AUTOSTART / STARTMIN / ELEVAUTO moved
 // here from the Behaviour page with the Startup group they belong to.
 #define IDD_PAGE_GENERAL        218
+
+// Clock page
+#define IDD_PAGE_CLOCK          219
+#define IDC_CLK_ENABLED         1200
+#define IDC_CLK_PINNED          1201
+#define IDC_CLK_DESKTOP         1202
+#define IDC_CLK_RESET_POS       1203
+#define IDC_CLK_STYLE           1204
+#define IDC_CLK_STYLE_DESC      1205
+#define IDC_CLK_THEME           1206
+#define IDC_CLK_THEME_DESC      1207
+#define IDC_CLK_24H             1208
+#define IDC_CLK_SECONDS         1209
+#define IDC_CLK_DATE            1210
+#define IDC_CLK_WEEKDAY         1211
+#define IDC_CLK_OPACITY         1212
+#define IDC_CLK_OPACITY_VAL     1213
+#define IDC_CLK_SCALE           1214
+#define IDC_CLK_SCALE_VAL       1215
+#define IDC_CLK_PREVIEW         1216
+#define IDC_CLK_HINT            1217
 #define IDC_GEN_OPENCFG         1180
 #define IDC_GEN_OPENDIR         1181
 #define IDC_GEN_RELOAD          1182

@@ -13,10 +13,8 @@ namespace {
 
 using namespace Gdiplus;
 
-// The soft drop shadow is drawn inside the panel's own bitmap, so the bitmap
-// has to be bigger than the panel by this much on every side. Unscaled, like
-// every other number here.
-constexpr int kShadow = 9;
+// The shadow margin lives in the header now, shared with the clock.
+constexpr int kShadow = kPanelShadow;
 
 Color Argb(COLORREF c, BYTE a) {
     return Color(a, GetRValue(c), GetGValue(c), GetBValue(c));
@@ -64,7 +62,7 @@ void FillPill(Graphics* g, float x, float y, float w, float h, const Color& colo
 // Text is built at a size derived from the same scale as the geometry. The
 // settings window's own fonts are fixed-size, so borrowing them here would
 // leave the "Size" slider stretching the panel while the numbers stayed put.
-enum class Face { Small, Body, Bold, Number };
+enum class Face { Small, Body, Bold, Number, Mono, MonoBold };
 enum class VAlign { Top, Middle };
 
 const FontFamily* UiFamily() {
@@ -72,6 +70,26 @@ const FontFamily* UiFamily() {
     static const FontFamily* family = new FontFamily(L"Segoe UI");
     return family;
 }
+
+// The OSD style is columns of text, and columns of text only line up in a
+// monospace face - which is also simply what RivaTuner's overlay looks like.
+// Consolas ships with Windows; the fallback is for a machine that has had its
+// fonts pruned.
+const FontFamily* MonoFamily() {
+    static const FontFamily* family = [] {
+        FontFamily* f = new FontFamily(L"Consolas");
+        if (f->IsAvailable()) return (const FontFamily*)f;
+        delete f;
+        return UiFamily();
+    }();
+    return family;
+}
+
+// Bare skins draw text straight onto the desktop, and white text on a white
+// window is invisible. A dark copy one pixel down and right - the in-game OSD
+// trick - keeps it readable on anything. Set by MonDraw for the frame, read by
+// DrawStr; painting is UI-thread only, like every other static here.
+bool g_textShadow = false;
 
 // ---------------------------------------------------------------- object cache
 // Constructing a Gdiplus::Font is a font-family lookup and a device-context
@@ -91,6 +109,8 @@ const Font* CachedFont(Face face, float scale) {
         {  9.0f, FontStyleRegular },   // Body
         {  9.0f, FontStyleBold    },   // Bold
         { 14.0f, FontStyleBold    },   // Number
+        {  9.5f, FontStyleRegular },   // Mono
+        {  9.5f, FontStyleBold    },   // MonoBold
     };
     const Spec& spec = kSpecs[(int)face];
 
@@ -130,7 +150,9 @@ const Font* CachedFont(Face face, float scale) {
         if (best) return best;
     }
 
-    const Font* font = new Font(UiFamily(), (float)key / 4.0f, spec.style, UnitPixel);
+    const FontFamily* family =
+        (face == Face::Mono || face == Face::MonoBold) ? MonoFamily() : UiFamily();
+    const Font* font = new Font(family, (float)key / 4.0f, spec.style, UnitPixel);
     cache->push_back({ (int)face, key, font });
     return font;
 }
@@ -162,7 +184,14 @@ void DrawStr(Graphics* g, const wchar_t* text, Face face, float scale,
     const Font* font = CachedFont(face, scale);
     SolidBrush brush(Argb(color, alpha));
 
+    // The shadow first, offset by a scaled pixel, so the text lands on top.
+    const float off = g_textShadow ? (std::max)(1.0f, (float)(int)(1.0f * scale)) : 0.0f;
+    SolidBrush shade(Color((BYTE)(alpha * 3 / 4), 0, 0, 0));
+
     if (maxWidth <= 0.0f) {
+        if (off > 0.0f)
+            g->DrawString(text, -1, font, PointF(x + off, y + off),
+                          CachedFormat(hAlign, vAlign, false), &shade);
         g->DrawString(text, -1, font, PointF(x, y),
                       CachedFormat(hAlign, vAlign, false), &brush);
         return;
@@ -175,6 +204,9 @@ void DrawStr(Graphics* g, const wchar_t* text, Face face, float scale,
     if (hAlign == StringAlignmentCenter)   left = x - maxWidth / 2.0f;
     else if (hAlign == StringAlignmentFar) left = x - maxWidth;
     const float top = (vAlign == VAlign::Middle) ? y - h / 2.0f : y;
+    if (off > 0.0f)
+        g->DrawString(text, -1, font, RectF(left + off, top + off, maxWidth, h),
+                      CachedFormat(hAlign, vAlign, true), &shade);
     g->DrawString(text, -1, font, RectF(left, top, maxWidth, h),
                   CachedFormat(hAlign, vAlign, true), &brush);
 }
@@ -424,6 +456,17 @@ SIZE CellSize(const MonPaintCtx& ctx) {
             cell.cx = ctx.vertical ? 150 : 112;
             cell.cy = 18;
             break;
+        case MON_STYLE_OSD:
+            // Monospace columns - label, reading, detail - and room for the
+            // sparkline RTSS draws beside a "text, graph" item.
+            cell.cx = (ctx.vertical ? 204 : 176) + (ctx.graphs ? 46 : 0);
+            cell.cy = 15 + (ctx.topApps ? 12 : 0);
+            break;
+        case MON_STYLE_HUD:
+            // A device tag, up to three readings across, and the detail.
+            cell.cx = ctx.vertical ? 262 : 214;
+            cell.cy = 24 + (ctx.topApps ? 12 : 0);
+            break;
         default:                       // MON_STYLE_ROWS
             cell.cx = ctx.vertical ? 196 : 128;
             cell.cy = (ctx.graphs ? 52 : 30) + (ctx.topApps ? 13 : 0);
@@ -442,6 +485,8 @@ int GapFor(const MonPaintCtx& ctx) {
         case MON_STYLE_CARDS:   return 6;
         case MON_STYLE_RINGS:
         case MON_STYLE_ARCS:    return 4;
+        case MON_STYLE_OSD:     return 1;
+        case MON_STYLE_HUD:     return 5;
         default:                return 8;
     }
 }
@@ -449,7 +494,44 @@ int GapFor(const MonPaintCtx& ctx) {
 // How much clear space the panel keeps around its cells. Ticker is a strip, so
 // it gets almost none; everything else gets the usual margin.
 int PadFor(const MonPaintCtx& ctx) {
-    return ctx.style == MON_STYLE_TICKER ? 7 : 12;
+    if (ctx.style == MON_STYLE_TICKER) return 7;
+    if (ctx.style == MON_STYLE_OSD || ctx.style == MON_STYLE_HUD) return 9;
+    return 12;
+}
+
+// ------------------------------------------------------------------ grouping
+// Which device a metric belongs to, for the style that folds a device's
+// readouts onto one line. Anything not part of a family is its own line.
+int DeviceOf(int id) {
+    switch (id) {
+        case MON_CPU: case MON_CPUTEMP:                return 0;
+        case MON_GPU: case MON_GPUTEMP: case MON_VRAM: return 1;
+        default:                                       return 16 + id;
+    }
+}
+
+// The rows of each cell, in cell order. One row per cell for every style but
+// the HUD, which groups by device in the order the devices first appear - so
+// the user's order still decides which line is first, and where a device's
+// readouts sit within its line.
+void GroupRows(const std::vector<MonRow>& rows, const MonPaintCtx& ctx,
+               std::vector<std::vector<int>>* cells) {
+    cells->clear();
+    if (ctx.style != MON_STYLE_HUD) {
+        for (size_t i = 0; i < rows.size(); ++i) cells->push_back({ (int)i });
+        return;
+    }
+    std::vector<int> device;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const int d = DeviceOf(rows[i].id);
+        size_t at = 0;
+        while (at < device.size() && device[at] != d) ++at;
+        if (at == device.size()) {
+            device.push_back(d);
+            cells->push_back({});
+        }
+        (*cells)[at].push_back((int)i);
+    }
 }
 
 // ------------------------------------------------------------------ styles
@@ -767,6 +849,131 @@ void DrawTickerCell(Graphics* g, const MonRow& row, const MonPaintCtx& ctx,
             VAlign::Middle, w - (labelX - x) - labelW - 6 * s);
 }
 
+// The MSI Afterburner / RivaTuner on-screen display: one monospace line per
+// readout, label in the readout's colour, the number beside it, the detail
+// dimmer, everything in columns that line up down the panel because the face
+// is fixed-pitch. With graphs on, a sparkline sits at the right of the line
+// the way RTSS draws a "text, graph" item. Nothing else - no bars, no rings -
+// because the whole point of the look is that it is text.
+void DrawOsdCell(Graphics* g, const MonRow& row, const MonPaintCtx& ctx,
+                 float x, float y, float w, float h) {
+    const MonitorSkin& skin = *ctx.skin;
+    const float s = ctx.scale;
+    const bool have = row.metric->available;
+
+    const float graphW = ctx.graphs ? 42 * s : 0.0f;
+    const float labelW = 40 * s;
+    const float valueW = 62 * s;
+    const float textW  = w - graphW;
+
+    DrawStr(g, row.shortLabel ? row.shortLabel : row.label, Face::MonoBold, s,
+            row.color, 245, x, y, StringAlignmentNear, VAlign::Top, labelW);
+
+    const COLORREF valueColor =
+        (skin.value == kUseMetricColour) ? row.color : skin.value;
+    DrawStr(g, Reading(*row.metric, false), Face::Mono, s,
+            valueColor, have ? 255 : 120, x + labelW, y, StringAlignmentNear,
+            VAlign::Top, valueW + 8 * s);
+
+    if (!row.metric->detail.empty())
+        DrawStr(g, row.metric->detail.c_str(), Face::Mono, s, skin.detail, 215,
+                x + textW, y, StringAlignmentFar, VAlign::Top,
+                (std::max)(10.0f, textW - labelW - valueW - 6 * s));
+
+    if (ctx.topApps) {
+        const std::wstring& app = row.metric->topApp;
+        DrawStr(g, app.empty() ? L"-" : app.c_str(), Face::Mono, s,
+                app.empty() ? skin.detail : row.color, app.empty() ? 120 : 200,
+                x + labelW, y + 12 * s, StringAlignmentNear, VAlign::Top,
+                textW - labelW);
+    }
+
+    if (ctx.graphs)
+        DrawCurve(g, row, ctx, x + w - graphW + 4 * s, y + 2 * s, graphW - 4 * s,
+                  y + 13 * s, false);
+    (void)h;
+}
+
+// The HUD the benchmark channels build on top of Afterburner: one line per
+// device, with everything known about it across the line - "GPU 24% 71°C
+// 3.1 GB" - the device tag in its colour, the numbers big and white. The
+// readouts on a line are the ones the user has switched on, in the order they
+// have put them, so "GPU temperature first" is a drag away. With graphs on,
+// a faint history of the first readout sits behind the line.
+void DrawHudCell(Graphics* g, const std::vector<MonRow>& rows,
+                 const std::vector<int>& members, const MonPaintCtx& ctx,
+                 float x, float y, float w, float h) {
+    if (members.empty()) return;
+    const MonitorSkin& skin = *ctx.skin;
+    const float s = ctx.scale;
+    const MonRow& lead = rows[(size_t)members[0]];
+
+    const float lineH = 24 * s;
+    const float mid   = y + lineH / 2.0f;
+
+    if (ctx.graphs) {
+        // Under everything, and quieter than a real graph: it is a backdrop
+        // to the numbers, not a chart to read.
+        MonPaintCtx faint = ctx;
+        MonitorSkin quiet = skin;
+        quiet.graphFill = (BYTE)(skin.graphFill / 2);
+        quiet.graphLine = (BYTE)(skin.graphLine / 3);
+        faint.skin = &quiet;
+        DrawCurve(g, lead, faint, x, y + 2 * s, w, y + lineH - 2 * s, false);
+    }
+
+    // The device: the family's name, not the first readout's, so a line that
+    // starts with the GPU temperature still says GPU.
+    const wchar_t* tag = lead.shortLabel ? lead.shortLabel : lead.label;
+    switch (DeviceOf(lead.id)) {
+        case 0: tag = L"CPU"; break;
+        case 1: tag = L"GPU"; break;
+        default: break;
+    }
+    const float tagW = 38 * s;
+    DrawStr(g, tag, Face::Bold, s, lead.color, 255, x, mid,
+            StringAlignmentNear, VAlign::Middle, tagW);
+
+    // The readings share what is left after the tag and the detail. Three is
+    // the most a device has, and three "24%  47%  69°" fit as columns; a line
+    // with one reading has the room for the whole of it - "9.8 GB" rather
+    // than "61%", "↓ 1.4 MB/s" rather than a number that means nothing alone.
+    const float detailW = 64 * s;
+    const size_t n      = (std::min)((size_t)3, members.size());
+    const float avail   = w - tagW - detailW;
+    const float colW    = (n >= 3) ? avail / 3.0f
+                        : (n == 2) ? (std::min)(80.0f * s, avail / 2.0f)
+                        :            avail;
+    const bool compact  = n >= 2;
+    float cx = x + tagW;
+    for (size_t i = 0; i < n; ++i) {
+        const MonRow& row = rows[(size_t)members[i]];
+        const bool have = row.metric->available;
+        const COLORREF valueColor =
+            (skin.value == kUseMetricColour) ? row.color : skin.value;
+        DrawStr(g, Reading(*row.metric, compact), Face::Number, s, valueColor,
+                have ? 255 : 120, cx, mid, StringAlignmentNear, VAlign::Middle,
+                colW - 4 * s);
+        cx += colW;
+    }
+
+    // What the lead readout has to add - "of 31.6 GB", "4.2 GHz" - at the
+    // right, dim, where it does not compete with the numbers.
+    if (!lead.metric->detail.empty())
+        DrawStr(g, lead.metric->detail.c_str(), Face::Small, s, skin.detail, 210,
+                x + w, mid, StringAlignmentFar, VAlign::Middle,
+                (std::max)(10.0f, x + w - cx));
+
+    if (ctx.topApps) {
+        const std::wstring& app = lead.metric->topApp;
+        DrawStr(g, app.empty() ? L"-" : app.c_str(), Face::Small, s,
+                app.empty() ? skin.detail : lead.color, app.empty() ? 120 : 210,
+                x + tagW, y + lineH - 1 * s, StringAlignmentNear, VAlign::Top,
+                w - tagW);
+    }
+    (void)h;
+}
+
 void DrawCell(Graphics* g, const MonRow& row, const MonPaintCtx& ctx,
               float x, float y, float w, float h) {
     switch (ctx.style) {
@@ -777,8 +984,18 @@ void DrawCell(Graphics* g, const MonRow& row, const MonPaintCtx& ctx,
         case MON_STYLE_GRAPH:   DrawGraphCell(g, row, ctx, x, y, w, h);   break;
         case MON_STYLE_CARDS:   DrawCardsCell(g, row, ctx, x, y, w, h);   break;
         case MON_STYLE_TICKER:  DrawTickerCell(g, row, ctx, x, y, w, h);  break;
+        case MON_STYLE_OSD:     DrawOsdCell(g, row, ctx, x, y, w, h);     break;
         default:                DrawRowsCell(g, row, ctx, x, y, w, h);    break;
     }
+}
+
+// A cell is one row in every style but the HUD, where it is a device.
+void DrawCellRows(Graphics* g, const std::vector<MonRow>& rows,
+                  const std::vector<int>& members, const MonPaintCtx& ctx,
+                  float x, float y, float w, float h) {
+    if (members.empty()) return;
+    if (ctx.style == MON_STYLE_HUD) DrawHudCell(g, rows, members, ctx, x, y, w, h);
+    else                            DrawCell(g, rows[(size_t)members[0]], ctx, x, y, w, h);
 }
 
 // A soft shadow under the panel, drawn as a handful of concentric rounded
@@ -810,7 +1027,7 @@ void PaintPanelShadow(Graphics* g, const RectF& panel, float radius, BYTE alpha,
 
 // The shadow, the panel fill, the gloss and the border, painted into a surface
 // of their own.
-void PaintPanelChrome(Graphics* g, const MonitorSkin& skin, const RectF& panel,
+void PaintPanelChrome(Graphics* g, const PanelLook& look, const RectF& panel,
                       float radius, BYTE alpha, float spread) {
     g->SetSmoothingMode(SmoothingModeAntiAlias);
     PaintPanelShadow(g, panel, radius, alpha, spread);
@@ -822,11 +1039,11 @@ void PaintPanelChrome(Graphics* g, const MonitorSkin& skin, const RectF& panel,
     // along the top edge so it reads as a raised piece of glass.
     LinearGradientBrush fill(
         PointF(0.0f, panel.Y), PointF(0.0f, panel.GetBottom() + 1.0f),
-        Argb(skin.panelTop, alpha), Argb(skin.panelBottom, alpha));
+        Argb(look.panelTop, alpha), Argb(look.panelBottom, alpha));
     g->FillPath(&fill, &path);
 
-    if (skin.gloss > 0) {
-        Pen gloss(Color((BYTE)(skin.gloss * alpha / 255), 255, 255, 255), 1.0f);
+    if (look.gloss > 0) {
+        Pen gloss(Color((BYTE)(look.gloss * alpha / 255), 255, 255, 255), 1.0f);
         g->DrawArc(&gloss, panel.X + 1.0f, panel.Y + 1.0f, radius * 2, radius * 2,
                    200.0f, 70.0f);
         g->DrawLine(&gloss, panel.X + 1.0f + radius, panel.Y + 1.0f,
@@ -835,34 +1052,40 @@ void PaintPanelChrome(Graphics* g, const MonitorSkin& skin, const RectF& panel,
                    radius * 2, radius * 2, 290.0f, 70.0f);
     }
 
-    Pen pen(Argb(skin.border, (BYTE)(alpha * skin.borderAlpha / 255)), 1.0f);
+    Pen pen(Argb(look.border, (BYTE)(alpha * look.borderAlpha / 255)), 1.0f);
     g->DrawPath(&pen, &path);
 }
 
 // ---------------------------------------------------------------- chrome cache
 // None of the chrome changes between one frame and the next: the same size, the
-// same skin, the same opacity produce the same pixels every time. Only the
+// same look, the same opacity produce the same pixels every time. Only the
 // readings move. Painting it fresh each frame made the shadow alone - nine
 // stacked antialiased rounded rectangles the size of the whole panel - two
 // thirds of the cost of a frame, and a frame is drawn thirty times a second for
 // the length of every glide.
 //
-// So it is rendered once into a bitmap and blitted afterwards. Two entries,
-// because the settings page's live preview draws through this same painter at a
-// different size and must not evict the overlay's copy on every repaint.
+// So it is rendered once into a bitmap and blitted afterwards. Four entries:
+// the monitor and the clock each have a live panel and a settings preview at a
+// different size, and none of them should evict another on every repaint.
 struct ChromeEntry {
     int    w = 0, h = 0;
     int    radius = 0;             // quarter-pixels
     int    spread = 0;
     BYTE   alpha  = 0;
-    const  MonitorSkin* skin = nullptr;
+    PanelLook look;
     Bitmap* bitmap = nullptr;
-    unsigned long long used = 0;   // for the two-entry eviction below
+    unsigned long long used = 0;   // for the eviction below
 };
 
-Bitmap* PanelChrome(const MonitorSkin& skin, int width, int height,
+bool SameLook(const PanelLook& a, const PanelLook& b) {
+    return a.panelTop == b.panelTop && a.panelBottom == b.panelBottom &&
+           a.border == b.border && a.borderAlpha == b.borderAlpha &&
+           a.gloss == b.gloss && a.radius == b.radius && a.bare == b.bare;
+}
+
+Bitmap* PanelChrome(const PanelLook& look, int width, int height,
                     const RectF& panel, float radius, BYTE alpha, float spread) {
-    static ChromeEntry cache[2];
+    static ChromeEntry cache[4];
     static unsigned long long tick = 0;
     ++tick;
 
@@ -872,7 +1095,7 @@ Bitmap* PanelChrome(const MonitorSkin& skin, int width, int height,
     ChromeEntry* victim = &cache[0];
     for (ChromeEntry& e : cache) {
         if (e.bitmap && e.w == width && e.h == height && e.radius == rKey &&
-            e.spread == sKey && e.alpha == alpha && e.skin == &skin) {
+            e.spread == sKey && e.alpha == alpha && SameLook(e.look, look)) {
             e.used = tick;
             return e.bitmap;
         }
@@ -884,7 +1107,7 @@ Bitmap* PanelChrome(const MonitorSkin& skin, int width, int height,
     {
         Graphics cg(fresh);
         cg.Clear(Color(0, 0, 0, 0));
-        PaintPanelChrome(&cg, skin, panel, radius, alpha, spread);
+        PaintPanelChrome(&cg, look, panel, radius, alpha, spread);
     }
 
     delete victim->bitmap;
@@ -893,22 +1116,91 @@ Bitmap* PanelChrome(const MonitorSkin& skin, int width, int height,
     victim->radius = rKey;
     victim->spread = sKey;
     victim->alpha  = alpha;
-    victim->skin   = &skin;
+    victim->look   = look;
     victim->bitmap = fresh;
     victim->used   = tick;
     return fresh;
 }
 
+PanelLook LookOf(const MonitorSkin& skin) {
+    PanelLook look;
+    look.panelTop    = skin.panelTop;
+    look.panelBottom = skin.panelBottom;
+    look.border      = skin.border;
+    look.borderAlpha = skin.borderAlpha;
+    look.gloss       = skin.gloss;
+    look.radius      = skin.radius;
+    look.bare        = skin.bare;
+    return look;
+}
+
 } // namespace
 
 // ------------------------------------------------------------------ public
-SIZE MonMeasure(int rowCount, const MonPaintCtx& ctx) {
+void PaintPanel(Gdiplus::Graphics* g, const PanelLook& look, int width, int height,
+                float scale, BYTE alpha) {
+    const float radius = look.radius * scale;
+    const float shadow = (float)(int)(kShadow * scale);
+    const float panelW = (float)width - shadow * 2;
+    const float panelH = (float)height - shadow * 2;
+    if (panelW <= 2.0f || panelH <= 2.0f) return;
+    const RectF panel(shadow + 0.5f, shadow + 0.5f, panelW - 1.0f, panelH - 1.0f);
+
+    if (look.bare) {
+        // No chrome - but not nothing. A layered window passes clicks through
+        // any pixel whose alpha is zero, and a panel that can only be grabbed
+        // by its letters cannot be dragged. One count of alpha over the whole
+        // panel is invisible and enough to make it solid to the mouse.
+        SolidBrush ghost(Color(1, 0, 0, 0));
+        g->FillRectangle(&ghost, panel);
+    } else if (Bitmap* chrome = PanelChrome(look, width, height, panel, radius,
+                                            alpha, shadow)) {
+        // Source-over rather than a straight copy: the settings page draws this
+        // same panel onto an opaque device context under a transform, and a
+        // copy would stamp the transparent margin over what is behind it.
+        g->DrawImage(chrome, 0, 0, width, height);
+    } else {
+        PaintPanelChrome(g, look, panel, radius, alpha, shadow);
+    }
+}
+
+namespace {
+
+// Where cell `index` of `count` sits, before any drag is applied. The one
+// formula the layout, the hit-test and the drag feedback all use, so they
+// cannot disagree by a pixel.
+RECT CellRectAt(int index, const MonPaintCtx& ctx, int panelW) {
+    const float s   = ctx.scale;
+    const int pad    = (int)(PadFor(ctx) * s);
+    const int shadow = (int)(kShadow * s);
+    const SIZE cell  = CellSize(ctx);
+    const int gap    = (int)(GapFor(ctx) * s);
+    const int cellH  = (int)(cell.cy * s);
+    // Down a column every cell shares the panel's width; across a row they
+    // keep their natural width so the panel grows instead of the cells
+    // stretching.
+    const int cellW  = ctx.vertical ? (panelW - pad * 2) : (int)(cell.cx * s);
+
+    RECT r;
+    if (ctx.vertical) {
+        r.left = shadow + pad;
+        r.top  = shadow + pad + index * (cellH + gap);
+    } else {
+        r.left = shadow + pad + index * (cellW + gap);
+        r.top  = shadow + pad;
+    }
+    r.right  = r.left + cellW;
+    r.bottom = r.top + cellH;
+    return r;
+}
+
+SIZE MeasureCells(int cellCount, const MonPaintCtx& ctx) {
     const float s = ctx.scale;
     const int pad    = (int)(PadFor(ctx) * s);
     const int shadow = (int)(kShadow * s);
 
     SIZE size;
-    if (rowCount <= 0) {
+    if (cellCount <= 0) {
         size.cx = (int)(150 * s) + shadow * 2;
         size.cy = (int)(56 * s) + shadow * 2;
         return size;
@@ -921,14 +1213,37 @@ SIZE MonMeasure(int rowCount, const MonPaintCtx& ctx) {
 
     if (ctx.vertical) {
         size.cx = cellW + pad * 2;
-        size.cy = pad * 2 + cellH * rowCount + gap * (rowCount - 1);
+        size.cy = pad * 2 + cellH * cellCount + gap * (cellCount - 1);
     } else {
-        size.cx = pad * 2 + cellW * rowCount + gap * (rowCount - 1);
+        size.cx = pad * 2 + cellW * cellCount + gap * (cellCount - 1);
         size.cy = cellH + pad * 2;
     }
     size.cx += shadow * 2;
     size.cy += shadow * 2;
     return size;
+}
+
+} // namespace
+
+void MonLayout(const std::vector<MonRow>& rows, const MonPaintCtx& ctx,
+               std::vector<MonCell>* out) {
+    out->clear();
+    std::vector<std::vector<int>> groups;
+    GroupRows(rows, ctx, &groups);
+    const SIZE size = MeasureCells((int)groups.size(), ctx);
+    const int panelW = size.cx - (int)(kShadow * ctx.scale) * 2;
+    for (size_t i = 0; i < groups.size(); ++i) {
+        MonCell cell;
+        cell.rect = CellRectAt((int)i, ctx, panelW);
+        cell.rows = std::move(groups[i]);
+        out->push_back(std::move(cell));
+    }
+}
+
+SIZE MonMeasure(const std::vector<MonRow>& rows, const MonPaintCtx& ctx) {
+    std::vector<std::vector<int>> groups;
+    GroupRows(rows, ctx, &groups);
+    return MeasureCells((int)groups.size(), ctx);
 }
 
 void MonDraw(Gdiplus::Graphics* g, int width, int height,
@@ -939,10 +1254,9 @@ void MonDraw(Gdiplus::Graphics* g, int width, int height,
 
     g->SetSmoothingMode(SmoothingModeAntiAlias);
     g->SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+    g_textShadow = skin.bare;
 
     const float s = local.scale;
-    const float radius = skin.radius * s;
-    const int   pad    = (int)(PadFor(local) * s);
     const float shadow = (float)(int)(kShadow * s);
 
     // Everything below is drawn relative to the panel, which is inset from the
@@ -950,40 +1264,80 @@ void MonDraw(Gdiplus::Graphics* g, int width, int height,
     const float panelW = (float)width - shadow * 2;
     const float panelH = (float)height - shadow * 2;
     if (panelW <= 2.0f || panelH <= 2.0f) return;
-    const RectF panel(shadow + 0.5f, shadow + 0.5f, panelW - 1.0f, panelH - 1.0f);
 
-    if (Bitmap* chrome = PanelChrome(skin, width, height, panel, radius,
-                                     local.alpha, shadow)) {
-        // Source-over rather than a straight copy: the settings page draws this
-        // same panel onto an opaque device context under a transform, and a
-        // copy would stamp the transparent margin over what is behind it.
-        g->DrawImage(chrome, 0, 0, width, height);
-    } else {
-        PaintPanelChrome(g, skin, panel, radius, local.alpha, shadow);
-    }
+    PaintPanel(g, LookOf(skin), width, height, s, local.alpha);
 
     if (rows.empty()) {
         DrawStr(g, L"Nothing selected", Face::Body, s, skin.detail, 255,
                 width / 2.0f, height / 2.0f - 8 * s, StringAlignmentCenter);
+        g_textShadow = false;
         return;
     }
 
-    const SIZE cell = CellSize(local);
-    const int gap   = (int)(GapFor(local) * s);
-    const int cellH = (int)(cell.cy * s);
-    // Down a column every cell shares the panel's width; across a row they keep
-    // their natural width so the panel grows instead of the cells stretching.
-    const int cellW = local.vertical ? ((int)panelW - pad * 2) : (int)(cell.cx * s);
+    std::vector<std::vector<int>> groups;
+    GroupRows(rows, local, &groups);
+    const int count = (int)groups.size();
 
-    for (size_t i = 0; i < rows.size(); ++i) {
-        const float x = shadow + (local.vertical
-                            ? (float)pad
-                            : (float)(pad + (int)i * (cellW + gap)));
-        const float y = shadow + (local.vertical
-                            ? (float)(pad + (int)i * (cellH + gap))
-                            : (float)pad);
-        DrawCell(g, rows[i], local, x, y, (float)cellW, (float)cellH);
+    const MonDrag& drag = local.drag;
+    const bool lifted = drag.cell >= 0 && drag.cell < count && count > 1;
+
+    // Which cell is drawn in each slot. With nothing lifted that is the
+    // identity; with one lifted, the others close up around the slot it
+    // would land in, which is left empty for it.
+    std::vector<int> inSlot;
+    inSlot.reserve((size_t)count);
+    for (int i = 0; i < count; ++i) if (!lifted || i != drag.cell) inSlot.push_back(i);
+    int hole = -1;
+    if (lifted) {
+        hole = (std::max)(0, (std::min)(count - 1, drag.slot));
+        inSlot.insert(inSlot.begin() + hole, -1);
     }
+
+    for (int slot = 0; slot < count; ++slot) {
+        const RECT r = CellRectAt(slot, local, (int)panelW);
+        const float x = (float)r.left, y = (float)r.top;
+        const float w = (float)(r.right - r.left), h = (float)(r.bottom - r.top);
+        const int cell = inSlot[(size_t)slot];
+        if (cell < 0) {
+            // The hole: a dotted outline so the eye knows where the lifted
+            // readout will drop, and nothing else, so it reads as empty.
+            Pen dots(Argb(skin.label, 110), (std::max)(1.0f, 1.0f * s));
+            dots.SetDashStyle(DashStyleDot);
+            GraphicsPath path;
+            AddRoundedPath(&path, RectF(x + 0.5f, y + 0.5f, w - 1.0f, h - 1.0f),
+                           (std::max)(2.0f, 5.0f * s));
+            g->DrawPath(&dots, &path);
+            continue;
+        }
+        DrawCellRows(g, rows, groups[(size_t)cell], local, x, y, w, h);
+    }
+
+    if (lifted) {
+        // The lifted readout, last so it sits on top, where the pointer has
+        // taken it. A backing in the panel's own colour lifts it off the
+        // cells beneath, which is what makes it read as picked up rather
+        // than painted over.
+        RECT home = CellRectAt(0, local, (int)panelW);
+        const int cellW = home.right - home.left, cellH = home.bottom - home.top;
+        float x = (float)home.left, y = (float)home.top;
+        if (local.vertical) y = (float)drag.pos; else x = (float)drag.pos;
+
+        const RectF box(x - 3 * s, y - 3 * s, cellW + 6 * s, cellH + 6 * s);
+        GraphicsPath path;
+        AddRoundedPath(&path, box, (std::max)(3.0f, 6.0f * s));
+        // Bare skins have no panel colour to lift with; a dark glass does the
+        // same job on those.
+        const COLORREF back = skin.bare ? RGB(20, 20, 24) : skin.panelTop;
+        SolidBrush fill(Argb(back, skin.bare ? 200 : 245));
+        g->FillPath(&fill, &path);
+        const MonRow& lead = rows[(size_t)groups[(size_t)drag.cell][0]];
+        Pen edge(Argb(lead.color, 200), (std::max)(1.0f, 1.5f * s));
+        g->DrawPath(&edge, &path);
+
+        DrawCellRows(g, rows, groups[(size_t)drag.cell], local, x, y,
+                     (float)cellW, (float)cellH);
+    }
+    g_textShadow = false;
 }
 
 } // namespace awa

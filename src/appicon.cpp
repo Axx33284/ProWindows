@@ -50,7 +50,9 @@ constexpr size_t kMaxIcons = 512;
 // a 28-pixel icon is about 3 KB, and the ceiling above puts the whole thing
 // comfortably under two megabytes.
 constexpr unsigned kCacheMagic   = 0x43494D50;   // "PMIC"
-constexpr unsigned kCacheVersion = 1;
+// 2: rows are genuinely top-down. Version 1 files hold every icon inverted,
+// and are thrown away rather than read - one background sweep rebuilds them.
+constexpr unsigned kCacheVersion = 2;
 // A shell icon does change - an application updates, a shortcut is repointed -
 // just not often. Rebuilding the lot once a fortnight costs one background pass
 // nobody is waiting on.
@@ -87,13 +89,26 @@ bool ReadPixels(HBITMAP bitmap, Pixels* out) {
     const int h = dib.dsBm.bmHeight < 0 ? -dib.dsBm.bmHeight : dib.dsBm.bmHeight;
     if (w <= 0 || h <= 0 || w > 512 || h > 512) return false;
 
+    // The shell hands its icons back as *bottom-up* DIBs - the first row in
+    // memory is the bottom of the picture - which is the GDI default, and
+    // AlphaBlend reads them correctly. Pixels are always stored top-down, and
+    // MakeBitmap rebuilds them as top-down, so a bottom-up source has to be
+    // turned over on the way in. It was not, and so every icon that came back
+    // from the cache - which is every icon from the second launch on - was
+    // drawn upside down.
+    //
+    // dsBm.bmHeight is always positive; the orientation lives in the header.
+    const bool bottomUp = dib.dsBmih.biHeight > 0;
+
     out->w = w;
     out->h = h;
     out->bgra.resize((size_t)w * (size_t)h * 4);
     const BYTE* src = static_cast<const BYTE*>(dib.dsBm.bmBits);
-    for (int y = 0; y < h; ++y)
+    for (int y = 0; y < h; ++y) {
+        const int srcRow = bottomUp ? (h - 1 - y) : y;
         memcpy(out->bgra.data() + (size_t)y * w * 4,
-               src + (size_t)y * (size_t)dib.dsBm.bmWidthBytes, (size_t)w * 4);
+               src + (size_t)srcRow * (size_t)dib.dsBm.bmWidthBytes, (size_t)w * 4);
+    }
     return true;
 }
 

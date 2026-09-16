@@ -2,6 +2,7 @@
 #include "monpaint.h"
 #include "montheme.h"
 #include "sysinfo.h"
+#include "thermal.h"
 #include "app.h"
 #include <objidl.h>
 // GDI+ headers use bare min/max, which NOMINMAX removes. Feed them the
@@ -19,6 +20,14 @@ namespace {
 constexpr wchar_t kClass[]    = L"ProWindows_Monitor";
 constexpr UINT_PTR kTimerSample = 1;   // take a reading
 constexpr UINT_PTR kTimerEase   = 2;   // slide the gauges towards it
+constexpr UINT_PTR kTimerLift   = 3;   // a press has been held long enough to lift a readout
+
+// A readout is picked up by holding the mouse on it for this long without
+// moving, or at once with Ctrl held. Long enough that an ordinary drag of the
+// panel - press and go - never lifts anything by accident; short enough that
+// "hold it and it comes up" feels like a gesture and not a wait.
+constexpr UINT kLiftHoldMs  = 320;
+constexpr int  kLiftSlackPx = 4;       // movement allowed during the hold
 
 // How long a gauge takes to travel to a new reading, and how often it is
 // redrawn while it does. Long enough to read as motion, short enough that the
@@ -63,6 +72,184 @@ HWND      g_wnd  = nullptr;
 bool      g_wantVisible = false;
 SystemSampler g_sampler;
 SystemLoad    g_load;
+// False until the first reading has landed. A layered window with nothing
+// drawn into it is invisible, which is exactly right for the moment between
+// the panel being asked for and its first reading arriving: better nothing
+// than a frame of "--" that is replaced a few milliseconds later.
+bool          g_haveReading = false;
+
+// ---- the sampling thread ----
+// Sample() is not the UI thread's to call. PdhCollectQueryData on the GPU
+// Engine wildcard walks every process's GPU engines and is unbounded - tens of
+// milliseconds when warm, seconds the first time after logon while the counter
+// provider starts - and it ran on the UI thread once a second, inside the same
+// message loop that moves windows and steps animations. Every animation that
+// overlapped a sample hitched, and at startup the whole application - tray
+// icon, shortcuts, tiling - froze until the counters had opened.
+//
+// So a thread of its own takes the readings and posts WM_AWA_SAMPLED; the UI
+// thread only ever moves a finished reading into g_load and paints. The thread
+// parks on an event while the panel is hidden, so it costs nothing then, and
+// runs below normal priority so a reading never competes with anything the
+// user is actually doing.
+HANDLE g_sampleThread = nullptr;
+HANDLE g_sampleQuit   = nullptr;   // manual-reset: exit
+HANDLE g_sampleWake   = nullptr;   // auto-reset: state changed, or read now
+LONG   g_sampleOn     = 0;         // 1 while the panel wants readings
+LONG   g_sampleEvery  = 1000;      // ms between readings
+// The finished reading, handed from the thread to the UI thread.
+CRITICAL_SECTION g_loadLock;
+bool       g_loadLockReady = false;
+SystemLoad g_freshLoad;
+bool       g_freshReady = false;
+// True when the thread could not be created and readings are being taken on
+// the UI thread from kTimerSample instead - the old way, kept as a fallback.
+bool       g_sampleInline = false;
+
+void EnsureLoadLock() {
+    if (g_loadLockReady) return;
+    InitializeCriticalSection(&g_loadLock);
+    g_loadLockReady = true;
+}
+
+// Defined with the painting code further down; the thread plumbing above it
+// needs them by name.
+void PushHistory();
+void BeginEase();
+void Redraw();
+void ApplyZOrder();
+
+DWORD WINAPI SampleThread(LPVOID) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+
+    HANDLE waits[2] = { g_sampleQuit, g_sampleWake };
+    bool open = false;          // whether the sampler holds counters right now
+
+    for (;;) {
+        const bool on = InterlockedCompareExchange(&g_sampleOn, 0, 0) != 0;
+        if (!on && open) {
+            // Hidden. Let the counters go rather than hold a PDH query open
+            // for a panel nobody can see, and park on the events.
+            g_sampler.Close();
+            open = false;
+        }
+
+        // A wake means "look at the state again and, if the panel is up,
+        // take a reading now" - that is how the first frame after a show is
+        // fetched without waiting out an interval. A timeout is the ordinary
+        // once-per-interval reading.
+        LONG every = InterlockedCompareExchange(&g_sampleEvery, 0, 0);
+        if (every < 100) every = 100;
+        const DWORD hit = WaitForMultipleObjects(2, waits, FALSE,
+                                                 on ? (DWORD)every : INFINITE);
+        if (hit == WAIT_OBJECT_0) break;                       // quit
+        if (hit != WAIT_OBJECT_0 + 1 && hit != WAIT_TIMEOUT) break;
+        // Re-read after the wait, not before it: a wake is how the panel
+        // says it has just come up, and that reading is wanted now, not an
+        // interval from now. A wake with the panel down is the parking case.
+        if (InterlockedCompareExchange(&g_sampleOn, 0, 0) == 0) continue;
+
+        SystemLoad load;
+        g_sampler.Sample(&load);
+        open = true;
+
+        EnterCriticalSection(&g_loadLock);
+        g_freshLoad  = std::move(load);
+        g_freshReady = true;
+        LeaveCriticalSection(&g_loadLock);
+        // g_wnd is only cleared after this thread has been joined, so it is
+        // either the live window or the post fails harmlessly.
+        if (g_wnd) PostMessageW(g_wnd, WM_AWA_SAMPLED, 0, 0);
+    }
+
+    if (open) g_sampler.Close();
+    return 0;
+}
+
+// Starts the thread if it is not running. False if it could not be started,
+// in which case the caller samples on the UI thread as before.
+bool EnsureSampleThread() {
+    if (g_sampleThread) return true;
+    if (g_sampleInline) return false;       // already decided; do not retry every second
+    EnsureLoadLock();
+    if (!g_sampleQuit) g_sampleQuit = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_sampleWake) g_sampleWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (g_sampleQuit && g_sampleWake)
+        g_sampleThread = CreateThread(nullptr, 0, SampleThread, nullptr, 0, nullptr);
+    if (!g_sampleThread) {
+        AWA_LOG(L"monitor: sampling thread could not be started; sampling inline");
+        g_sampleInline = true;
+        return false;
+    }
+    return true;
+}
+
+// Everything that happens once a reading is in g_load. One function, because
+// the thread's readings and the inline fallback's must be treated alike.
+void OnReading() {
+    g_haveReading = true;
+    // Explorer builds a *new* desktop window when the wallpaper changes - a
+    // slideshow, Spotlight, a theme - and the panel, which is owned by the
+    // old one and sitting at the bottom of the z-order, ends up behind it.
+    // Nothing broadcasts TaskbarCreated for that, so the overlay simply
+    // vanished and stayed vanished. One handle comparison per reading is
+    // enough to notice, and re-owning it puts it back.
+    if (g_cfg && g_cfg->monitorOnDesktop && g_wnd) {
+        HWND shell = GetShellWindow();
+        if (shell && (HWND)GetWindowLongPtrW(g_wnd, GWLP_HWNDPARENT) != shell)
+            ApplyZOrder();
+    }
+    PushHistory();
+    BeginEase();
+    Redraw();
+}
+
+// Asks for readings every `everyMs`, starting with one straight away.
+void SampleStart(UINT everyMs) {
+    InterlockedExchange(&g_sampleEvery, (LONG)everyMs);
+    if (EnsureSampleThread()) {
+        if (g_wnd) KillTimer(g_wnd, kTimerSample);
+        InterlockedExchange(&g_sampleOn, 1);
+        SetEvent(g_sampleWake);
+        return;
+    }
+    // Fallback: the old inline path, on the UI thread.
+    if (!g_wnd) return;
+    SetTimer(g_wnd, kTimerSample, everyMs, nullptr);
+    g_sampler.Sample(&g_load);
+    OnReading();
+}
+
+// Stops asking. The thread releases the counters and parks; nothing is torn
+// down, so the next start is a SetEvent away.
+void SampleStop() {
+    InterlockedExchange(&g_sampleOn, 0);
+    if (g_sampleWake) SetEvent(g_sampleWake);
+    if (g_wnd) KillTimer(g_wnd, kTimerSample);
+    if (g_sampleInline) g_sampler.Close();
+}
+
+// Ends the thread. Once, at exit, before the window it posts to goes away.
+void SampleShutdown() {
+    SampleStop();
+    bool stopped = true;
+    if (g_sampleThread) {
+        SetEvent(g_sampleQuit);
+        // It can be inside a PDH call, which is not interruptible. Abandoned
+        // rather than freed out from under, like every other worker here -
+        // MAP.md invariant 12 - and its handles go with it.
+        stopped = (WaitForSingleObject(g_sampleThread, 3000) == WAIT_OBJECT_0);
+        if (stopped) CloseHandle(g_sampleThread);
+        else AWA_LOG(L"monitor: sampling thread did not stop in time; abandoning it");
+        g_sampleThread = nullptr;
+    }
+    if (stopped) {
+        if (g_sampleQuit) CloseHandle(g_sampleQuit);
+        if (g_sampleWake) CloseHandle(g_sampleWake);
+    }
+    g_sampleQuit = nullptr;
+    g_sampleWake = nullptr;
+}
 
 // One history ring per metric, kept across config changes.
 float g_history[MON_METRIC_COUNT][kMonHistory] = {};
@@ -81,6 +268,18 @@ bool  g_easing = false;
 bool  g_dragging = false;
 POINT g_dragOrigin = {};
 RECT  g_dragStart  = {};
+
+// Rearranging the readouts by dragging one. `cell` is the index into what
+// MonLayout returned for the frame the press landed on; the cells are laid
+// out again on every move, so the index is all that is kept.
+struct Reorder {
+    bool  active  = false;   // a readout is lifted and following the pointer
+    bool  armed   = false;   // pressed on a readout, waiting for the hold
+    int   cell    = -1;
+    int   grab    = 0;       // pointer offset from the cell's leading edge, along the axis
+    int   slot    = -1;      // where it would land now
+    int   pos     = 0;       // its leading edge now, bitmap px
+} g_reorder;
 
 // What the last frame put on screen, as one number. A glide repaints thirty
 // times a second and a sample once a second, and on an idle machine most of
@@ -169,6 +368,7 @@ std::vector<MonRow> BuildRows() {
 
         const MonitorMetricInfo& info = MonitorMetricAt(m);
         MonRow row;
+        row.id         = m;
         row.label      = info.label;
         row.shortLabel = info.shortLabel;
         row.color      = MonitorMetricColour(skin, m, g_cfg->monColor[m]);
@@ -264,6 +464,11 @@ MonPaintCtx LiveCtx() {
     ctx.historyLen = g_historyLen;
     ctx.style      = g_cfg ? g_cfg->monitorStyle : MON_STYLE_ROWS;
     ctx.skin       = &Skin();
+    if (g_reorder.active) {
+        ctx.drag.cell = g_reorder.cell;
+        ctx.drag.slot = g_reorder.slot;
+        ctx.drag.pos  = g_reorder.pos;
+    }
     return ctx;
 }
 
@@ -280,6 +485,10 @@ void ApplySampler() {
     want.net     = g_cfg->monShowNet;
     want.topApps = g_cfg->monitorTopApps;
     g_sampler.Configure(want);
+    // The temperature probe is its own thread and is controlled from here,
+    // the UI thread - never from the sampling thread, which only reads what
+    // the probe has published.
+    ThermalWant(want.cpuTemp, want.gpuTemp);
 }
 
 // Everything that can change what a frame looks like, folded into one 64-bit
@@ -308,6 +517,9 @@ unsigned long long FrameSignature(const MonPaintCtx& ctx,
     mix((unsigned long long)ctx.historyLen);
     mix((unsigned long long)(uintptr_t)ctx.skin);
     mix((unsigned long long)(long long)(ctx.scale * 100.0f));
+    mix((unsigned long long)(long long)ctx.drag.cell);
+    mix((unsigned long long)(long long)ctx.drag.slot);
+    mix((unsigned long long)(long long)ctx.drag.pos);
 
     for (const MonRow& row : rows) {
         mix((unsigned long long)row.color);
@@ -334,10 +546,12 @@ unsigned long long FrameSignature(const MonPaintCtx& ctx,
 
 void Redraw() {
     if (!g_wnd || !g_cfg) return;
+    // Nothing to show yet. The first reading paints the first frame.
+    if (!g_haveReading) return;
 
     const MonPaintCtx ctx = LiveCtx();
     const std::vector<MonRow> rows = BuildRows();
-    SIZE size = MonMeasure((int)rows.size(), ctx);  // UpdateLayeredWindow wants it writable
+    SIZE size = MonMeasure(rows, ctx);  // UpdateLayeredWindow wants it writable
 
     const unsigned long long sig = FrameSignature(ctx, rows, size);
     if (g_sigValid && sig == g_lastSig) {
@@ -526,6 +740,122 @@ void MoveMetric(int metric, int op) {
     g_cfg->monOrder[to] = metric;
 }
 
+// ---------------------------------------------------------------- rearranging
+// The pointer, in the panel bitmap's coordinates.
+POINT PanelPoint() {
+    POINT pt;
+    GetCursorPos(&pt);
+    RECT r{};
+    if (g_wnd) GetWindowRect(g_wnd, &r);
+    pt.x -= r.left;
+    pt.y -= r.top;
+    return pt;
+}
+
+// Which cell of the current layout is under `pt`, or -1.
+int CellAt(POINT pt, std::vector<MonCell>* cells) {
+    const MonPaintCtx ctx = LiveCtx();
+    const std::vector<MonRow> rows = BuildRows();
+    MonLayout(rows, ctx, cells);
+    for (size_t i = 0; i < cells->size(); ++i)
+        if (PtInRect(&(*cells)[i].rect, pt)) return (int)i;
+    return -1;
+}
+
+// Picks the cell under the pointer up. The panel stops moving from here on;
+// only the readout does.
+void BeginReorder() {
+    std::vector<MonCell> cells;
+    const POINT pt = PanelPoint();
+    const int cell = CellAt(pt, &cells);
+    g_reorder.armed = false;
+    if (cell < 0 || cells.size() < 2) return;
+
+    const bool vertical = !g_cfg || g_cfg->monitorVertical;
+    const RECT& r = cells[(size_t)cell].rect;
+    g_reorder.active = true;
+    g_reorder.cell   = cell;
+    g_reorder.slot   = cell;
+    g_reorder.pos    = vertical ? r.top : r.left;
+    g_reorder.grab   = vertical ? (pt.y - r.top) : (pt.x - r.left);
+
+    // Whatever the panel drag had done so far is undone: the press was a hold,
+    // not a move, so the panel is where it started.
+    g_dragging = false;
+    SetWindowPos(g_wnd, nullptr, g_dragStart.left, g_dragStart.top, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (GetCapture() != g_wnd) SetCapture(g_wnd);
+    InvalidatePanel();
+    Redraw();
+}
+
+// Follows the pointer: the lifted readout goes where it is, clamped to the
+// run of cells, and the slot it would drop into is whichever it is nearest.
+void TrackReorder() {
+    if (!g_reorder.active) return;
+    std::vector<MonCell> cells;
+    const POINT pt = PanelPoint();
+    CellAt(pt, &cells);
+    if (cells.size() < 2) return;
+
+    const bool vertical = !g_cfg || g_cfg->monitorVertical;
+    const RECT& first = cells.front().rect;
+    const RECT& last  = cells.back().rect;
+    const int lo   = vertical ? first.top : first.left;
+    const int hi   = vertical ? last.top  : last.left;
+    const int size = vertical ? (first.bottom - first.top) : (first.right - first.left);
+    const int step = (cells.size() > 1)
+        ? (vertical ? cells[1].rect.top - first.top : cells[1].rect.left - first.left)
+        : size;
+
+    int pos = (vertical ? pt.y : pt.x) - g_reorder.grab;
+    pos = (std::max)(lo, (std::min)(hi, pos));
+    g_reorder.pos = pos;
+    g_reorder.slot = step > 0
+        ? (std::max)(0, (std::min)((int)cells.size() - 1, (pos - lo + step / 2) / step))
+        : g_reorder.cell;
+    Redraw();
+}
+
+// Puts the lifted readout down where it is, and writes the new order into the
+// config. The order is the whole eight-entry permutation, hidden readouts
+// included; the visible ones are re-sequenced and the hidden ones keep the
+// places they had, so hiding and showing one still brings it back where it was.
+void EndReorder(bool commit) {
+    if (!g_reorder.active) return;
+    const int from = g_reorder.cell, to = g_reorder.slot;
+    g_reorder.active = false;
+    g_reorder.cell   = -1;
+
+    if (commit && g_cfg && from != to && from >= 0 && to >= 0) {
+        std::vector<MonCell> cells;
+        const MonPaintCtx ctx = LiveCtx();          // drag already cleared
+        const std::vector<MonRow> rows = BuildRows();
+        MonLayout(rows, ctx, &cells);
+        if (from < (int)cells.size() && to < (int)cells.size()) {
+            MonCell moved = cells[(size_t)from];
+            cells.erase(cells.begin() + from);
+            cells.insert(cells.begin() + to, moved);
+
+            std::vector<int> visible;              // metrics, in the new order
+            for (const MonCell& c : cells)
+                for (int r : c.rows) visible.push_back(rows[(size_t)r].id);
+
+            size_t next = 0;
+            for (int i = 0; i < MON_METRIC_COUNT; ++i) {
+                const int m = g_cfg->monOrder[i];
+                if (m < 0 || m >= MON_METRIC_COUNT || !MetricEnabled(m)) continue;
+                if (next < visible.size()) g_cfg->monOrder[i] = visible[next++];
+            }
+            InvalidatePanel();
+            SaveAndRefresh();
+            return;
+        }
+    }
+    InvalidatePanel();
+    Redraw();
+}
+
 // ---------------------------------------------------------------- snapping
 // Where "Move to" can put the panel, as a fraction of the free space along
 // each axis: 0 is against the leading edge, 1 against the trailing one.
@@ -629,6 +959,10 @@ void ShowContextMenu() {
                     label.c_str());
     }
     AppendMenuW(menu, MF_STRING, IDM_ORDER_RESET, L"Reset the order");
+    // Not a command: the one thing about the panel that is not discoverable
+    // by looking at it, said where the order is already being talked about.
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0,
+                L"Tip: hold a readout, then drag it to move it");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     HMENU styles = CreatePopupMenu();
@@ -730,26 +1064,38 @@ void ShowContextMenu() {
 
 LRESULT CALLBACK MonitorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+        case WM_AWA_SAMPLED: {
+            // A reading from the sampling thread. One that arrives after the
+            // panel has been taken down is simply dropped; the thread has
+            // already been told to park and the next show asks afresh.
+            if (!g_wantVisible || !g_loadLockReady) return 0;
+            bool fresh = false;
+            EnterCriticalSection(&g_loadLock);
+            if (g_freshReady) {
+                g_load = std::move(g_freshLoad);
+                g_freshReady = false;
+                fresh = true;
+            }
+            LeaveCriticalSection(&g_loadLock);
+            if (fresh) OnReading();
+            return 0;
+        }
+
         case WM_TIMER:
             if (wp == kTimerSample) {
-                // Explorer builds a *new* desktop window when the wallpaper
-                // changes - a slideshow, Spotlight, a theme - and the panel,
-                // which is owned by the old one and sitting at the bottom of
-                // the z-order, ends up behind it. Nothing broadcasts
-                // TaskbarCreated for that, so the overlay simply vanished and
-                // stayed vanished. One handle comparison a second is enough to
-                // notice, and re-owning it puts it back.
-                if (g_cfg && g_cfg->monitorOnDesktop) {
-                    HWND shell = GetShellWindow();
-                    if (shell && (HWND)GetWindowLongPtrW(wnd, GWLP_HWNDPARENT) != shell)
-                        ApplyZOrder();
-                }
+                // Only ever armed when the sampling thread could not be
+                // started; see SampleStart.
                 g_sampler.Sample(&g_load);
-                PushHistory();
-                BeginEase();
-                Redraw();
+                OnReading();
             } else if (wp == kTimerEase) {
                 if (StepEase()) Redraw();
+            } else if (wp == kTimerLift) {
+                KillTimer(wnd, kTimerLift);
+                // Still pressed, still on the panel, still where it was
+                // pressed: it is a hold.
+                if (g_reorder.armed && g_dragging && (GetAsyncKeyState(VK_LBUTTON) < 0))
+                    BeginReorder();
+                g_reorder.armed = false;
             }
             return 0;
 
@@ -759,13 +1105,41 @@ LRESULT CALLBACK MonitorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                 GetCursorPos(&g_dragOrigin);
                 GetWindowRect(wnd, &g_dragStart);
                 SetCapture(wnd);
+
+                // A press on a readout might be the start of moving the panel
+                // or of moving the readout, and the two are told apart by
+                // time: press and go is the panel, press and hold is the
+                // readout. Ctrl says "the readout" straight away.
+                std::vector<MonCell> cells;
+                if (CellAt(PanelPoint(), &cells) >= 0 && cells.size() > 1) {
+                    if (GetKeyState(VK_CONTROL) < 0) {
+                        BeginReorder();
+                    } else {
+                        g_reorder.armed = true;
+                        SetTimer(wnd, kTimerLift, kLiftHoldMs, nullptr);
+                    }
+                }
             }
             return 0;
 
         case WM_MOUSEMOVE:
+            if (g_reorder.active) {
+                TrackReorder();
+                return 0;
+            }
             if (g_dragging) {
                 POINT now;
                 GetCursorPos(&now);
+
+                // Moved: this is the panel being dragged, not a readout being
+                // held. The hold is off from here.
+                if (g_reorder.armed &&
+                    (abs(now.x - g_dragOrigin.x) > kLiftSlackPx ||
+                     abs(now.y - g_dragOrigin.y) > kLiftSlackPx)) {
+                    g_reorder.armed = false;
+                    KillTimer(wnd, kTimerLift);
+                }
+
                 RECT r;
                 GetWindowRect(wnd, &r);
                 const SIZE size = { r.right - r.left, r.bottom - r.top };
@@ -784,9 +1158,19 @@ LRESULT CALLBACK MonitorProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         // the pointer around the screen with no button held down.
         case WM_CAPTURECHANGED:
             g_dragging = false;
+            g_reorder.armed = false;
+            KillTimer(wnd, kTimerLift);
+            if (g_reorder.active) EndReorder(false);
             return 0;
 
         case WM_LBUTTONUP:
+            g_reorder.armed = false;
+            KillTimer(wnd, kTimerLift);
+            if (g_reorder.active) {
+                EndReorder(true);
+                ReleaseCapture();
+                return 0;
+            }
             if (g_dragging) {
                 g_dragging = false;
                 ReleaseCapture();
@@ -848,6 +1232,9 @@ void MonitorInit(HINSTANCE inst, Config* cfg) {
 
 void MonitorShutdown() {
     g_wantVisible = false;
+    // The thread first, while the window it posts to still exists.
+    SampleShutdown();
+    ThermalStop();
     if (g_wnd) {
         KillTimer(g_wnd, kTimerSample);
         KillTimer(g_wnd, kTimerEase);
@@ -855,7 +1242,6 @@ void MonitorShutdown() {
         g_wnd = nullptr;
     }
     ReleaseSurface();
-    g_sampler.Close();
 }
 
 bool MonitorVisible() { return g_wnd != nullptr && IsWindowVisible(g_wnd); }
@@ -871,27 +1257,27 @@ void MonitorSetVisible(bool visible) {
         // down each time threw away every graph, reset the sampler, and left
         // the panel gone for good if anything went wrong on the way back up.
         // Hiding costs nothing and cannot fail.
+        SampleStop();           // the thread lets the counters go and parks
+        ThermalStop();
         if (g_wnd) {
-            KillTimer(g_wnd, kTimerSample);
             KillTimer(g_wnd, kTimerEase);
+            KillTimer(g_wnd, kTimerLift);
             g_easing = false;
+            g_reorder = Reorder();
             ShowWindow(g_wnd, SW_HIDE);
         }
         ReleaseSurface();       // a panel nobody is looking at holds no bitmap
-        g_sampler.Close();
         return;
     }
 
     if (g_wnd) {
         if (IsWindowVisible(g_wnd)) return;      // already up
         ShowWindow(g_wnd, SW_SHOWNOACTIVATE);
-        MonitorApplyConfig();                    // re-arms the sample timer
-        // Something on screen straight away rather than a blank panel for an
-        // interval: the surface was released on the way down.
-        g_sampler.Sample(&g_load);
-        PushHistory();
-        BeginEase();
-        Redraw();
+        // Starts the readings again, the first one straight away, and paints
+        // the last reading it had meanwhile - so there is something on screen
+        // at once rather than a blank panel for an interval. The surface was
+        // released on the way down; Redraw rebuilds it.
+        MonitorApplyConfig();
         return;
     }
 
@@ -907,16 +1293,13 @@ void MonitorSetVisible(bool visible) {
     memset(g_paintedPct, 0, sizeof(g_paintedPct));
     g_easing = false;
 
+    // Asks the sampling thread for the first reading. Nothing is drawn until
+    // it lands - a layered window with no frame is invisible, and the first
+    // reading is a few milliseconds away when the counters are warm. What it
+    // is not is on this thread: opening the GPU counters for the first time
+    // after logon took seconds here, with the whole application frozen.
     MonitorApplyConfig();
     ShowWindow(g_wnd, SW_SHOWNOACTIVATE);
-
-    // Fill the first frame immediately rather than after a whole interval.
-    // No glide for this one: there is nothing to glide from.
-    g_sampler.Sample(&g_load);
-    PushHistory();
-    for (int i = 0; i < MON_METRIC_COUNT; ++i) g_shownPct[i] = 0.0;
-    BeginEase();
-    Redraw();
 }
 
 void MonitorSetPinned(bool pinned) {
@@ -973,6 +1356,7 @@ void MonitorDrawPreview(HDC dc, const RECT& area, const MonitorPreview& look) {
     const wchar_t* labels[3]  = { L"CPU", L"MEMORY", L"GPU" };
     const wchar_t* shorts[3]  = { L"CPU", L"RAM", L"GPU" };
     for (int i = 0; i < 3; ++i) {
+        rows[(size_t)i].id         = i;          // CPU, RAM, GPU
         rows[(size_t)i].label      = labels[i];
         rows[(size_t)i].shortLabel = shorts[i];
         rows[(size_t)i].color      = look.colors
@@ -993,10 +1377,10 @@ void MonitorDrawPreview(HDC dc, const RECT& area, const MonitorPreview& look) {
 
     // Largest scale that fits the space we were given, measured at 1:1 first.
     ctx.scale = 1.0f;
-    const SIZE unit = MonMeasure(3, ctx);
+    const SIZE unit = MonMeasure(rows, ctx);
     ctx.scale = (std::min)((float)w / (float)unit.cx, (float)h / (float)unit.cy);
     ctx.scale = (std::max)(0.4f, (std::min)(1.6f, ctx.scale));
-    const SIZE size = MonMeasure(3, ctx);
+    const SIZE size = MonMeasure(rows, ctx);
 
     Gdiplus::Graphics g(dc);
     g.SetClip(Gdiplus::Rect(area.left, area.top, w, h));
@@ -1017,7 +1401,7 @@ void MonitorApplyConfig() {
 
     const MonPaintCtx ctx = LiveCtx();
     const std::vector<MonRow> rows = BuildRows();
-    const SIZE size = MonMeasure((int)rows.size(), ctx);
+    const SIZE size = MonMeasure(rows, ctx);
 
     int x = g_cfg->monitorX;
     int y = g_cfg->monitorY;
@@ -1042,10 +1426,11 @@ void MonitorApplyConfig() {
     // hide, so without this a reload while a game is running would quietly put
     // the sampler back to work behind it - which is the whole thing game mode
     // exists to stop.
-    KillTimer(g_wnd, kTimerSample);
     if (g_wantVisible) {
-        SetTimer(g_wnd, kTimerSample, (UINT)g_cfg->monitorInterval, nullptr);
+        SampleStart((UINT)g_cfg->monitorInterval);
         Redraw();
+    } else {
+        SampleStop();
     }
 }
 

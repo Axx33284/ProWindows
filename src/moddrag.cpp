@@ -131,13 +131,29 @@ void ApplyHookState() {
 }
 
 DWORD WINAPI HookThread(LPVOID) {
+    // Every pointer movement on the machine passes through here. See the
+    // keyboard hook's thread for why it runs ahead of ordinary work: a mouse
+    // hook that waits for a timeslice is a pointer that stutters, and one
+    // that waits too long is removed by the system.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+
     MSG msg;
     PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
     if (g_ready) SetEvent(g_ready);
 
+    // Re-installed once a minute, for the reason the keyboard hook's thread
+    // gives: a hook the system has quietly dropped comes back by itself.
+    const UINT_PTR rehook = SetTimer(nullptr, 0, 60000, nullptr);
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (msg.message == WM_AWA_APPLYMOUSEHOOK) ApplyHookState();
+        if (msg.message == WM_AWA_APPLYMOUSEHOOK) {
+            ApplyHookState();
+        } else if (msg.message == WM_TIMER && msg.wParam == rehook && g_hook) {
+            UnhookWindowsHookEx(g_hook);
+            g_hook = nullptr;
+            ApplyHookState();
+        }
     }
+    if (rehook) KillTimer(nullptr, rehook);
 
     if (g_hook) {
         UnhookWindowsHookEx(g_hook);

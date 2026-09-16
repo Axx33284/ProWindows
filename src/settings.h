@@ -18,6 +18,7 @@ enum PageIndex {
     PAGE_APPS,
     PAGE_SEARCH,
     PAGE_MONITOR,
+    PAGE_CLOCK,
     PAGE_GENERAL,
     PAGE_COUNT
 };

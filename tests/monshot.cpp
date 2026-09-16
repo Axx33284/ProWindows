@@ -100,6 +100,7 @@ std::vector<MonRow> Rows(const MonitorSkin& skin, int count) {
     std::vector<MonRow> rows;
     for (int i = 0; i < count && i < MON_METRIC_COUNT; ++i) {
         MonRow r;
+        r.id         = i;
         r.label      = labels[i];
         r.shortLabel = shorts[i];
         r.color      = MonitorMetricColour(skin, i, kMonColourFromTheme);
@@ -126,7 +127,7 @@ void Wallpaper(Gdiplus::Graphics* g, int w, int h) {
 void Shot(const std::wstring& path, const MonPaintCtx& base,
           const std::vector<MonRow>& rows, const CLSID& png) {
     MonPaintCtx ctx = base;
-    const SIZE size = MonMeasure((int)rows.size(), ctx);
+    const SIZE size = MonMeasure(rows, ctx);
 
     const int pad = 26;
     Gdiplus::Bitmap canvas(size.cx + pad * 2, size.cy + pad * 2, PixelFormat32bppARGB);
@@ -169,7 +170,7 @@ void Bench() {
         ctx.skin       = &skin;
 
         std::vector<MonRow> rows = Rows(skin, MON_METRIC_COUNT);
-        const SIZE size = MonMeasure((int)rows.size(), ctx);
+        const SIZE size = MonMeasure(rows, ctx);
         Gdiplus::Bitmap panel(size.cx, size.cy, PixelFormat32bppPARGB);
 
         LARGE_INTEGER freq, a, b;
@@ -227,6 +228,65 @@ int wmain(int argc, wchar_t** argv) {
         ctx.style      = i;
         ctx.skin       = &skin;
         Shot(out + L"\\style-" + MonitorStyleAt(i).id + L".png", ctx, Rows(skin, 6), png);
+    }
+
+    // The two overlay looks on the skins made for them, with everything on,
+    // because those are the combinations they were drawn for.
+    wprintf(L"overlays:\n");
+    {
+        struct Look { int style; const wchar_t* skin; const wchar_t* name; };
+        const Look looks[] = {
+            { MON_STYLE_OSD, L"afterburner", L"style-osd-afterburner.png" },
+            { MON_STYLE_HUD, L"benchmark",   L"style-hud-benchmark.png"   },
+            { MON_STYLE_HUD, L"midnight",    L"style-hud-midnight.png"    },
+        };
+        for (const Look& look : looks) {
+            const int skinIndex = MonitorSkinIndexById(look.skin);
+            const MonitorSkin& skin = MonitorSkinAt(skinIndex < 0 ? 0 : skinIndex);
+            MonPaintCtx ctx;
+            ctx.scale      = 1.0f;
+            ctx.alpha      = (BYTE)(255 * 92 / 100);
+            ctx.vertical   = true;
+            ctx.graphs     = true;
+            ctx.topApps    = false;
+            ctx.historyLen = kMonHistory;
+            ctx.style      = look.style;
+            ctx.skin       = &skin;
+            Shot(out + L"\\" + look.name, ctx, Rows(skin, MON_METRIC_COUNT), png);
+        }
+    }
+
+    // A readout being dragged: the second cell lifted and carried down to
+    // where the fourth was, in the Rows style and in the HUD, where a cell is
+    // a whole device.
+    wprintf(L"dragging:\n");
+    {
+        const MonitorSkin& skin = MonitorSkinAt(0);
+        for (int style : { (int)MON_STYLE_ROWS, (int)MON_STYLE_HUD, (int)MON_STYLE_BARS }) {
+            MonPaintCtx ctx;
+            ctx.scale      = 1.0f;
+            ctx.alpha      = (BYTE)(255 * 92 / 100);
+            ctx.vertical   = (style != MON_STYLE_BARS);
+            ctx.graphs     = true;
+            ctx.topApps    = false;
+            ctx.historyLen = kMonHistory;
+            ctx.style      = style;
+            ctx.skin       = &skin;
+
+            std::vector<MonRow> rows = Rows(skin, 6);
+            std::vector<MonCell> cells;
+            MonLayout(rows, ctx, &cells);
+            if (cells.size() >= 4) {
+                ctx.drag.cell = 1;
+                ctx.drag.slot = 3;
+                // Two thirds of the way from its own slot to the target.
+                const RECT& a = cells[1].rect;
+                const RECT& b = cells[3].rect;
+                ctx.drag.pos = ctx.vertical ? (a.top + (b.top - a.top) * 2 / 3)
+                                            : (a.left + (b.left - a.left) * 2 / 3);
+            }
+            Shot(out + L"\\drag-" + MonitorStyleAt(style).id + L".png", ctx, rows, png);
+        }
     }
 
     // Every skin, in the Cards style, so the palettes can be compared.

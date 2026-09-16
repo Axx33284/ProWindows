@@ -15,6 +15,11 @@ struct ManagedWindow {
     bool fullscreen = false;
     bool minimized  = false;
     bool hidden     = false;    // hidden by us because its workspace is inactive
+    // SetHidden shows and hides asynchronously (see there), so for a moment
+    // after an un-hide the window is still invisible. The dead sweep at the
+    // top of every pass must not mistake that moment for the window having
+    // gone. Cleared by the EVENT_OBJECT_SHOW echo, or by time.
+    ULONGLONG shownAt = 0;
 
     // Follows the user from workspace to workspace instead of staying on one.
     // i3 calls it sticky, Hyprland calls it pin. Implemented by moving the
@@ -40,6 +45,13 @@ struct ManagedWindow {
     // for a window we cannot move, which is what leaves a hole in the layout.
     int  refusals   = 0;
     bool immovable  = false;
+    // When it was written off, so it can be asked again later: an application
+    // that was merely hung for two verification passes - a browser under
+    // load, a launcher patching itself - is indistinguishable from one at a
+    // higher integrity level at the time, and without this it stayed out of
+    // the layout for the rest of the session. "Some windows just stop
+    // tiling" was the report.
+    ULONGLONG immovableAt = 0;
 
     // Times this window has been handed a slot and used almost none of it. A
     // file-copy dialog does this: it is top-level and has a resize frame, so it
@@ -328,6 +340,11 @@ private:
     // always buys a fresh budget.
     static constexpr int kMaxVerifyChain = 8;
     static constexpr int kSettleLooks    = 6;
+    // How long an un-hidden window is excused from the dead sweep while its
+    // ShowWindowAsync is still in flight, and how long a window written off
+    // as immovable stays written off. Both in milliseconds.
+    static constexpr ULONGLONG kShowGraceMs       = 1500;
+    static constexpr ULONGLONG kImmovableRetryMs  = 60000;
     int  verifyChain_ = 0;
     // True only for a pass that this verification loop asked for itself. Any
     // other pass - a window event, a layout change, a workspace switch - is
@@ -553,6 +570,12 @@ private:
     HANDLE animQuit_   = nullptr;
     HANDLE animActive_ = nullptr;     // set while an animation is running
     LONG   animPending_ = 0;          // a frame is already queued, do not pile up
+    // Milliseconds between frames: one refresh of the fastest display, set by
+    // ReloadMonitors and read by the ticker thread. A frame the screen cannot
+    // show is a SetWindowPos every application in the layout still has to
+    // process, so ticking faster than the display buys nothing and costs
+    // every animated window a relayout per surplus frame.
+    LONG   animFrameMs_ = 8;
 
 };
 

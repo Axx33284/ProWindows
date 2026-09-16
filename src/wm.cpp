@@ -134,6 +134,17 @@ void WindowManager::ReloadMonitors() {
     std::vector<Monitor> fresh;
     fresh.reserve(infos.size());
 
+    // The animation paces itself to the fastest display attached. Clamped to
+    // [4, 16] ms: never past 250 Hz whatever a driver claims, never slower
+    // than the 60 Hz a display that would not say is assumed to run at.
+    {
+        int hz = 0;
+        for (const auto& info : infos) hz = (std::max)(hz, info.refreshHz);
+        if (hz <= 0) hz = 60;
+        const LONG ms = (LONG)(std::max)(4, (std::min)(16, (1000 + hz / 2) / hz));
+        InterlockedExchange(&animFrameMs_, ms);
+    }
+
     for (const auto& info : infos) {
         Monitor m;
         m.info = info;
@@ -398,6 +409,14 @@ bool WindowManager::AddWindow(HWND h, bool focusIt) {
         if (r.maxW > 0) mw.limits.maxW = r.maxW;
         if (r.maxH > 0) mw.limits.maxH = r.maxH;
         mw.tooLarge = r.tooLarge;
+        // And do not ask the window itself. What is remembered already
+        // includes what it declared last time - RememberLimits stores the
+        // merged numbers - so WM_GETMINMAXINFO would only confirm it. That
+        // message is a SendMessageTimeout with a 60 ms ceiling, paid on the
+        // UI thread, and at logon every application is busy starting and
+        // takes the whole 60 ms: ten familiar windows was over half a second
+        // with the tiler frozen, on every single boot, to learn nothing.
+        mw.limitsAsked = true;
     }
 
     Monitor& mon = monitors_[mw.monitor];
@@ -561,7 +580,16 @@ void WindowManager::SetHidden(ManagedWindow* mw, bool hide) {
     mw->hidden = hide;
     if (hide) TrackHidden(mw->hwnd);
     else      UntrackHidden(mw->hwnd);
-    ShowWindow(mw->hwnd, hide ? SW_HIDE : SW_SHOWNA);
+    // Asynchronous, deliberately. ShowWindow sends WM_SHOWWINDOW into the
+    // other process and waits for it to answer, and an application that is
+    // hung - or merely busy for a few seconds, which browsers and games are -
+    // held this thread with it: every shortcut, every window event and the
+    // tray icon stopped until it came back. A workspace switch with one such
+    // window on it looked exactly like the tiler freezing. ShowWindowAsync
+    // posts the same request and returns. The one thing it changes is that
+    // IsWindowVisible does not flip on the spot, which is what shownAt is for.
+    ShowWindowAsync(mw->hwnd, hide ? SW_HIDE : SW_SHOWNA);
+    mw->shownAt = hide ? 0 : GetTickCount64();
 }
 
 void WindowManager::MoveWindowToWorkspace(HWND h, int monitorIndex, int workspaceIndex,
@@ -654,7 +682,15 @@ void WindowManager::UpdateGameMode(bool force) {
     if (!force && now - gameCheckedAt_ < 500) return;
     gameCheckedAt_ = now;
 
-    const bool active = FullscreenAppActive();
+    bool active = FullscreenAppActive();
+    // A window *we* put over the whole screen (Alt+F) measures exactly like
+    // a game, and reacting to it paused the tiler against itself: the next
+    // Alt+F could not undo what the first had done, because nothing runs in
+    // game mode. What we made fullscreen, we know about.
+    if (active) {
+        if (ManagedWindow* fg = Find(GetForegroundWindow()))
+            if (fg->fullscreen) active = false;
+    }
     if (active == gameMode_) return;
     gameMode_ = active;
 
@@ -1035,7 +1071,8 @@ bool WindowManager::LearnFromLastPass() {
 
             if (!explained) {
                 if (++mw->refusals >= kGiveUpAfter && !mw->immovable) {
-                    mw->immovable = true;
+                    mw->immovable   = true;
+                    mw->immovableAt = GetTickCount64();
                     learned = true;
                     ++newlyImmovable;
                     AWA_LOG(L"window %p will not accept any placement; leaving it alone "
@@ -1169,6 +1206,9 @@ void WindowManager::RetileMonitor(int monitorIndex) {
         // that has genuinely gone is caught by IsWindow above, and by
         // EVENT_OBJECT_DESTROY well before this.
         if (mw->minimized) continue;
+        // Just un-hidden: the show is still in the other process's queue,
+        // so the window is invisible for the moment and about not to be.
+        if (mw->shownAt && GetTickCount64() - mw->shownAt < kShowGraceMs) continue;
         if (!mw->hidden && !IsWindowVisible(h)) { dead.push_back(h); continue; }
         if (!mw->hidden && IsCloaked(h)) { dead.push_back(h); continue; }
     }
@@ -1189,6 +1229,17 @@ void WindowManager::RetileMonitor(int monitorIndex) {
         // A window we have proved we cannot move, or that will not use the
         // space it is given, must not be given a tile: reserving one is
         // exactly what leaves a rectangle of empty desktop behind.
+        //
+        // "Proved" is only ever proved for a while. Two refused placements
+        // is also what a window looks like while its application is hung,
+        // and applications recover; so after a minute it is asked again,
+        // and a window that genuinely cannot be moved costs two more
+        // placements a minute - which is nothing.
+        if (mw->immovable && GetTickCount64() - mw->immovableAt > kImmovableRetryMs) {
+            mw->immovable = false;
+            mw->refusals  = 0;
+            AWA_LOG(L"window %p: trying to place it again", (void*)h);
+        }
         if (mw->immovable || mw->tooSmall) continue;
 
         if (mw->tooLarge) {
@@ -1247,8 +1298,6 @@ void WindowManager::RetileMonitor(int monitorIndex) {
         mw->crowdedOut = true;
         if (!wasOut) park.push_back(h);      // position it once, then leave it
     }
-    for (HWND h : order)
-        if (ManagedWindow* mw = Find(h)) mw->crowdedOut = false;
 
     std::unordered_set<HWND> alive(order.begin(), order.end());
     ws.tree.Prune(alive);
@@ -1256,6 +1305,55 @@ void WindowManager::RetileMonitor(int monitorIndex) {
 
     std::vector<std::pair<HWND, Rect>> plan;
     ComputeLayout(params, order, ws.tree, &plan, &cons);
+
+    // The area test above is necessary, not sufficient. Two windows that each
+    // need 1000 pixels of width add up to well under the area of a 1920-wide
+    // screen and still cannot stand side by side on it; the layout then hands
+    // each of them 960, both refuse, and one ends up lying across the other.
+    // The plan is the authority on what fits: any window whose slot is under
+    // its minimum leaves the tiling, and the board is laid out again without
+    // it - until everything left has what it asked for.
+    //
+    // Which one leaves follows the same rule as the area test: the one with
+    // the largest minimum, because it is the one oversized application that
+    // does not fit beside the others, not the others that do not fit beside
+    // it. Between equals, the one that arrived last.
+    for (int guard = 0; guard < 64 && order.size() > 1; ++guard) {
+        const std::vector<HWND> squeezed = SqueezedWindows(order, plan, cons);
+        if (squeezed.empty()) break;
+
+        HWND victim = nullptr;
+        long long victimNeed = -1;
+        for (HWND h : order) {
+            if (std::find(squeezed.begin(), squeezed.end(), h) == squeezed.end()) continue;
+            auto lim = cons.find(h);
+            const long long need = (lim == cons.end()) ? 0 :
+                (long long)(std::max)(1, lim->second.minW) *
+                (long long)(std::max)(1, lim->second.minH);
+            if (need >= victimNeed) { victim = h; victimNeed = need; }
+        }
+        if (!victim) break;
+
+        order.erase(std::find(order.begin(), order.end(), victim));
+        ws.tree.Remove(victim);
+        if (ManagedWindow* mw = Find(victim)) {
+            const bool wasOut = mw->crowdedOut;
+            mw->crowdedOut = true;
+            if (!wasOut) {
+                park.push_back(victim);
+                auto lim = cons.find(victim);
+                AWA_LOG(L"window %p needs %dx%d and no arrangement of the other %d "
+                        L"window(s) leaves that much; floating it until there is room",
+                        (void*)victim,
+                        lim != cons.end() ? lim->second.minW : 0,
+                        lim != cons.end() ? lim->second.minH : 0,
+                        (int)order.size());
+            }
+        }
+        ComputeLayout(params, order, ws.tree, &plan, &cons);
+    }
+    for (HWND h : order)
+        if (ManagedWindow* mw = Find(h)) mw->crowdedOut = false;
 
     for (HWND h : park) ParkAsFloating(h, params.work);
 
@@ -1399,8 +1497,12 @@ DWORD WINAPI WindowManager::AnimThread(LPVOID self) {
 // Nothing is computed here: the thread only says "a frame is due". All the
 // window moving stays on the UI thread, where it has to be.
 void WindowManager::AnimTickLoop() {
-    // 4 ms is comfortably inside a 180 Hz frame; the UI thread coalesces
-    // anything it cannot keep up with.
+    // One tick per refresh of the fastest display (animFrameMs_), rather than
+    // a flat 4 ms. At 250 Hz on a 60 Hz screen three frames in four were
+    // moved and never shown, and each of them was still a SetWindowPos into
+    // every application on the board - a relayout apiece, for Chromium-based
+    // ones a full one. The UI thread coalesces anything it cannot keep up
+    // with either way.
     HANDLE tick = CreateWaitableTimerExW(nullptr, nullptr,
                                          CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
                                          TIMER_ALL_ACCESS);
@@ -1415,9 +1517,10 @@ void WindowManager::AnimTickLoop() {
         if (WaitForMultipleObjects(2, idle, FALSE, INFINITE) != WAIT_OBJECT_0 + 1)
             break;                                   // quit, or the wait failed
 
+        const LONG frameMs = InterlockedCompareExchange(&animFrameMs_, 0, 0);
         LARGE_INTEGER due;
-        due.QuadPart = -40000;                       // 4 ms, in 100 ns units
-        SetWaitableTimer(tick, &due, 4, nullptr, nullptr, FALSE);
+        due.QuadPart = -(LONGLONG)frameMs * 10000;   // 100 ns units
+        SetWaitableTimer(tick, &due, frameMs, nullptr, nullptr, FALSE);
 
         for (;;) {
             const DWORD hit = WaitForMultipleObjects(2, ticking, FALSE, INFINITE);
@@ -1733,7 +1836,10 @@ void WindowManager::HandleWinEvent(DWORD event, HWND hwnd) {
             // workspace is not the active one. Either way there is nothing to
             // do: this is our own hide/show echoing back, or the application
             // showing a window we are already arranging.
-            if (Find(hwnd)) return;
+            if (ManagedWindow* mw = Find(hwnd)) {
+                mw->shownAt = 0;       // the un-hide has landed
+                return;
+            }
             if (AdoptWindow(hwnd)) RequestRetile();
             break;
         }
@@ -2010,6 +2116,17 @@ void WindowManager::OnMoveSizeEnd(HWND hwnd) {
         // because it had no title yet, this is the obvious second chance.
         if (AdoptWindow(hwnd)) RequestRetile();
         return;
+    }
+
+    // The user just moved or sized this window with the mouse, which settles
+    // two questions the verification pass had answered against it: it can be
+    // moved, and it can take a size other than the one it kept. Give it its
+    // tile back and let the next pass find out afresh.
+    if (mw->immovable || mw->tooSmall) {
+        mw->immovable = false;
+        mw->refusals  = 0;
+        mw->tooSmall  = false;
+        mw->wastes    = 0;
     }
 
     if (mw->floating) {

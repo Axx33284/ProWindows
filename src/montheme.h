@@ -50,6 +50,8 @@ enum MonStyle : int {
     MON_STYLE_GRAPH,      // chart first: a big area graph per metric
     MON_STYLE_CARDS,      // each metric on its own raised card with an accent rail
     MON_STYLE_TICKER,     // one thin line: a dot, a name and a number per metric
+    MON_STYLE_OSD,        // the MSI Afterburner / RTSS look: monospace text lines
+    MON_STYLE_HUD,        // the benchmark-channel look: one line per device
     MON_STYLE_COUNT
 };
 
@@ -96,6 +98,12 @@ struct MonitorSkin {
     bool     alerts;
 
     COLORREF metric[MON_METRIC_COUNT];   // in MonMetric order
+
+    // No panel at all: no shadow, no fill, no border - the readouts are drawn
+    // straight onto whatever is behind them with a dark shadow under the
+    // text, which is how an in-game OSD looks. Last, so the skins that do not
+    // set it are simply false.
+    bool     bare = false;
 };
 
 // Sentinel for MonitorSkin::value: colour each readout like its own metric.

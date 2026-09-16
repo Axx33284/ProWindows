@@ -214,6 +214,10 @@ LONG   g_abandonFlag = 0;
 HANDLE g_thread      = nullptr;
 HANDLE g_stop        = nullptr; // signalled at shutdown, so a delay is skippable
 DWORD  g_delayMs     = 0;       // how long the pending walk should hold off
+// The thread should read `index.cache` before it considers walking at all.
+// Set for the run SearchInit starts; a rebuild the user asked for, or one a
+// settings change made necessary, skips the cache and walks. Guarded by g_lock.
+bool   g_tryCache    = false;
 
 // Logging in, every startup program fights over the disk at once. Joining that
 // queue with a recursive walk is the difference between a machine that feels
@@ -387,9 +391,13 @@ bool LoadIndexCache(const IndexWants& wants) {
     loaded.shrink_to_fit();
     const int count = (int)loaded.size();
 
+    // Published under the same rule as a walk's result: never after the app
+    // has started shutting down, since this now runs on the index thread.
     EnterCriticalSection(&g_lock);
-    g_index = std::move(loaded);
-    g_ready = true;
+    if (!g_abandon) {
+        g_index = std::move(loaded);
+        g_ready = true;
+    }
     LeaveCriticalSection(&g_lock);
 
     AWA_LOG(L"search: %d entries restored from the cache", count);
@@ -539,16 +547,35 @@ void WalkPrograms(const std::wstring& dir, int depth, const ProgramWalk& how,
 }
 
 DWORD WINAPI IndexThread(LPVOID) {
+    EnterCriticalSection(&g_lock);
+    const IndexWants wants = g_wants;      // whole-config snapshot, taken safely
+    DWORD delay = g_delayMs;
+    const bool tryCache = g_tryCache;
+    LeaveCriticalSection(&g_lock);
+
+    // The cache first, and at ordinary priority: it is one sequential read
+    // of one file, and the sooner it is in the sooner files are searchable.
+    // This used to happen on the UI thread inside SearchInit, before the
+    // message loop had even started - half a megabyte parsed through fgetws
+    // and six thousand strings built, with the tray icon, the shortcuts and
+    // the tiling all waiting on it. Warm that was a tenth of a second; at
+    // logon, with every other startup program on the same disk, it was
+    // whatever the disk felt like.
+    if (tryCache) {
+        if (LoadIndexCache(wants)) {
+            if (IndexCacheAgeMs() <= kCacheMaxAgeMs) return 0;   // fresh: done
+            AWA_LOG(L"search: cache is stale, refreshing later");
+            delay = kRefreshDelayMs;
+        } else {
+            delay = kColdStartDelayMs;
+        }
+    }
+
     // Background mode drops this thread's *I/O* priority as well as its CPU
     // priority, which is the whole game on a spinning disk: the walk is pure
     // random seeks, and without this it competes with whatever the user is
     // actually doing. Vista and later; the failure is harmless if it is not.
     SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
-
-    EnterCriticalSection(&g_lock);
-    const IndexWants wants = g_wants;      // whole-config snapshot, taken safely
-    const DWORD delay = g_delayMs;
-    LeaveCriticalSection(&g_lock);
 
     // Interruptible: shutting the app down during the hold-off must not make
     // the user wait out the rest of it.
@@ -663,9 +690,11 @@ ULONGLONG IndexCacheAgeMs() {
     return (now.QuadPart - written.QuadPart) / 10000ull; // 100 ns -> ms
 }
 
-// Schedules the walk. `delayMs` is how long the thread holds off before it
-// touches the disk at all; 0 means the user asked for it, so do it now.
-void StartWalk(DWORD delayMs) {
+// Starts the index thread. `delayMs` is how long it holds off before it
+// touches the disk for a walk; 0 means the user asked for it, so do it now.
+// `tryCache` has it read `index.cache` first and only walk if that is
+// missing or stale - the startup case.
+void StartIndex(DWORD delayMs, bool tryCache) {
     if (!g_lockReady) return;
     if (g_thread) {
         // Still walking (or still holding off). One walk at a time.
@@ -677,8 +706,13 @@ void StartWalk(DWORD delayMs) {
     IndexWants wants = WantsFromConfig();
 
     EnterCriticalSection(&g_lock);
-    g_wants   = std::move(wants);
-    g_delayMs = delayMs;
+    // Always recorded, cache or walk. SearchApplyConfig compares the live
+    // config against this to decide whether a settings change needs a new
+    // index; when the cache path skipped it, every Apply - of anything, on
+    // any tab - looked like a change and started a full walk of the disk.
+    g_wants    = std::move(wants);
+    g_delayMs  = delayMs;
+    g_tryCache = tryCache;
     // A walk started from scratch invalidates nothing that is already loaded:
     // keep serving the old index until the new one lands, so an explicit
     // rebuild does not blank the results while it runs.
@@ -686,6 +720,8 @@ void StartWalk(DWORD delayMs) {
 
     g_thread = CreateThread(nullptr, 0, IndexThread, nullptr, 0, nullptr);
 }
+
+void StartWalk(DWORD delayMs) { StartIndex(delayMs, false); }
 
 // ---------------------------------------------------------------- settings pages
 struct SettingsPage { const wchar_t* name; const wchar_t* uri; };
@@ -935,18 +971,10 @@ void SearchInit(Config* cfg) {
     if (!g_stop) g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!cfg || !cfg->searchFiles) return;
 
-    const IndexWants wants = WantsFromConfig();
-
     // Reading the cache is one sequential pass over one file. Walking is tens
-    // of thousands of seeks. Always try the cheap one first.
-    if (LoadIndexCache(wants)) {
-        if (IndexCacheAgeMs() > kCacheMaxAgeMs) {
-            AWA_LOG(L"search: cache is stale, refreshing later");
-            StartWalk(kRefreshDelayMs);
-        }
-        return;
-    }
-    StartWalk(kColdStartDelayMs);
+    // of thousands of seeks. The thread tries the cheap one first, and only
+    // walks if there is no usable cache; nothing here touches the disk.
+    StartIndex(0, true);
 }
 
 void SearchShutdown() {

@@ -200,14 +200,40 @@ void ApplyHookState() {
 }
 
 DWORD WINAPI HookThread(LPVOID) {
+    // Every keystroke on the machine passes through this thread before the
+    // application it was meant for sees it, so it must be scheduled ahead of
+    // ordinary work. At normal priority it competes with everything else in
+    // the process - the file indexer's first walk, the icon sweep, a retile -
+    // and with every other program on a busy machine, which at logon is all
+    // of them. A keystroke then waits for a timeslice, and typing feels
+    // sticky exactly when the machine is under load. Highest rather than
+    // time-critical: the callback is bounded, but a runaway at time-critical
+    // would starve the UI thread that is supposed to act on what it posts.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+
     // Force the queue into existence before anyone posts to this thread.
     MSG msg;
     PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
     if (g_ready) SetEvent(g_ready);
 
+    // Windows removes a low-level hook whose callback has been late too often
+    // (LowLevelHooksTimeout), and it tells nobody: the hook simply stops
+    // being called, and the Win+key bindings silently stop working for the
+    // rest of the session. A thread of our own at high priority makes that
+    // rare, not impossible - a machine paging at logon can starve anything.
+    // So the hook is taken out and put back on a slow timer. It costs two
+    // calls a minute, and a hook that was dropped is back within the minute.
+    const UINT_PTR rehook = SetTimer(nullptr, 0, 60000, nullptr);
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (msg.message == WM_AWA_APPLYHOOK) ApplyHookState();
+        if (msg.message == WM_AWA_APPLYHOOK) {
+            ApplyHookState();
+        } else if (msg.message == WM_TIMER && msg.wParam == rehook && g_hook) {
+            UnhookWindowsHookEx(g_hook);
+            g_hook = nullptr;
+            ApplyHookState();
+        }
     }
+    if (rehook) KillTimer(nullptr, rehook);
 
     if (g_hook) {
         UnhookWindowsHookEx(g_hook);

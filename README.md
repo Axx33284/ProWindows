@@ -4,7 +4,7 @@ A dynamic tiling window manager for Windows 11, in the spirit of Hyprland on
 Arch. Windows you open arrange themselves automatically — no dragging, no
 snapping, no overlap. Everything is driven from the keyboard.
 
-Native C++ / Win32. One 392 KB executable, no runtime to install, no services,
+Native C++ / Win32. One 850 KB executable, no runtime to install, no services,
 no background polling. Everything is configurable from a tabbed settings window
 that opens when you launch it.
 
@@ -26,7 +26,7 @@ that opens when you launch it.
 
 | | |
 |---|---|
-| Executable | **530 KB**, statically linked — nothing else to install |
+| Executable | **850 KB**, statically linked — nothing else to install |
 | Memory, tray only | **4.9 MB** private, with the file index off |
 | CPU, tray only | **0 ms over 30 seconds**, three samples running — with animations *and* the keyboard hook active |
 | Memory with the monitor and a 5,300-entry file index | **10.5 MB** private |
@@ -70,6 +70,53 @@ and how thick its invisible frame is - which are all the same question, asked
 across a process boundary. They are asked once now: **four cross-process calls
 per window per event down to one**, which on a board of ten windows is forty
 round trips replaced by ten.
+
+**Nothing slow runs on the thread that moves windows.** That thread is the one
+that has to answer every window event, every shortcut and every animation
+frame, and three things used to stall it:
+
+- The monitor's readings. Opening the GPU performance counter takes **84 ms
+  warm on this machine** and seconds cold, and every reading after that is a
+  walk of every process's GPU engines. Both ran on the UI thread, the first one
+  during startup, the rest once a second — so an animation that overlapped a
+  reading hitched, and at logon the whole application sat frozen until the
+  counters had opened. The readings come from a thread of their own now, at
+  below-normal priority, and the UI thread only ever paints a finished one.
+- The search bar's file index. Its cache — half a megabyte, six thousand
+  entries — was parsed on the UI thread before the message loop had even
+  started. That is on the index thread now. Startup to a running message loop
+  went from **317 ms to 68 ms** on this machine, warm; at logon, with every
+  other startup program on the same disk, the difference is whatever the disk
+  felt like.
+- Asking a window it already knows about for its size limits. Each ask is a
+  cross-process message with a 60 ms ceiling, and at logon every application
+  takes the whole 60 ms because it is busy starting. A window whose limits are
+  already remembered from a previous run is not asked again.
+
+**The keyboard and mouse hooks are scheduled ahead of everything.** Every
+keystroke and every pointer movement on the machine passes through them before
+the application it was meant for sees it. They already ran on threads of their
+own; those threads now run at highest priority, so a keystroke never waits for
+a timeslice behind the file indexer or a retile — which is exactly what typing
+felt like on a busy machine.
+
+**Focus is taken without borrowing the other application's input state.**
+Bringing a window to the front from a process that does not own the
+foreground used to attach this thread's input queue to the target's. Attached
+queues share everything, including whether the pointer is shown — and Windows
+hides the pointer while you type. Attach in the middle of a keystroke, detach
+a moment later, and the hidden pointer stays hidden: that was "the mouse
+disappears when I type". The fallback, a synthetic Alt press, was no better —
+it lands in the menu bar in Explorer and Office, and Alt with Shift held is
+the keyboard-layout switch. Both are gone. A mouse input event with nothing in
+it satisfies the foreground rule on its own, and nothing is shared.
+
+**The animation runs at the display's refresh rate, not faster.** It ticked
+every 4 ms whatever the screen; on a 60 Hz display three frames in four were
+moved and never shown, and each was still a `SetWindowPos` into every
+application on the board — a relayout apiece. It reads the fastest attached
+display's refresh rate and ticks once per refresh: 6 ms on the 180 Hz screen
+it was tested on, 16 ms on a 60 Hz one.
 
 ---
 
@@ -117,6 +164,20 @@ Launch the exe. The settings window opens and tiling starts immediately.
 Each layout comes with a painted preview and a plain-English explanation of
 what it does and when it suits you, so you can tell Dwindle from Master without
 having to try them all.
+
+The window is drawn after DOOM Eternal's menus: near-black surfaces with a
+faint diagonal grain, one hot orange for whatever is selected or important,
+headings in condensed capitals, panels and buttons with their corners cut
+rather than rounded, and the tabs as a row of slanted plates with the active
+one filled. The overlays - the monitor and the clock - have themes of their
+own and are not touched by any of it.
+
+The title bar carries the version. Several copies of this program can live
+side by side on one machine, and they all share the single-instance lock, so
+starting a newer copy while an older one is running used to silently open the
+*older* copy's settings - which made every version look like the same one.
+Starting a different executable now offers to stop the running copy and take
+over, moving the start-with-Windows entry across with it.
 
 Nothing takes effect until you press **Apply**, which also writes your choices
 to the config file. **Hide to tray** (or the X button) closes the window while
@@ -626,15 +687,23 @@ engine counters — by GPU. Network has no cheap per-process source, so it stays
 one option here that costs meaningfully more: it snapshots every process on the machine each tick,
 so it is off by default.
 
-**Put the readouts in whatever order you like.** The panel used to draw them in
-the order they were declared, so CPU was always first and Network always last
-whatever you cared about. Right-click any readout in the menu and it opens onto
-its own tick and four moves — up, down, to the top, to the bottom — and the
-Monitor tab has the same eight rows with **Move up** and **Move down** under
-them. Which readouts are *shown* is a separate thing from where they sit, so
-hiding one and bringing it back puts it where it was rather than at the end.
-The order is stored by name (`monitor_order = cpu, gpu, ram`), so it survives
-anything being added to the panel later.
+**Put the readouts in whatever order you like — by dragging them.** Hold the
+mouse on a readout for a third of a second and it lifts off the panel; drag it
+up or down (or across, in a horizontal panel) and the others close up around
+the slot it would land in, marked with a dotted outline; let go and it drops
+there. **Ctrl+drag** lifts it at once, without the hold. A press that moves
+straight away still drags the whole panel, exactly as before, so the two never
+get in each other's way. In the HUD style, where a device's readouts share one
+line, the line is what you pick up.
+
+The **Monitor** tab's eight rows drag too — press on a row's name and pull it
+to where it should go; the list re-sorts under the pointer as you cross each
+row. The **Move up** and **Move down** buttons are still there, and the
+right-click menu still opens each readout onto its own tick and four moves.
+Which readouts are *shown* is a separate thing from where they sit, so hiding
+one and bringing it back puts it where it was rather than at the end. The order
+is stored by name (`monitor_order = cpu, gpu, ram`), so it survives anything
+being added to the panel later.
 
 **Drag it anywhere.** Its position is saved the moment you let go, so it survives a restart — or a
 crash. Or don't drag it: **Move to** in the right-click menu has the nine
@@ -651,7 +720,7 @@ bottom of the z-order, one step above the wallpaper: it is there when the deskto
 every window covers it, so it stops being something you have to work around. It keeps its real
 translucency and rounded corners either way.
 
-**Eight styles**, independent of the colours — any style can wear any theme:
+**Ten styles**, independent of the colours — any style can wear any theme:
 
 | | |
 | --- | --- |
@@ -663,6 +732,16 @@ translucency and rounded corners either way.
 | **Bars** | vertical column meters side by side, like a mixing desk |
 | **Graph** | chart first: a large history graph per metric, reading overlaid |
 | **Ticker** | a single thin line — a dot, a name and a number each, for a screen edge |
+| **OSD** | the MSI Afterburner / RivaTuner on-screen display: monospace text, one line per readout, label in its colour, sparkline beside it |
+| **HUD** | the layout the benchmark channels build on Afterburner: one line per *device* — `GPU  24%  69°  3.8 GB` — with the device tag in colour and the numbers big and white |
+
+The last two are the two looks nearly every in-game overlay converges on. The
+Afterburner OSD is a column of monospace text with each item on its own line;
+the benchmark-video HUD groups everything about the GPU on one line and
+everything about the CPU on the next, so the eye reads a device at a time. Both
+were made to go with the two **bare** themes below, which draw no panel at
+all — just the text, with a shadow under it so it reads on any wallpaper — but
+either works on any theme, glass and all.
 
 **It reads as a panel, not a rectangle.** The whole thing now sits on a soft drop shadow, which is
 what separates it from a busy wallpaper. It costs nothing per frame: the shadow, the gradient, the
@@ -709,7 +788,7 @@ window animation uses. *Glide between readings* in the right-click menu turns it
 order, where on the screen it sits, the style, the theme, graphs on or off, the busiest app, the
 glide, vertical or horizontal, pin, desktop, hide.
 
-**Sixteen themes.** The panel, the border, the text, the bars and the graphs all come from the
+**Eighteen themes.** The panel, the border, the text, the bars and the graphs all come from the
 theme, so each one is a genuinely different readout rather than a recoloured accent:
 
 | | |
@@ -722,6 +801,7 @@ theme, so each one is a genuinely different readout rather than a recoloured acc
 | **Terminal** · **Amber** | one colour on black, square corners, like a phosphor screen |
 | **Neon** | saturated cyan and magenta, big corners |
 | **Frost** · **Paper** | light panels with dark text, for a light wallpaper |
+| **Afterburner** · **Benchmark** | *no panel*: text straight on the screen. RivaTuner's default orange, or green GPU / blue CPU / white numbers |
 
 Pick a theme and a style from the overlay's right-click menu, or from the **Monitor** tab, which
 previews the pair live — at the current opacity, with the style and the busiest-app lines you have
@@ -737,6 +817,63 @@ DXGI, per-process figures from a single `NtQuerySystemInformation` snapshot, GPU
 NVML or ADL, and CPU temperature from LibreHardwareMonitor if it is running and the
 `Thermal Zone Information` performance counters otherwise — the last two on a thread of their own.
 A counter your machine does not expose shows `n/a` rather than a made-up zero.
+
+---
+
+## Desktop clock
+
+The monitor's sibling: the same layered window with the same glass, dragged,
+pinned and sent to the desktop the same way, showing the time instead of the
+load. Turn it on from the **Clock** tab or the tray menu. It repaints once a
+minute - once a second with the seconds on - and costs nothing while it is
+hidden.
+
+```
+╭──────────────────────────╮
+│                          │
+│   10:08  42 AM           │
+│   Friday, 18 September   │
+│                          │
+╰──────────────────────────╯
+```
+
+**Eight styles**, each a different kind of clock rather than a recolouring:
+
+| | |
+| --- | --- |
+| **Digital** | the default: the time, large, the date underneath |
+| **Minimal** | very thin type and small tracked capitals, the wallpaper-clock look - made for the two bare themes below |
+| **Analog** | a round dial with sixty ticks, three hands and the date in a small pill |
+| **Flip** | split-flap tiles, one digit each, with the hinge line across the middle |
+| **Segments** | seven-segment LED digits with the unlit segments faintly showing, leaning slightly, like an alarm clock |
+| **Stacked** | hours over minutes at a size that fills a corner, the weekday, day and month down the side |
+| **Wide** | a single thin strip - weekday, date, time - for the top or bottom edge of a screen |
+| **Ring** | the time inside a ring that fills as the minute goes by |
+
+**Twenty-one themes**, and the theme chooses the typeface as well as the colours,
+because a phosphor terminal wants a monospace and a paper calendar wants a serif:
+
+| | |
+| --- | --- |
+| **Midnight** | the default: near-black glass, white digits, a blue second hand |
+| **Glass** · **Ink** | *no panel*: white or black digits with a soft shadow, straight on the wallpaper |
+| **Slayer** | gunmetal and hazard orange in condensed capitals - the DOOM one |
+| **Nixie** · **Neon** | glowing amber in a dark tube; cyan tube light with a magenta second hand |
+| **Terminal** · **Amber** · **LCD** | green or amber on black, or dark segments on a grey-green LCD |
+| **Paper** · **Frost** | a white card with a red second hand; light glass for a light wallpaper |
+| **Graphite** · **Nord** · **Dracula** · **Solarized** · **Gruvbox** · **Tokyo Night** · **Catppuccin** · **Rosé Pine** · **Ocean** · **Ember** | the palettes the monitor has, so the two can match |
+
+The digits and the date come from the locale, so a machine set to German
+writes `Freitag, 18. September`. **24-hour**, **seconds**, **the date** and
+**the day of the week** are each their own switch, on the tab or in the
+clock's right-click menu, which also has the nine snap positions, the styles
+and the themes. The panel follows the text - `9:59` is narrower than `10:00` -
+and a clock in a corner grows towards the middle of the screen rather than
+off its edge.
+
+`tests\clockshot.bat` renders every style and theme to `tests\shots`;
+`tests\clocklive.bat` runs the real window for a few seconds and captures it
+off the screen.
 
 ---
 
@@ -823,11 +960,21 @@ clear of them. If you run a bar of your own, anywhere on screen, the tiling fits
   neighbour gives it up. It works the other way too, so a window that refuses to
   grow hands its surplus to whoever can use it rather than leaving bare desktop.
 
+  A split can only pass surplus along its own direction, so a window with a
+  maximum *height* sitting in a side-by-side split used to leave the space
+  under it empty. The layout now turns such a split the other way round when
+  that lets the windows under it use more of the screen — the short window
+  takes its row, its neighbour takes the rest — and does the same when two
+  windows cannot stand beside each other but can stack. Splits with nothing
+  limited beneath them are never touched.
+
   When even that is not enough — the window's minimum is larger than the screen,
-  or larger than what is left once everything else has its minimum — it is taken
-  out of the tiling and left floating where you put it, rather than allowed to
-  overhang and cover its neighbours. It comes back into the tiling by itself as
-  soon as there is room: close a window, or move it to a bigger screen.
+  or no arrangement of the others leaves it what it needs — it is taken out of
+  the tiling and left floating where you put it, rather than allowed to overhang
+  and cover its neighbours. The check is exact: every window in the plan is
+  compared with its own minimum before anything moves, so a window is never
+  handed a slot it will refuse. It comes back into the tiling by itself as soon
+  as there is room: close a window, or move it to a bigger screen.
 
   These minimums can only be discovered by handing a window a size and watching
   what it does with it, so they are remembered in `config.ini` (the `learned =`
@@ -865,12 +1012,16 @@ src/search.*     what the search bar finds: file index, settings pages, calculat
 src/montheme.*   the overlay's colour schemes and styles, as tables of data
 src/monpaint.*   the overlay's geometry and painting, one function per style
 src/monitor.*    the floating system-load overlay: window, z-order, menu
+src/clocktheme.* the clock's colour schemes, typefaces and styles, as tables of data
+src/clockpaint.* the clock's eight layouts, one function each, measured and drawn together
+src/clock.*      the clock window: the same drag, pin, desktop and snap as the monitor
 src/dragguide.*  the drop indicator shown while a tiled window is dragged
-src/theme.*      dark palette and the custom drawing behind it
+src/theme.*      the DOOM Eternal look: the palette, the condensed capitals, the cut-corner plates
 src/moddrag.*    hold the modifier and drag anywhere on a window
 src/settings.*   settings shell, Layout, Behaviour and General pages
 src/settings_keys.cpp  Window keys, Open apps and Monitor pages, plus key capture
 src/settings_search.cpp  the Search page: sources, indexed folders, the ceiling
+src/settings_clock.cpp   the Clock page: style, theme, what to show, the live preview
 src/app.h        the few services the settings pages need from the shell
 src/main.cpp     entry point, tray UI, event hooks
 res/app.rc       icon, manifest, and every dialog template

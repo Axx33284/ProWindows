@@ -36,7 +36,7 @@ cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UN
     "%ROOT%\tests\searchprobe.cpp" ^
     "%ROOT%\src\search.cpp" "%ROOT%\src\common.cpp" ^
     "%ROOT%\src\config.cpp" "%ROOT%\src\defaults.cpp" ^
-    "%ROOT%\src\winutil.cpp" "%ROOT%\src\montheme.cpp" ^
+    "%ROOT%\src\winutil.cpp" "%ROOT%\src\montheme.cpp" "%ROOT%\src\clocktheme.cpp" ^
     /Fe:"%ROOT%\tests\build\searchprobe.exe" ^
     /link /SUBSYSTEM:CONSOLE ^
     user32.lib gdi32.lib advapi32.lib shell32.lib shlwapi.lib ole32.lib dwmapi.lib

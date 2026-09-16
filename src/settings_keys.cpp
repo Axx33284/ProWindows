@@ -92,6 +92,154 @@ struct BindEditCtx {
 
 WNDPROC g_captureOldProc = nullptr;
 
+// The capture box used to read WM_KEYDOWN off the edit control, which works for
+// Alt+H and never for Win+E: the shell has already opened Explorer and eaten
+// the keystroke before any window sees it, so the box sat there saying "press
+// a key combination" while windows opened around it. Anything ProWindows
+// itself had already registered went the same way - the chord fired the
+// action instead of being recorded, which made rebinding a taken key
+// impossible from the dialog that exists to do it.
+//
+// So while the dialog is open a low-level keyboard hook sits in front of both.
+// It runs on this thread, is installed after the tiler's own hook (and so is
+// consulted before it), and it swallows every keystroke aimed at the capture
+// box, so the shell never sees Win+E, the tiler never sees Alt+H, and the
+// user sees exactly what they pressed. It only reads what it is told: the
+// hook posts each key to the dialog and everything else happens there.
+HHOOK g_captureHook = nullptr;
+HWND  g_captureDlg  = nullptr;      // the dialog the hook is serving
+HWND  g_captureBox  = nullptr;      // the control that has to have the focus
+UINT  g_captureHeld = 0;            // modifiers down right now, as the hook saw them
+
+// wParam: the key, or 0 when only the modifiers changed. lParam: the modifiers.
+constexpr UINT WM_AWA_CAPTUREKEY = WM_APP + 120;
+
+UINT ModifierBitFor(UINT vk) {
+    switch (vk) {
+        case VK_LWIN: case VK_RWIN:                          return MOD_WIN;
+        case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL: return MOD_CONTROL;
+        case VK_MENU: case VK_LMENU: case VK_RMENU:          return MOD_ALT;
+        case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT:       return MOD_SHIFT;
+        default:                                             return 0;
+    }
+}
+
+// Is the keystroke for us? Only while the capture box has the focus in the
+// foreground dialog: the launcher page's "Program:" field, the OK button and
+// every other window on the desktop must keep working exactly as before.
+bool CaptureWantsKeys() {
+    return g_captureDlg && g_captureBox &&
+           GetForegroundWindow() == g_captureDlg && GetFocus() == g_captureBox;
+}
+
+LRESULT CALLBACK CaptureHookProc(int code, WPARAM wp, LPARAM lp) {
+    if (code != HC_ACTION) return CallNextHookEx(nullptr, code, wp, lp);
+
+    if (!CaptureWantsKeys()) {
+        // Anything held when the focus left is not held any more as far as the
+        // recorder is concerned; the release will go to whoever has it now.
+        if (g_captureHeld) {
+            g_captureHeld = 0;
+            if (g_captureDlg) PostMessageW(g_captureDlg, WM_AWA_CAPTUREKEY, 0, 0);
+        }
+        return CallNextHookEx(nullptr, code, wp, lp);
+    }
+
+    const auto* kb = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lp);
+    const bool down = (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN);
+    const bool up   = (wp == WM_KEYUP   || wp == WM_SYSKEYUP);
+    if (!down && !up) return CallNextHookEx(nullptr, code, wp, lp);
+
+    const UINT vk  = (UINT)kb->vkCode;
+    const UINT bit = ModifierBitFor(vk);
+
+    if (bit) {
+        if (down) g_captureHeld |= bit;
+        else      g_captureHeld &= ~bit;
+        PostMessageW(g_captureDlg, WM_AWA_CAPTUREKEY, 0, g_captureHeld);
+        // The Win key is the one that must not get through: pressed and
+        // released on its own it opens Start, and we have just eaten whatever
+        // was pressed in between. The others are harmless to let pass.
+        if (bit == MOD_WIN) return 1;
+        return CallNextHookEx(nullptr, code, wp, lp);
+    }
+
+    // A real key. Record it on the way down, and swallow the release too so no
+    // application ever sees half a keystroke.
+    if (down) PostMessageW(g_captureDlg, WM_AWA_CAPTUREKEY, vk, g_captureHeld);
+    return 1;
+}
+
+void CaptureHookInstall(HWND dlg, HWND box) {
+    g_captureDlg  = dlg;
+    g_captureBox  = box;
+    g_captureHeld = 0;
+    if (!g_captureHook) {
+        g_captureHook = SetWindowsHookExW(WH_KEYBOARD_LL, CaptureHookProc,
+                                          GetModuleHandleW(nullptr), 0);
+        if (!g_captureHook)
+            AWA_LOG(L"shortcut recorder: keyboard hook could not be installed; "
+                    L"Win chords will not be captured");
+    }
+}
+
+void CaptureHookRemove() {
+    if (g_captureHook) {
+        UnhookWindowsHookEx(g_captureHook);
+        g_captureHook = nullptr;
+    }
+    g_captureDlg  = nullptr;
+    g_captureBox  = nullptr;
+    g_captureHeld = 0;
+}
+
+// What the box shows while modifiers are held and nothing else has been
+// pressed yet: "Win + Ctrl + ..." - so the user can see the Win key registered
+// before they commit to the rest of the chord.
+std::wstring HeldText(UINT mods) {
+    std::wstring s;
+    if (mods & MOD_WIN)     s += L"Win + ";
+    if (mods & MOD_CONTROL) s += L"Ctrl + ";
+    if (mods & MOD_ALT)     s += L"Alt + ";
+    if (mods & MOD_SHIFT)   s += L"Shift + ";
+    return s + L"...";
+}
+
+// The recorder's whole job, in one place: take a chord, show it, and explain
+// anything the user should know about it before they press OK.
+void CaptureAccept(HWND dlg, BindEditCtx* ctx, UINT mods, UINT vk) {
+    HWND box = GetDlgItem(dlg, IDC_BINDEDIT_CAPTURE);
+    ctx->mods = mods;
+    ctx->vk   = vk;
+    SetWindowTextW(box, DescribeChord(mods, vk).c_str());
+
+    std::wstring note;
+    if (mods == 0) {
+        note = L"A shortcut with no modifier will fire while you type. "
+               L"Add Alt, Ctrl or Win.";
+    } else if (ctx->existing) {
+        for (size_t i = 0; i < ctx->existing->size(); ++i) {
+            if ((int)i == ctx->selfIndex) continue;
+            const Keybind& other = (*ctx->existing)[i];
+            if (other.mods == mods && other.vk == vk) {
+                note = L"Already used by: " +
+                       (IsLaunch(other) ? FriendlyCommandName(other.command)
+                                        : DescribeAction(other)) +
+                       L". Saving will replace it.";
+                break;
+            }
+        }
+    }
+    if (note.empty() && (mods & MOD_WIN))
+        note = L"Windows reserves most Win shortcuts. This one will use "
+               L"the keyboard hook.";
+    SetDlgItemTextW(dlg, IDC_BINDEDIT_HINT, note.c_str());
+}
+
+// The edit control itself. With the hook in front of it this sees almost
+// nothing, but it still has to refuse the dialog manager's interest in Tab and
+// Enter (so they can be bound), keep its caret and text to itself, and carry
+// on working as a plain recorder if the hook could not be installed.
 LRESULT CALLBACK CaptureProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     HWND dlg = GetParent(wnd);
     auto* ctx = reinterpret_cast<BindEditCtx*>(GetWindowLongPtrW(dlg, DWLP_USER));
@@ -107,6 +255,11 @@ LRESULT CALLBACK CaptureProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN: {
+            // The hook has already handled and swallowed it. What reaches here
+            // is the modifier keys it lets through, and everything when the
+            // hook is missing.
+            if (g_captureHook) return 0;
+
             const UINT vk = (UINT)wp;
             const bool anyMod =
                 (GetKeyState(VK_CONTROL) < 0) || (GetKeyState(VK_MENU) < 0) ||
@@ -118,12 +271,7 @@ LRESULT CALLBACK CaptureProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                 PostMessageW(dlg, WM_COMMAND, IDCANCEL, 0);
                 return 0;
             }
-            if (vk == VK_CONTROL || vk == VK_MENU || vk == VK_SHIFT ||
-                vk == VK_LWIN || vk == VK_RWIN ||
-                vk == VK_LCONTROL || vk == VK_RCONTROL ||
-                vk == VK_LMENU || vk == VK_RMENU ||
-                vk == VK_LSHIFT || vk == VK_RSHIFT)
-                return 0;
+            if (ModifierBitFor(vk)) return 0;
 
             UINT mods = 0;
             if (GetKeyState(VK_CONTROL) < 0) mods |= MOD_CONTROL;
@@ -131,33 +279,7 @@ LRESULT CALLBACK CaptureProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (GetKeyState(VK_SHIFT) < 0)   mods |= MOD_SHIFT;
             if (GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0) mods |= MOD_WIN;
 
-            if (ctx) {
-                ctx->mods = mods;
-                ctx->vk   = vk;
-                SetWindowTextW(wnd, DescribeChord(mods, vk).c_str());
-
-                std::wstring note;
-                if (mods == 0) {
-                    note = L"A shortcut with no modifier will fire while you type. "
-                           L"Add Alt, Ctrl or Win.";
-                } else if (ctx->existing) {
-                    for (size_t i = 0; i < ctx->existing->size(); ++i) {
-                        if ((int)i == ctx->selfIndex) continue;
-                        const Keybind& other = (*ctx->existing)[i];
-                        if (other.mods == mods && other.vk == vk) {
-                            note = L"Already used by: " +
-                                   (IsLaunch(other) ? FriendlyCommandName(other.command)
-                                                    : DescribeAction(other)) +
-                                   L". Saving will replace it.";
-                            break;
-                        }
-                    }
-                }
-                if (note.empty() && (mods & MOD_WIN))
-                    note = L"Windows reserves most Win shortcuts. This one will use "
-                           L"the keyboard hook.";
-                SetDlgItemTextW(dlg, IDC_BINDEDIT_HINT, note.c_str());
-            }
+            if (ctx) CaptureAccept(dlg, ctx, mods, vk);
             return 0;
         }
 
@@ -191,6 +313,7 @@ INT_PTR CALLBACK BindEditProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
             HWND capture = GetDlgItem(dlg, IDC_BINDEDIT_CAPTURE);
             g_captureOldProc = (WNDPROC)SetWindowLongPtrW(
                 capture, GWLP_WNDPROC, (LONG_PTR)CaptureProc);
+            CaptureHookInstall(dlg, capture);
 
             SetWindowTextW(capture, ctx->vk
                 ? DescribeChord(ctx->mods, ctx->vk).c_str()
@@ -199,6 +322,38 @@ INT_PTR CALLBACK BindEditProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
             CenterOn(dlg, GetParent(dlg));
             SetFocus(capture);
             return FALSE;
+        }
+
+        case WM_AWA_CAPTUREKEY: {
+            if (!ctx) return TRUE;
+            const UINT vk   = (UINT)wp;
+            const UINT mods = (UINT)lp;
+            HWND box = GetDlgItem(dlg, IDC_BINDEDIT_CAPTURE);
+
+            if (vk == 0) {
+                // Modifiers only. Show what is held; when the last one goes
+                // back up with nothing else pressed, show the chord recorded
+                // so far (or the prompt) again.
+                if (mods) SetWindowTextW(box, HeldText(mods).c_str());
+                else      SetWindowTextW(box, ctx->vk
+                              ? DescribeChord(ctx->mods, ctx->vk).c_str()
+                              : L"press a key combination...");
+                return TRUE;
+            }
+            // Bare Escape still cancels; Escape with modifiers is a real chord.
+            if (vk == VK_ESCAPE && mods == 0) {
+                PostMessageW(dlg, WM_COMMAND, IDCANCEL, 0);
+                return TRUE;
+            }
+            // Bare Tab keeps the dialog usable from the keyboard: nobody binds
+            // a window action to the Tab key alone, and without this the OK
+            // button cannot be reached without a mouse.
+            if (vk == VK_TAB && mods == 0) {
+                SetFocus(GetNextDlgTabItem(dlg, box, FALSE));
+                return TRUE;
+            }
+            CaptureAccept(dlg, ctx, mods, vk);
+            return TRUE;
         }
 
         case WM_COMMAND:
@@ -233,6 +388,7 @@ INT_PTR CALLBACK BindEditProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
             return FALSE;
 
         case WM_DESTROY:
+            CaptureHookRemove();
             if (g_captureOldProc) {
                 SetWindowLongPtrW(GetDlgItem(dlg, IDC_BINDEDIT_CAPTURE),
                                   GWLP_WNDPROC, (LONG_PTR)g_captureOldProc);
@@ -670,6 +826,143 @@ void RefreshMetricRows(HWND page) {
                  enabled && g_orderRow < MON_METRIC_COUNT - 1);
 }
 
+void UpdateMonitorLook(HWND page);
+
+// Moves the metric in row `from` to row `to`, sliding the rows between them
+// along by one - a lift and reinsert, not a swap, so dragging the top row to
+// the bottom does not leave the middle in a different order from where it
+// started. Both buttons and the drag come through here.
+void MoveEditRow(int from, int to) {
+    if (from < 0 || to < 0 || from >= MON_METRIC_COUNT || to >= MON_METRIC_COUNT ||
+        from == to)
+        return;
+    const int metric = g_editOrder[from];
+    const int step = (to > from) ? 1 : -1;
+    for (int i = from; i != to; i += step) g_editOrder[i] = g_editOrder[i + step];
+    g_editOrder[to] = metric;
+}
+
+// The eight rows can be dragged into a new order as well as walked with the
+// buttons. Each row's tick box is subclassed: a press that then moves up or
+// down by more than a few pixels becomes a drag, and from there the row
+// follows the pointer - the list re-sorts live as the pointer crosses each
+// row, so what is on screen is always what letting go would give. A press that
+// does not move is still a click on the tick.
+struct RowDrag {
+    HWND  page     = nullptr;
+    HWND  ctl      = nullptr;
+    bool  pressed  = false;
+    bool  dragging = false;
+    int   row      = -1;       // where the metric being dragged is now
+    POINT origin   = {};       // screen, where the press landed
+};
+RowDrag g_rowDrag;
+WNDPROC g_rowOldProc[MON_METRIC_COUNT] = {};
+
+constexpr int kRowDragSlackPx = 4;
+
+// The row whose tick box spans the pointer's height, or the nearest end.
+int RowAtCursor(HWND page) {
+    POINT pt;
+    GetCursorPos(&pt);
+    ScreenToClient(page, &pt);
+    int nearest = -1, best = 1 << 30;
+    for (int slot = 0; slot < MON_METRIC_COUNT; ++slot) {
+        RECT r;
+        GetWindowRect(GetDlgItem(page, IDC_MON_SHOW_FIRST + slot), &r);
+        MapWindowPoints(nullptr, page, reinterpret_cast<POINT*>(&r), 2);
+        if (pt.y >= r.top && pt.y < r.bottom) return slot;
+        const int d = (pt.y < r.top) ? r.top - pt.y : pt.y - r.bottom;
+        if (d < best) { best = d; nearest = slot; }
+    }
+    return nearest;
+}
+
+void EndRowDrag() {
+    if (g_rowDrag.dragging && GetCapture() == g_rowDrag.ctl) ReleaseCapture();
+    g_rowDrag.dragging = false;
+    g_rowDrag.pressed  = false;
+    g_rowDrag.ctl      = nullptr;
+}
+
+LRESULT CALLBACK RowDragProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
+    const int slot = (int)GetWindowLongPtrW(wnd, GWLP_ID) - IDC_MON_SHOW_FIRST;
+    WNDPROC old = (slot >= 0 && slot < MON_METRIC_COUNT) ? g_rowOldProc[slot] : nullptr;
+    if (!old) return DefWindowProcW(wnd, msg, wp, lp);
+    HWND page = GetParent(wnd);
+
+    switch (msg) {
+        case WM_LBUTTONDOWN:
+            g_rowDrag.page     = page;
+            g_rowDrag.ctl      = wnd;
+            g_rowDrag.pressed  = true;
+            g_rowDrag.dragging = false;
+            g_rowDrag.row      = slot;
+            GetCursorPos(&g_rowDrag.origin);
+            break;                              // the tick still takes the press
+
+        case WM_MOUSEMOVE: {
+            if (!g_rowDrag.pressed || g_rowDrag.ctl != wnd) break;
+            if (!(wp & MK_LBUTTON)) { g_rowDrag.pressed = false; break; }
+            POINT now;
+            GetCursorPos(&now);
+            if (!g_rowDrag.dragging) {
+                if (abs(now.y - g_rowDrag.origin.y) <= kRowDragSlackPx) break;
+                // It is a drag. The button has the capture and is holding
+                // itself pushed; taking the capture away makes it let go
+                // without a click, and then it is ours. `dragging` is set
+                // only once the capture is back, because ReleaseCapture
+                // delivers WM_CAPTURECHANGED to this very window, and the
+                // handler below would otherwise read that as the drag being
+                // taken away before it had begun.
+                ReleaseCapture();
+                SetCapture(wnd);
+                g_rowDrag.dragging = true;
+                SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
+            }
+            const int target = RowAtCursor(page);
+            if (target >= 0 && target != g_rowDrag.row) {
+                MoveEditRow(g_rowDrag.row, target);
+                g_rowDrag.row = target;
+                g_orderRow    = target;
+                RefreshMetricRows(page);
+                UpdateMonitorLook(page);
+            }
+            return 0;
+        }
+
+        case WM_SETCURSOR:
+            if (g_rowDrag.dragging && g_rowDrag.ctl == wnd) {
+                SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
+                return TRUE;
+            }
+            break;
+
+        case WM_LBUTTONUP:
+            if (g_rowDrag.dragging && g_rowDrag.ctl == wnd) {
+                const int landed = g_rowDrag.row;
+                EndRowDrag();
+                // The moved row keeps the highlight, as the buttons do.
+                SetFocus(GetDlgItem(page, IDC_MON_SHOW_FIRST + landed));
+                return 0;                       // not a click: the tick stays
+            }
+            g_rowDrag.pressed = false;
+            break;
+
+        case WM_CAPTURECHANGED:
+            if (g_rowDrag.dragging && g_rowDrag.ctl == wnd && (HWND)lp != wnd)
+                EndRowDrag();
+            break;
+
+        case WM_DESTROY:
+            SetWindowLongPtrW(wnd, GWLP_WNDPROC, (LONG_PTR)old);
+            g_rowOldProc[slot] = nullptr;
+            if (g_rowDrag.ctl == wnd) EndRowDrag();
+            break;
+    }
+    return CallWindowProcW(old, wnd, msg, wp, lp);
+}
+
 int SelectedSkin(HWND page) {
     const int sel = (int)SendDlgItemMessageW(page, IDC_MON_THEME, CB_GETCURSEL, 0, 0);
     return (sel >= 0 && sel < MonitorSkinCount()) ? sel : 0;
@@ -729,6 +1022,8 @@ void UpdateMonitorEnabling(HWND page) {
     else
         hint += L"Drag it anywhere, then pin it so it cannot be moved by "
                 L"accident. Right-click it for all of this.";
+    hint += L"\r\nDrag the rows on the left into the order you want - or hold "
+            L"a readout on the panel itself and drag it.";
     SetDlgItemTextW(page, IDC_MON_HINT, hint.c_str());
 }
 
@@ -760,7 +1055,7 @@ void DrawColourSwatch(const DRAWITEMSTRUCT* dis, HWND page) {
     RECT r = dis->rcItem;
     FillRect(dis->hDC, &r, theme::BrushPanel());
     if (!IsWindowEnabled(dis->hwndItem)) {
-        theme::RoundRect(dis->hDC, r, 4, theme::PanelAlt, theme::Border, true);
+        theme::Chamfer(dis->hDC, r, 3, theme::PanelAlt, 255, theme::Border, 255);
         return;
     }
 
@@ -775,7 +1070,7 @@ void DrawColourSwatch(const DRAWITEMSTRUCT* dis, HWND page) {
 void DrawMonitorPreview(const DRAWITEMSTRUCT* dis, HWND page) {
     RECT r = dis->rcItem;
     FillRect(dis->hDC, &r, theme::BrushPanel());
-    theme::RoundRect(dis->hDC, r, 6, theme::Bg, theme::Border, true);
+    theme::Chamfer(dis->hDC, r, 8, theme::Bg, 255, theme::Border, 255);
 
     RECT inner = { r.left + 6, r.top + 5, r.right - 6, r.bottom - 5 };
     MonitorDrawPreview(dis->hDC, inner, PreviewFromPage(page));
@@ -900,6 +1195,13 @@ INT_PTR CALLBACK PageMonitorProc(HWND page, UINT msg, WPARAM wp, LPARAM lp) {
                                 MAKELPARAM(20, 100));   // matches config.cpp
             SendDlgItemMessageW(page, IDC_MON_SCALE, TBM_SETRANGE, TRUE,
                                 MAKELPARAM(75, 175));
+
+            for (int slot = 0; slot < MON_METRIC_COUNT; ++slot) {
+                HWND row = GetDlgItem(page, IDC_MON_SHOW_FIRST + slot);
+                if (row && !g_rowOldProc[slot])
+                    g_rowOldProc[slot] = (WNDPROC)SetWindowLongPtrW(
+                        row, GWLP_WNDPROC, (LONG_PTR)RowDragProc);
+            }
             return TRUE;
         }
 
@@ -991,7 +1293,7 @@ INT_PTR CALLBACK PageMonitorProc(HWND page, UINT msg, WPARAM wp, LPARAM lp) {
                     const int to = g_orderRow +
                                    (LOWORD(wp) == IDC_MON_ORDER_UP ? -1 : 1);
                     if (to < 0 || to >= MON_METRIC_COUNT) return TRUE;
-                    std::swap(g_editOrder[g_orderRow], g_editOrder[to]);
+                    MoveEditRow(g_orderRow, to);
                     g_orderRow = to;   // the row follows the metric it moved
                     RefreshMetricRows(page);
                     UpdateMonitorLook(page);

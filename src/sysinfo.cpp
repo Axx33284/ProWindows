@@ -308,9 +308,29 @@ DWORD PidFromGpuInstance(const wchar_t* name) {
 
 } // namespace
 
-SystemSampler::~SystemSampler() { Close(); }
+SystemSampler::SystemSampler() {
+    // Never deleted, for the reason the destructor gives: an abandoned
+    // sampling thread may still enter it after static destruction has begun.
+    InitializeCriticalSection(&lock_);
+}
 
 void SystemSampler::Configure(const SampleWants& want) {
+    EnterCriticalSection(&lock_);
+    pending_      = want;
+    pendingDirty_ = true;
+    LeaveCriticalSection(&lock_);
+}
+
+// Sampling thread. Moves whatever Configure() left into the live wants, and
+// reopens the counters if the set of PDH counters has changed.
+void SystemSampler::ApplyPending() {
+    SampleWants want;
+    EnterCriticalSection(&lock_);
+    const bool dirty = pendingDirty_;
+    if (dirty) { want = pending_; pendingDirty_ = false; }
+    LeaveCriticalSection(&lock_);
+    if (!dirty) return;
+
     const bool pdhChanged = (want.gpu  != want_.gpu)  ||
                             (want.vram != want_.vram) ||
                             (want.disk != want_.disk) ||
@@ -321,8 +341,6 @@ void SystemSampler::Configure(const SampleWants& want) {
         ClosePdh();                    // reopen with just the counters now wanted
         haveCpuBaseline_ = false;
     }
-
-    ThermalWant(want_.cpuTemp, want_.gpuTemp);
 }
 
 void SystemSampler::EnsurePdh() {
@@ -372,7 +390,10 @@ void SystemSampler::ClosePdh() {
 
 void SystemSampler::Close() {
     ClosePdh();
-    ThermalStop();
+    // Nothing else: the temperature probe is not this thread's to stop. The
+    // previous version called ThermalStop() here, which was fine while this
+    // ran on the UI thread and is a cross-thread teardown now that it does
+    // not; monitor.cpp stops the probe from the thread that started it.
 }
 
 // Per-processor busy time, as a fraction of the wall clock since the last
@@ -441,6 +462,7 @@ void SystemSampler::SampleCores(Metric* cpu) {
 
 void SystemSampler::Sample(SystemLoad* out) {
     *out = SystemLoad();
+    ApplyPending();
 
     // ---- CPU: ratio of non-idle time across the whole system ----
     if (want_.cpu) {

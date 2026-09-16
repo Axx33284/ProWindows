@@ -152,6 +152,11 @@ struct MonitorInfo {
     Rect     work;                     // work area (taskbar excluded)
     Rect     full;
     bool     primary = false;
+    // The display's refresh rate in Hz, or 0 when the driver would not say.
+    // The animation ticker paces itself to the fastest display: moving a
+    // window more often than the screen can show it costs the application a
+    // relayout per frame and shows nothing for it.
+    int      refreshHz = 0;
 };
 
 std::vector<MonitorInfo> EnumMonitors();

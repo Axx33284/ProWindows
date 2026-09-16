@@ -55,6 +55,7 @@ void AppTrayBalloon(const wchar_t*, const wchar_t*) {}
 void AppSaveConfig()      {}
 void AppRefreshSettings() {}
 void AppOpenMonitorSettings() {}
+void AppOpenClockSettings()   {}
 bool AppAutostartEnabled()    { return false; }
 void AppSetAutostart(bool)    {}
 void AppGameModeChanged(bool) {}
@@ -67,7 +68,7 @@ void AppRestoreDefaults(HWND) {}
 // Fixed text rather than the real thing: the About block would otherwise put
 // this machine's user name and install path into every capture.
 std::wstring AppAboutText() {
-    return L"ProWindows 1.2.0  -  running as a normal user\r\n"
+    return L"ProWindows 1.3.0  -  running as a normal user\r\n"
            L"C:\\Tools\\ProWindows\\ProWindows.exe\r\n"
            L"C:\\Users\\you\\AppData\\Roaming\\ProWindows\\config.ini";
 }
@@ -166,6 +167,7 @@ int wmain(int argc, wchar_t** argv) {
         { PAGE_APPS,      L"ui-apps.png"      },
         { PAGE_SEARCH,    L"ui-search.png"    },
         { PAGE_MONITOR,   L"ui-monitor.png"   },
+        { PAGE_CLOCK,     L"ui-clock.png"     },
         { PAGE_GENERAL,   L"ui-general.png"   },
     };
     static_assert(ARRAYSIZE(tabs) == PAGE_COUNT,

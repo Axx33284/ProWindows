@@ -117,14 +117,22 @@ bool IsResizable(HWND h) {
 
 bool IsOnCurrentVirtualDesktop(HWND h) {
     static IVirtualDesktopManager* vdm = nullptr;
-    static bool tried = false;
-    if (!tried) {
-        tried = true;
+    // When to ask for the object again after a failure. It used to be asked
+    // for exactly once, and at logon - which is when this program normally
+    // starts - the shell that serves it is often not up yet. One refusal then
+    // switched virtual-desktop awareness off for the whole session: every
+    // window on every desktop was tiled onto the one being looked at.
+    static ULONGLONG retryAt = 0;
+    if (!vdm) {
+        const ULONGLONG now = GetTickCount64();
+        if (now < retryAt) return true;
         if (FAILED(CoCreateInstance(CLSID_VirtualDesktopManager, nullptr, CLSCTX_ALL,
-                                    IID_PPV_ARGS(&vdm))))
+                                    IID_PPV_ARGS(&vdm)))) {
             vdm = nullptr;
+            retryAt = now + 5000;
+        }
     }
-    if (!vdm) return true;   // no API available: assume yes
+    if (!vdm) return true;   // no API available (yet): assume yes
 
     BOOL onCurrent = TRUE;
     if (FAILED(vdm->IsWindowOnCurrentVirtualDesktop(h, &onCurrent))) return true;
@@ -325,6 +333,37 @@ bool FullscreenAppActive() {
     if (cls == L"Progman" || cls == L"WorkerW" ||
         cls == L"Shell_TrayWnd" || cls == L"Shell_SecondaryTrayWnd")
         return false;
+
+    // A Store app is hosted in an ApplicationFrameWindow, and the frame is
+    // what takes the foreground. A fullscreen UWP game is one of those, so the
+    // frame cannot simply be excused - but an empty frame (the app is still
+    // starting, or suspended) has no CoreWindow inside it and is never a game.
+    if (cls == L"ApplicationFrameWindow") {
+        HWND core = FindWindowExW(fg, nullptr, L"Windows.UI.Core.CoreWindow", nullptr);
+        return core != nullptr && IsFullscreenWindow(fg);
+    }
+
+    // The shell's own full-screen surfaces are not games, and Windows 11 has a
+    // lot of them: the Alt+Tab switcher and Task View cover the whole screen
+    // with a translucent backdrop, so does the lock screen, the snipping
+    // overlay (Win+Shift+S), and the logon screen while an autostarted copy
+    // is coming up behind it. Every one of them took the foreground, measured
+    // as full-screen, and put the tiler into game mode - which tore the
+    // overlay down and back up on every Alt+Tab, dropped every window event
+    // for the next second and a half, and at logon left nothing arranged
+    // until the user unlocked. The log on this machine showed it several
+    // times an hour. Known by process, because their classes change between
+    // builds and the process names do not.
+    static const wchar_t* const kShellProcesses[] = {
+        L"explorer.exe", L"lockapp.exe", L"logonui.exe",
+        L"shellexperiencehost.exe", L"startmenuexperiencehost.exe",
+        L"searchhost.exe", L"searchapp.exe", L"searchui.exe",
+        L"screenclippinghost.exe", L"snippingtool.exe",
+        L"textinputhost.exe", L"widgets.exe", L"dwm.exe",
+    };
+    const std::wstring proc = ToLower(ProcessName(fg));
+    for (const wchar_t* shell : kShellProcesses)
+        if (proc == shell) return false;
 
     return IsFullscreenWindow(fg);
 }
@@ -566,10 +605,16 @@ ManageVerdict Classify(HWND h, const Config& cfg, IgnoreReason* why) {
     if (why) *why = IgnoreReason::None;
 
     if (!h || !IsWindow(h))                    return ignore(IgnoreReason::Permanent);
+    // Asked before visibility, deliberately. A child window is never going to
+    // become a top-level one, and EVENT_OBJECT_SHOW arrives for every child
+    // an application shows - a control, a tooltip, a tab strip - usually
+    // while its parent is still hidden. Testing visibility first put every one
+    // of those on the pending list for two seconds of second looks, which on a
+    // busy desktop kept TIMER_PENDING ticking for nothing.
+    if (GetAncestor(h, GA_ROOT) != h)          return ignore(IgnoreReason::Permanent);
     // A window that has been created but not shown yet. Ordinary during
     // startup of almost any application.
     if (!IsWindowVisible(h))                   return ignore(IgnoreReason::Transient);
-    if (GetAncestor(h, GA_ROOT) != h)          return ignore(IgnoreReason::Permanent);
 
     // Never manage our own settings window.
     DWORD ownPid = 0;
@@ -716,38 +761,53 @@ void PlaceWindowFast(HWND h, const Rect& target, const FramePad& pad, HDWP* dwp)
     }
 }
 
+// Brings a window to the front from a process that does not own the
+// foreground, which SetForegroundWindow alone refuses.
+//
+// This used to do two things that are both well known to go wrong, and both
+// were reported from the desktop:
+//
+//   AttachThreadInput to the foreground and target threads. Attached threads
+//   pool their whole input state - keyboard state, capture, the caret and the
+//   cursor, including whether it is shown. Windows hides the pointer while
+//   the user types ("Hide pointer while typing" is on by default) and shows it
+//   again on the next mouse movement; pool that state with ours in the middle
+//   of a keystroke and split it again a moment later, and the hidden pointer
+//   can be left hidden, or ours can. That is "the mouse disappears when I
+//   type". It also makes SetFocus a synchronous call into the other process,
+//   so a hung application hung the tiler with it.
+//
+//   A synthetic Alt press-and-release as a fallback. Alt on its own moves
+//   keyboard focus to the menu bar in Explorer and every Office application,
+//   and Alt arriving while Shift is held is the keyboard-layout switch chord
+//   on most machines. Injected while somebody is typing, both were visible.
+//
+// What replaces them is a mouse input event with no flags set - no movement,
+// no button, nothing for any application to see - which the input system
+// still records as "this process delivered the last input event". That is the
+// documented condition under which SetForegroundWindow is allowed, and it is
+// the same approach komorebi and GlazeWM settled on for the same reasons.
+// Nothing here calls into the other process synchronously, and nothing here
+// shares state with it.
 void FocusWindow(HWND h) {
     if (!h || !IsWindow(h)) return;
 
     if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
+    if (GetForegroundWindow() == h) return;
 
-    HWND fg = GetForegroundWindow();
-    if (fg == h) return;
+    // A registered hotkey already grants the receiving thread foreground
+    // rights, so this often succeeds outright. Try before injecting anything.
+    if (SetForegroundWindow(h) && GetForegroundWindow() == h) return;
 
-    const DWORD self   = GetCurrentThreadId();
-    const DWORD fgTid  = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
-    const DWORD tgtTid = GetWindowThreadProcessId(h, nullptr);
+    INPUT in = {};
+    in.type = INPUT_MOUSE;
+    SendInput(1, &in, sizeof(INPUT));
 
-    if (fgTid && fgTid != self)  AttachThreadInput(self, fgTid, TRUE);
-    if (tgtTid && tgtTid != self) AttachThreadInput(self, tgtTid, TRUE);
-
-    BringWindowToTop(h);
+    // HWND_TOP with no move or size: the same raise a real click would do,
+    // so a window behind another one is brought forward as it is focused.
+    SetWindowPos(h, HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
     SetForegroundWindow(h);
-    SetFocus(h);
-
-    if (tgtTid && tgtTid != self) AttachThreadInput(self, tgtTid, FALSE);
-    if (fgTid && fgTid != self)   AttachThreadInput(self, fgTid, FALSE);
-
-    if (GetForegroundWindow() != h) {
-        // Last resort: the foreground lock relents after a synthetic key event.
-        INPUT in[2] = {};
-        in[0].type = INPUT_KEYBOARD;
-        in[0].ki.wVk = VK_MENU;
-        in[1] = in[0];
-        in[1].ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(2, in, sizeof(INPUT));
-        SetForegroundWindow(h);
-    }
 }
 
 void SetBorderColor(HWND h, COLORREF c, bool enabled) {
@@ -1042,6 +1102,14 @@ static BOOL CALLBACK MonitorProc(HMONITOR mon, HDC, LPRECT, LPARAM data) {
         m.work    = Rect::FromRECT(mi.rcWork);
         m.full    = Rect::FromRECT(mi.rcMonitor);
         m.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
+        // The current mode of the device behind this monitor. A read of what
+        // the driver already knows, not a mode query; and EnumMonitors runs
+        // on display changes, not on window events.
+        DEVMODEW dm{};
+        dm.dmSize = sizeof(dm);
+        if (EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) &&
+            (dm.dmFields & DM_DISPLAYFREQUENCY) && dm.dmDisplayFrequency > 1)
+            m.refreshHz = (int)dm.dmDisplayFrequency;
         out->push_back(m);
     }
     return TRUE;

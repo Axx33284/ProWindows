@@ -1,6 +1,7 @@
 #include "config.h"
 #include "winutil.h"
 #include "montheme.h"
+#include "clocktheme.h"
 
 namespace awa {
 
@@ -743,6 +744,25 @@ bool Config::LoadFromFile(const std::wstring& path) {
                 else                   monColor[index] = kMonColourFromTheme;
             }
         }
+        else if (k == L"clock_enabled")    clockEnabled = ParseBool(v, clockEnabled);
+        else if (k == L"clock_x")          clockX = _wtoi(v.c_str());
+        else if (k == L"clock_y")          clockY = _wtoi(v.c_str());
+        else if (k == L"clock_pinned")     clockPinned = ParseBool(v, clockPinned);
+        else if (k == L"clock_on_desktop") clockOnDesktop = ParseBool(v, clockOnDesktop);
+        else if (k == L"clock_opacity")    clockOpacity = (std::max)(20, (std::min)(100, _wtoi(v.c_str())));
+        else if (k == L"clock_scale")      clockScale = (std::max)(50, (std::min)(250, _wtoi(v.c_str())));
+        else if (k == L"clock_theme") {
+            const int found = ClockSkinIndexById(Trim(v));
+            if (found >= 0) clockTheme = found;
+        }
+        else if (k == L"clock_style") {
+            const int found = ClockStyleIndexById(Trim(v));
+            if (found >= 0) clockStyle = found;
+        }
+        else if (k == L"clock_24h")        clockHours24 = ParseBool(v, clockHours24);
+        else if (k == L"clock_seconds")    clockSeconds = ParseBool(v, clockSeconds);
+        else if (k == L"clock_date")       clockDate = ParseBool(v, clockDate);
+        else if (k == L"clock_weekday")    clockWeekday = ParseBool(v, clockWeekday);
         else if (k == L"monitor_cpu")      monShowCpu = ParseBool(v, monShowCpu);
         else if (k == L"monitor_ram")      monShowRam = ParseBool(v, monShowRam);
         else if (k == L"monitor_gpu")      monShowGpu = ParseBool(v, monShowGpu);

@@ -29,6 +29,8 @@ void AppRefreshSettings();
 
 // Opens the settings window on the Monitor tab.
 void AppOpenMonitorSettings();
+// ... and on the Clock tab.
+void AppOpenClockSettings();
 
 bool AppAutostartEnabled();
 void AppSetAutostart(bool on);
