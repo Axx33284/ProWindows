@@ -33,7 +33,10 @@ build.bat
   second copy beside the running one. Prefer exiting from the tray to `Stop-Process`: killing it
   skips `RestoreAllWindows`, so anything hidden for a workspace switch stays hidden and the user
   has no way to get it back.
-- `res\gen_icon.py` regenerates `res\app.ico` from code; it is only needed if the icon changes.
+- `res\gen_icon.py` regenerates `res\app.ico` from code; it is only needed if the icon changes. The
+  icon is the app mark on a cut-corner plate in `theme.h`'s palette, so the tray, the taskbar and
+  the settings header show the same object.
+- `docs\` holds the review notes, one file per pass. Nothing in it is read by the build.
 
 ## Where things live
 
@@ -68,6 +71,7 @@ build.bat
 | `src\app.h` | The handful of services the settings pages need from the shell. |
 | `src\main.cpp` | Entry point, tray UI, event hooks, and the `app.h` implementations. |
 | `res\app.rc` | Icon, manifest, and every dialog template. The layout lives here, not in code. |
+| `docs\` | The review notes: what was reported, what was found, what changed, per pass. |
 | `tests\` | `run.bat` asserts on layout geometry; `probe.bat` prints how each live window would be classified without moving any of it; `tempprobe.bat` prints which temperature source this machine can answer from, and self-tests the two shared-memory readers; `monshot.bat`, `clockshot.bat`, `launchshot.bat`, `uishot.bat`, `bindshot.bat` and `rowdragshot.bat` render the pieces of UI to PNG without starting the tiler (`clocklive.bat` runs the real clock window for a few seconds and captures it off the screen) (`bindshot` presses real keys into the shortcut recorder, `rowdragshot` drags a Monitor-tab row with the real mouse, and `monshot` also renders a readout mid-drag); `searchprobe.bat` runs the file and program index alone and prints what it found, per drive, which is the only way to see whether the walk reaches this machine's other disks; `analyze.bat` runs MSVC `/analyze` over whichever sources you name. None is part of the product build. |
 
 ## Data flow

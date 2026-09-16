@@ -179,6 +179,14 @@ const ClockStyleInfo kStyles[CLOCK_STYLE_COUNT] = {
       L"A single thin line - weekday, date, time - for the edge of a screen." },
     { L"ring",     L"Ring",
       L"The time inside a ring that fills as the minute goes by." },
+    { L"roman",    L"Roman",
+      L"A dial with Roman numerals and slim hands, like a wall clock." },
+    { L"station",  L"Station",
+      L"A dial with bold numerals, heavy markers and a red second hand, like a railway clock." },
+    { L"dial",     L"Dial",
+      L"A bare dial: four markers, thin hands, no rim. Best on Glass or Ink." },
+    { L"classic",  L"Classic",
+      L"A framed readout: a rule above and below the time, the date in small capitals." },
 };
 
 } // namespace

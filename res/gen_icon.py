@@ -1,8 +1,10 @@
 """Generate res/app.ico for ProWindows.
 
 Draws the app mark - a tiled window arrangement (one master pane on the left,
-two stacked panes on the right) inside a rounded dark tile - at several sizes
-and packs them into a PNG-compressed .ico. Uses only the standard library.
+two stacked panes on the right) on a dark plate with its top-left and
+bottom-right corners cut, in the settings window's own palette: gunmetal
+and hazard orange, after DOOM Eternal's menus. Rendered at several sizes and
+packed into a PNG-compressed .ico. Uses only the standard library.
 
     python res/gen_icon.py
 """
@@ -14,28 +16,22 @@ import zlib
 SIZES = [16, 20, 24, 32, 48, 64, 128, 256]
 SS = 4  # supersampling factor for smooth edges
 
-BG        = (0x1B, 0x1E, 0x2B)   # tile background
-PANE_MAIN = (0x7A, 0xA2, 0xF7)   # focused / master pane
-PANE_ALT  = (0x51, 0x6B, 0xAF)   # secondary panes
-PANE_DIM  = (0x39, 0x4B, 0x7D)
+# theme.h: Panel, Border, Accent, PanelAlt, and a darker step of PanelAlt.
+BG        = (0x16, 0x18, 0x1B)   # plate
+EDGE      = (0x3A, 0x3E, 0x44)   # plate border
+PANE_MAIN = (0xF5, 0x92, 0x1E)   # focused / master pane: the accent
+PANE_ALT  = (0x4A, 0x50, 0x58)   # secondary panes
+PANE_DIM  = (0x33, 0x38, 0x3E)
 
 
-def rounded_rect_coverage(px, py, x, y, w, h, radius):
-    """1 if the supersample point is inside the rounded rect, else 0."""
+def chamfer_coverage(px, py, x, y, w, h, cut):
+    """1 if the supersample point is inside the cut-corner rect, else 0."""
     if px < x or py < y or px >= x + w or py >= y + h:
         return False
-    # corner circles
-    for cx, cy in ((x + radius, y + radius),
-                   (x + w - radius, y + radius),
-                   (x + radius, y + h - radius),
-                   (x + w - radius, y + h - radius)):
-        inside_x = (px < x + radius) or (px > x + w - radius)
-        inside_y = (py < y + radius) or (py > y + h - radius)
-        if inside_x and inside_y:
-            near_x = (px < x + radius) == (cx < x + w / 2)
-            near_y = (py < y + radius) == (cy < y + h / 2)
-            if near_x and near_y:
-                return (px - cx) ** 2 + (py - cy) ** 2 <= radius * radius
+    if (px - x) + (py - y) < cut:                    # top-left corner cut
+        return False
+    if (x + w - px) + (y + h - py) < cut:            # bottom-right corner cut
+        return False
     return True
 
 
@@ -48,14 +44,15 @@ def render(size):
     unit = n / 32.0                      # design grid is 32x32
     tile_x = tile_y = 1.0 * unit
     tile_w = tile_h = 30.0 * unit
-    tile_r = 6.5 * unit
+    tile_cut = 7.0 * unit
+    edge = max(1.0, 1.1 * unit)          # the border ring, one pixel at 16 px
 
     gap = 2.0 * unit
-    inner_x = tile_x + 3.0 * unit
-    inner_y = tile_y + 3.0 * unit
-    inner_w = tile_w - 6.0 * unit
-    inner_h = tile_h - 6.0 * unit
-    pane_r = 1.8 * unit
+    inner_x = tile_x + 4.0 * unit
+    inner_y = tile_y + 4.0 * unit
+    inner_w = tile_w - 8.0 * unit
+    inner_h = tile_h - 8.0 * unit
+    pane_cut = 2.2 * unit
 
     master_w = inner_w * 0.52
     right_x = inner_x + master_w + gap
@@ -63,9 +60,9 @@ def render(size):
     right_h = (inner_h - gap) / 2.0
 
     panes = [
-        (inner_x, inner_y, master_w, inner_h, PANE_MAIN),
-        (right_x, inner_y, right_w, right_h, PANE_ALT),
-        (right_x, inner_y + right_h + gap, right_w, right_h, PANE_DIM),
+        (inner_x, inner_y, master_w, inner_h, PANE_MAIN, pane_cut),
+        (right_x, inner_y, right_w, right_h, PANE_ALT, 0.0),
+        (right_x, inner_y + right_h + gap, right_w, right_h, PANE_DIM, 0.0),
     ]
 
     for sy in range(n):
@@ -73,13 +70,17 @@ def render(size):
         oy = sy // SS
         for sx in range(n):
             px = sx + 0.5
-            if not rounded_rect_coverage(px, py, tile_x, tile_y, tile_w, tile_h, tile_r):
+            if not chamfer_coverage(px, py, tile_x, tile_y, tile_w, tile_h, tile_cut):
                 continue
-            color = BG
-            for rx, ry, rw, rh, c in panes:
-                if rounded_rect_coverage(px, py, rx, ry, rw, rh, pane_r):
-                    color = c
-                    break
+            # the border: the plate minus a slightly smaller plate
+            color = EDGE
+            if chamfer_coverage(px, py, tile_x + edge, tile_y + edge,
+                                tile_w - 2 * edge, tile_h - 2 * edge, tile_cut - edge):
+                color = BG
+                for rx, ry, rw, rh, c, cut in panes:
+                    if chamfer_coverage(px, py, rx, ry, rw, rh, cut):
+                        color = c
+                        break
             cell = acc[oy * size + (sx // SS)]
             cell[0] += color[0]
             cell[1] += color[1]

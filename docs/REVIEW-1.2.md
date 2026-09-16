@@ -1,6 +1,6 @@
 # ProWindows 1.2 — review, fixes and the three things that were asked for
 
-A second pass over `src/`, after the 1.1 review in [REVIEW.md](REVIEW.md). That pass was about
+A second pass over `src/`, after the 1.1 review in [REVIEW-1.1.md](REVIEW-1.1.md). That pass was about
 correctness; this one was asked to look at the overlay, the search bar, the look of the app, and
 what it costs to run. Everything below is either a defect that was traced through the real control
 flow, or a change with a measurement next to it.

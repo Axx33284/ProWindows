@@ -24,6 +24,12 @@ struct ClockPaintCtx {
     bool  date    = true;                // the day and month
     bool  weekday = true;                // and its name
     SYSTEMTIME time = {};                // what to show; local time
+
+    // A flip in progress, for the Flip style only: what the tiles showed
+    // before, and how far the flaps have turned, 0 to 1. Null / 1 means the
+    // board is at rest. The window drives this from a short timer.
+    const struct ClockText* flipFrom = nullptr;
+    float flipT = 1.0f;
 };
 
 // The strings a frame is made of. Exposed so the window can compare two
@@ -54,5 +60,8 @@ void ClockDraw(Gdiplus::Graphics* g, int width, int height, const ClockPaintCtx&
 // Does this style ever change between one second and the next? Decides how
 // often the window has to wake up.
 bool ClockStyleShowsSeconds(int style, bool secondsOn);
+
+// How long one flip of the split-flap board takes, in milliseconds.
+constexpr int kClockFlipMs = 420;
 
 } // namespace awa

@@ -318,7 +318,9 @@ struct Style {
 
     SizeF Digital(float ox, float oy) const;
     SizeF Minimal(float ox, float oy) const;
-    SizeF Analog(float ox, float oy) const;
+    // The four dials share one body; `kind` is the CLOCK_STYLE_* they differ by.
+    SizeF Analog(float ox, float oy, int kind) const;
+    SizeF Classic(float ox, float oy) const;
     SizeF Flip(float ox, float oy) const;
     SizeF Segments(float ox, float oy) const;
     SizeF Stacked(float ox, float oy) const;
@@ -328,7 +330,11 @@ struct Style {
     SizeF Run(float ox, float oy) const {
         switch (ctx.style) {
             case CLOCK_STYLE_MINIMAL:  return Minimal(ox, oy);
-            case CLOCK_STYLE_ANALOG:   return Analog(ox, oy);
+            case CLOCK_STYLE_ANALOG:
+            case CLOCK_STYLE_ROMAN:
+            case CLOCK_STYLE_STATION:
+            case CLOCK_STYLE_DIAL:     return Analog(ox, oy, ctx.style);
+            case CLOCK_STYLE_CLASSIC:  return Classic(ox, oy);
             case CLOCK_STYLE_FLIP:     return Flip(ox, oy);
             case CLOCK_STYLE_SEGMENTS: return Segments(ox, oy);
             case CLOCK_STYLE_STACKED:  return Stacked(ox, oy);
@@ -429,35 +435,82 @@ SizeF Style::Minimal(float ox, float oy) const {
     return SizeF(contentW + padX * 2, contentH + padY * 2);
 }
 
-// Analog: a dial. Sixty ticks with the twelve hours heavier, three hands,
-// a cap over the pivot, and the date in a smallF pill in the lower half.
-SizeF Style::Analog(float ox, float oy) const {
+// The dials. One body, four faces: Analog has sixty ticks with the hours
+// heavier; Roman puts serif numerals round the rim with slim hands; Station
+// is the railway clock - bold numerals, heavy bar markers, a red second hand
+// with a disc on its tip; Dial is the bare one - four markers, no rim, thin
+// hands, meant for the skins with no panel.
+SizeF Style::Analog(float ox, float oy, int kind) const {
     const float pad = 10 * s;
     const float d   = 168 * s;
     const float r   = d / 2.0f;
     const float cx  = ox + pad + r, cy = oy + pad + r;
+    const bool roman   = (kind == CLOCK_STYLE_ROMAN);
+    const bool station = (kind == CLOCK_STYLE_STATION);
+    const bool bare    = (kind == CLOCK_STYLE_DIAL);
 
     if (draw) {
         // The face: a shade lighter than the panel, with a fine rim. On a
-        // bare skin only the rim is drawn, so the wallpaper is the face.
-        if (!skin.bare) FillCircle(g, cx, cy, r, Argb(skin.tile, 255));
-        Pen rim(Argb(skin.dim, 200), (std::max)(1.0f, 1.2f * s));
-        g->DrawEllipse(&rim, cx - r, cy - r, d, d);
-
-        for (int i = 0; i < 60; ++i) {
-            const bool hour = (i % 5) == 0;
-            const float ang = (float)i * 6.0f * kPi / 180.0f - kPi / 2.0f;
-            const float len = hour ? 9 * s : 4 * s;
-            const float in  = r - 6 * s;
-            Pen tick(Argb(hour ? skin.time : skin.dim, hour ? 230 : 200),
-                     hour ? 2.2f * s : 1.0f * s);
-            tick.SetStartCap(LineCapRound);
-            tick.SetEndCap(LineCapRound);
-            g->DrawLine(&tick, cx + cosf(ang) * (in - len), cy + sinf(ang) * (in - len),
-                        cx + cosf(ang) * in, cy + sinf(ang) * in);
+        // bare skin only the rim is drawn, so the wallpaper is the face; the
+        // bare dial draws neither.
+        if (!bare) {
+            if (!skin.bare) FillCircle(g, cx, cy, r, Argb(skin.tile, 255));
+            Pen rim(Argb(skin.dim, 200), (std::max)(1.0f, (station ? 2.0f : 1.2f) * s));
+            g->DrawEllipse(&rim, cx - r, cy - r, d, d);
         }
 
-        // The date, below the pivot, as smallF capitals in a faint pill.
+        // Markers.
+        if (bare) {
+            for (int i = 0; i < 4; ++i) {
+                const float ang = (float)i * 90.0f * kPi / 180.0f - kPi / 2.0f;
+                const float in  = r - 4 * s, len = 10 * s;
+                Pen tick(Argb(skin.time, 220), 2.0f * s);
+                tick.SetStartCap(LineCapRound);
+                tick.SetEndCap(LineCapRound);
+                g->DrawLine(&tick, cx + cosf(ang) * (in - len), cy + sinf(ang) * (in - len),
+                            cx + cosf(ang) * in, cy + sinf(ang) * in);
+            }
+        } else {
+            for (int i = 0; i < 60; ++i) {
+                const bool hour = (i % 5) == 0;
+                if (roman && !hour && (i % 5) != 0) {
+                    // Roman keeps only a fine minute track: a dot per minute.
+                    const float ang = (float)i * 6.0f * kPi / 180.0f - kPi / 2.0f;
+                    FillCircle(g, cx + cosf(ang) * (r - 7 * s), cy + sinf(ang) * (r - 7 * s),
+                               0.9f * s, Argb(skin.dim, 220));
+                    continue;
+                }
+                const float ang = (float)i * 6.0f * kPi / 180.0f - kPi / 2.0f;
+                float len = hour ? 9 * s : 4 * s;
+                float wid = hour ? 2.2f * s : 1.0f * s;
+                if (station) { len = hour ? 12 * s : 5 * s; wid = hour ? 4.0f * s : 1.6f * s; }
+                if (roman && hour) { len = 5 * s; wid = 1.4f * s; }
+                const float in = r - 6 * s;
+                Pen tick(Argb(hour ? skin.time : skin.dim, hour ? 230 : 200), wid);
+                if (!station) { tick.SetStartCap(LineCapRound); tick.SetEndCap(LineCapRound); }
+                g->DrawLine(&tick, cx + cosf(ang) * (in - len), cy + sinf(ang) * (in - len),
+                            cx + cosf(ang) * in, cy + sinf(ang) * in);
+            }
+        }
+
+        // Numerals, for the two faces that have them.
+        if (roman || station) {
+            static const wchar_t* const kRoman[12] = {
+                L"XII", L"I", L"II", L"III", L"IV", L"V", L"VI", L"VII", L"VIII", L"IX", L"X", L"XI",
+            };
+            const Font* nf = roman ? CachedFont(CLOCK_FACE_SERIF, 13.0f * s)
+                                   : CachedFont(CLOCK_FACE_SEMIBOLD, 15.0f * s, true);
+            const float ring = roman ? r * 0.70f : r * 0.72f;
+            for (int i = 0; i < 12; ++i) {
+                const float ang = (float)i * 30.0f * kPi / 180.0f - kPi / 2.0f;
+                const std::wstring txt = roman ? kRoman[i] : std::to_wstring(i == 0 ? 12 : i);
+                const SizeF sz = TextSize(txt.c_str(), nf);
+                Put(txt, nf, skin.time, cx + cosf(ang) * ring - sz.Width / 2.0f,
+                    cy + sinf(ang) * ring - sz.Height / 2.0f);
+            }
+        }
+
+        // The date, below the pivot, as small capitals in a faint pill.
         const std::wstring dateLine = DateLine(false);
         if (!dateLine.empty()) {
             const Font* f = D(10.5f);
@@ -465,25 +518,109 @@ SizeF Style::Analog(float ox, float oy) const {
             const SizeF sz = TextSize(txt.c_str(), f);
             const float px = cx - sz.Width / 2.0f - 6 * s, py = cy + r * 0.38f;
             FillRound(g, RectF(px, py, sz.Width + 12 * s, sz.Height + 3 * s),
-                      3 * s, Argb(skin.dim, skin.bare ? 90 : 120));
+                      3 * s, Argb(skin.dim, (skin.bare || bare) ? 90 : 120));
             Put(txt, f, skin.date, px + 6 * s, py + 1.5f * s);
         }
 
         const float sec = (float)ctx.time.wSecond;
         const float mnt = (float)ctx.time.wMinute + sec / 60.0f;
         const float hr  = (float)(ctx.time.wHour % 12) + mnt / 60.0f;
-        Hand(g, cx, cy, hr * 30.0f,  r * 0.50f, 8 * s,  5.0f * s, Argb(skin.time, 255));
-        Hand(g, cx, cy, mnt * 6.0f,  r * 0.74f, 8 * s,  3.4f * s, Argb(skin.time, 255));
-        if (ctx.seconds)
-            Hand(g, cx, cy, sec * 6.0f, r * 0.84f, 14 * s, 1.4f * s, Argb(skin.accent, 255));
-        FillCircle(g, cx, cy, 4.2f * s, Argb(skin.accent, 255));
-        FillCircle(g, cx, cy, 1.6f * s, Argb(skin.tile, 255));
+        if (station) {
+            // Heavy tapered hands: a wide line under a narrower one reads as
+            // a taper at these sizes without a polygon per hand.
+            Hand(g, cx, cy, hr * 30.0f,  r * 0.52f, 10 * s, 7.0f * s, Argb(skin.time, 255));
+            Hand(g, cx, cy, mnt * 6.0f,  r * 0.80f, 10 * s, 5.0f * s, Argb(skin.time, 255));
+            if (ctx.seconds) {
+                Hand(g, cx, cy, sec * 6.0f, r * 0.68f, 16 * s, 2.0f * s, Argb(skin.accent, 255));
+                const float ang = sec * 6.0f * kPi / 180.0f - kPi / 2.0f;
+                FillCircle(g, cx + cosf(ang) * r * 0.68f, cy + sinf(ang) * r * 0.68f,
+                           4.5f * s, Argb(skin.accent, 255));
+            }
+            FillCircle(g, cx, cy, 4.5f * s, Argb(skin.time, 255));
+        } else if (roman || bare) {
+            Hand(g, cx, cy, hr * 30.0f,  r * 0.50f, 6 * s, 2.6f * s, Argb(skin.time, 255));
+            Hand(g, cx, cy, mnt * 6.0f,  r * 0.76f, 6 * s, 1.8f * s, Argb(skin.time, 255));
+            if (ctx.seconds)
+                Hand(g, cx, cy, sec * 6.0f, r * 0.84f, 12 * s, 0.9f * s, Argb(skin.accent, 255));
+            FillCircle(g, cx, cy, 2.8f * s, Argb(skin.accent, 255));
+        } else {
+            Hand(g, cx, cy, hr * 30.0f,  r * 0.50f, 8 * s,  5.0f * s, Argb(skin.time, 255));
+            Hand(g, cx, cy, mnt * 6.0f,  r * 0.74f, 8 * s,  3.4f * s, Argb(skin.time, 255));
+            if (ctx.seconds)
+                Hand(g, cx, cy, sec * 6.0f, r * 0.84f, 14 * s, 1.4f * s, Argb(skin.accent, 255));
+            FillCircle(g, cx, cy, 4.2f * s, Argb(skin.accent, 255));
+            FillCircle(g, cx, cy, 1.6f * s, Argb(skin.tile, 255));
+        }
     }
     return SizeF(d + pad * 2, d + pad * 2);
 }
 
+// Classic: a framed readout. A rule above and below the time, the date in
+// small capitals under the lower rule - the look of a mantel clock's face,
+// and the one that suits the serif skins.
+SizeF Style::Classic(float ox, float oy) const {
+    const float padX = 22 * s, padY = 12 * s;
+    const Font* big   = F(42);
+    const Font* smallF = F(14);
+    const Font* dateF = D(11);
+
+    const std::wstring main = TimeMain();
+    const SizeF mainSz = TextSize(main.c_str(), big);
+    const SizeF secSz  = ctx.seconds ? TextSize(t.seconds.c_str(), smallF) : SizeF();
+    const SizeF ampmSz = t.ampm.empty() ? SizeF() : TextSize(t.ampm.c_str(), smallF);
+    const std::wstring dateLine = Tracked(DateLine(true));
+    const SizeF dateSz = TextSize(dateLine.c_str(), dateF);
+
+    float lineW = mainSz.Width;
+    if (ctx.seconds)     lineW += 6 * s + secSz.Width;
+    if (!t.ampm.empty()) lineW += 6 * s + ampmSz.Width;
+    const float contentW = (std::max)(lineW, dateSz.Width) + 16 * s;
+    const float ruleGap = 6 * s;
+    float contentH = ruleGap + mainSz.Height * 0.92f + ruleGap;
+    if (!dateLine.empty()) contentH += 4 * s + dateSz.Height;
+
+    if (draw) {
+        const float left = ox + padX, right = ox + padX + contentW;
+        float y = oy + padY;
+        // A double rule: the accent over a dim hairline.
+        Pen thick(Argb(skin.accent, 255), (std::max)(1.0f, 1.5f * s));
+        Pen thin(Argb(skin.dim, 255), (std::max)(1.0f, 1.0f * s));
+        g->DrawLine(&thick, left, y, right, y);
+        g->DrawLine(&thin, left, y + 3 * s, right, y + 3 * s);
+        y += ruleGap;
+
+        float x = ox + padX + (contentW - lineW) / 2.0f;
+        const float ty = y - mainSz.Height * 0.06f;
+        Put(main, big, skin.time, x, ty);
+        x += mainSz.Width;
+        const float baseY = ty + mainSz.Height * 0.80f;
+        if (ctx.seconds) {
+            x += 6 * s;
+            Put(t.seconds, smallF, skin.accent, x, baseY - secSz.Height * 0.80f);
+            x += secSz.Width;
+        }
+        if (!t.ampm.empty()) {
+            x += 6 * s;
+            Put(t.ampm, smallF, skin.date, x, baseY - ampmSz.Height * 0.80f);
+        }
+        y += mainSz.Height * 0.92f + ruleGap;
+        g->DrawLine(&thin, left, y - 3 * s, right, y - 3 * s);
+        g->DrawLine(&thick, left, y, right, y);
+        if (!dateLine.empty())
+            Put(dateLine, dateF, skin.date, ox + padX + (contentW - dateSz.Width) / 2.0f,
+                y + 4 * s);
+    }
+    return SizeF(contentW + padX * 2, contentH + padY * 2);
+}
+
 // Flip: one tile per digit, split across the middle like a split-flap board;
 // hours and minutes as pairs with the colon between, the seconds smaller.
+//
+// A change of digit is animated the way the real board does it: the top
+// half of the old digit folds down about the hinge, and as it passes the
+// horizontal the bottom half of the new digit unfolds beneath it. The window
+// drives the progress through ctx.flipFrom / ctx.flipT; with those at rest
+// every tile is drawn flat.
 SizeF Style::Flip(float ox, float oy) const {
     const float padX = 16 * s, padY = 14 * s;
     const float tileW = 44 * s, tileH = 62 * s, tileGap = 4 * s, groupGap = 14 * s;
@@ -493,8 +630,13 @@ SizeF Style::Flip(float ox, float oy) const {
 
     // Hours are always two tiles: "0" and "9" rather than a lone "9", because
     // a board has a fixed number of flaps.
-    std::wstring hh = t.hours;
-    if (hh.size() < 2) hh = L"0" + hh;
+    auto padHours = [](std::wstring hh) { if (hh.size() < 2) hh = L"0" + hh; return hh; };
+    const std::wstring hh = padHours(t.hours);
+    // What each tile showed before, if a flip is in progress.
+    const bool flipping = ctx.flipFrom && ctx.flipT < 1.0f;
+    const std::wstring ph = flipping ? padHours(ctx.flipFrom->hours) : hh;
+    const std::wstring pm = flipping ? ctx.flipFrom->minutes : t.minutes;
+    const std::wstring ps = flipping ? ctx.flipFrom->seconds : t.seconds;
 
     float lineW = tileW * 4 + tileGap * 2 + groupGap;
     if (ctx.seconds) lineW += groupGap + tileW * secScale * 2 + tileGap;
@@ -506,25 +648,86 @@ SizeF Style::Flip(float ox, float oy) const {
     if (!dateLine.empty()) contentH += 8 * s + dateSz.Height;
 
     if (draw) {
-        auto tile = [&](wchar_t ch, float x, float y, float w, float h, const Font* f) {
+        // One flat tile, whole or clipped to its top or bottom half (`half`:
+        // 0 whole, 1 top, 2 bottom). The digit is drawn whole and clipped
+        // with the tile, which is what makes the two halves line up.
+        auto tileHalf = [&](wchar_t ch, float x, float y, float w, float h, const Font* f,
+                            int half, BYTE shadeAlpha) {
             const RectF r(x, y, w, h);
-            FillRound(g, r, 5 * s, Argb(skin.tile, 255));
+            GraphicsPath outline;
+            AddRoundedPath(&outline, r, 5 * s);
+            GraphicsState st = g->Save();
+            if (half == 1)      g->SetClip(RectF(x - 1, y - 1, w + 2, h / 2.0f + 1), CombineModeIntersect);
+            else if (half == 2) g->SetClip(RectF(x - 1, y + h / 2.0f, w + 2, h / 2.0f + 1), CombineModeIntersect);
+
+            SolidBrush face(Argb(skin.tile, 255));
+            g->FillPath(&face, &outline);
             // The lower half a touch darker, the way a real flap catches
-            // less light, then the hinge line across the middle.
-            GraphicsPath lower;
-            AddRoundedPath(&lower, r, 5 * s);
-            Region below(&lower);
-            below.Intersect(RectF(x, y + h / 2.0f, w, h / 2.0f));
-            SolidBrush shade(Color(28, 0, 0, 0));
-            g->FillRegion(&shade, &below);
+            // less light.
+            {
+                Region below(&outline);
+                below.Intersect(RectF(x, y + h / 2.0f, w, h / 2.0f));
+                SolidBrush shade(Color(28, 0, 0, 0));
+                g->FillRegion(&shade, &below);
+            }
             Pen edge(Argb(skin.dim, 160), (std::max)(1.0f, 1.0f * s));
-            g->DrawPath(&edge, &lower);
+            g->DrawPath(&edge, &outline);
 
             const wchar_t str[2] = { ch, 0 };
             const SizeF sz = TextSize(str, f);
             Put(str, f, skin.time, x + (w - sz.Width) / 2.0f, y + (h - sz.Height) / 2.0f);
-            Pen hinge(Argb(skin.panelBottom, 200), (std::max)(1.0f, 1.5f * s));
-            g->DrawLine(&hinge, x, y + h / 2.0f, x + w, y + h / 2.0f);
+            if (shadeAlpha) {
+                // A turning flap is in its own shadow.
+                SolidBrush dark(Color(shadeAlpha, 0, 0, 0));
+                g->FillPath(&dark, &outline);
+            }
+            g->Restore(st);
+        };
+        // The hinge line, drawn last so it sits over whatever is behind it.
+        auto hinge = [&](float x, float y, float w, float h) {
+            Pen pen(Argb(skin.panelBottom, 200), (std::max)(1.0f, 1.5f * s));
+            g->DrawLine(&pen, x, y + h / 2.0f, x + w, y + h / 2.0f);
+        };
+        // A tile, flat or mid-flip from `from` to `ch`.
+        auto tile = [&](wchar_t ch, wchar_t from, float x, float y, float w, float h,
+                        const Font* f) {
+            if (!flipping || from == ch) {
+                tileHalf(ch, x, y, w, h, f, 0, 0);
+                hinge(x, y, w, h);
+                return;
+            }
+            const float tt = (std::max)(0.0f, (std::min)(1.0f, ctx.flipT));
+            // What lies flat: the new digit's top half is already in place
+            // behind the falling flap; the old digit's bottom half stays until
+            // the new one unfolds over it.
+            tileHalf(ch,   x, y, w, h, f, 1, 0);
+            tileHalf(from, x, y, w, h, f, 2, 0);
+
+            const float hingeY = y + h / 2.0f;
+            GraphicsState st = g->Save();
+            if (tt < 0.5f) {
+                // The old top half folding down: its height shrinks with the
+                // cosine of the angle turned, hinged at the middle.
+                const float k = cosf(tt * kPi);                 // 1 -> 0
+                Matrix m;
+                m.Translate(0.0f, hingeY);
+                m.Scale(1.0f, (std::max)(0.02f, k));
+                m.Translate(0.0f, -hingeY);
+                g->MultiplyTransform(&m);
+                tileHalf(from, x, y, w, h, f, 1, (BYTE)(140 * (1.0f - k)));
+            } else {
+                // The new bottom half unfolding: from nothing at the hinge to
+                // its full height.
+                const float k = -cosf(tt * kPi);                // 0 -> 1
+                Matrix m;
+                m.Translate(0.0f, hingeY);
+                m.Scale(1.0f, (std::max)(0.02f, k));
+                m.Translate(0.0f, -hingeY);
+                g->MultiplyTransform(&m);
+                tileHalf(ch, x, y, w, h, f, 2, (BYTE)(140 * (1.0f - k)));
+            }
+            g->Restore(st);
+            hinge(x, y, w, h);
         };
         auto colon = [&](float x, float h) {
             FillCircle(g, x, oy + padY + h * 0.36f, 3 * s, Argb(skin.accent, 255));
@@ -533,17 +736,17 @@ SizeF Style::Flip(float ox, float oy) const {
 
         float x = ox + padX + (contentW - lineW) / 2.0f;
         const float y = oy + padY;
-        tile(hh[0], x, y, tileW, tileH, digitF); x += tileW + tileGap;
-        tile(hh[1], x, y, tileW, tileH, digitF); x += tileW + groupGap / 2.0f;
-        colon(x, tileH);                          x += groupGap / 2.0f;
-        tile(t.minutes[0], x, y, tileW, tileH, digitF); x += tileW + tileGap;
-        tile(t.minutes[1], x, y, tileW, tileH, digitF); x += tileW;
+        tile(hh[0], ph[0], x, y, tileW, tileH, digitF); x += tileW + tileGap;
+        tile(hh[1], ph[1], x, y, tileW, tileH, digitF); x += tileW + groupGap / 2.0f;
+        colon(x, tileH);                                 x += groupGap / 2.0f;
+        tile(t.minutes[0], pm[0], x, y, tileW, tileH, digitF); x += tileW + tileGap;
+        tile(t.minutes[1], pm[1], x, y, tileW, tileH, digitF); x += tileW;
         if (ctx.seconds) {
             x += groupGap;
             const float sw = tileW * secScale, sh = tileH * secScale;
             const float sy = y + tileH - sh;
-            tile(t.seconds[0], x, sy, sw, sh, secF); x += sw + tileGap;
-            tile(t.seconds[1], x, sy, sw, sh, secF); x += sw;
+            tile(t.seconds[0], ps[0], x, sy, sw, sh, secF); x += sw + tileGap;
+            tile(t.seconds[1], ps[1], x, sy, sw, sh, secF); x += sw;
         }
         if (!t.ampm.empty()) {
             x += 8 * s;
@@ -815,7 +1018,12 @@ PanelLook LookOf(const ClockSkin& skin, int style) {
     look.gloss       = skin.gloss;
     look.radius      = skin.radius;
     look.bare        = skin.bare;
-    if (style == CLOCK_STYLE_ANALOG || style == CLOCK_STYLE_RING) look.radius = 4096;
+    if (style == CLOCK_STYLE_ANALOG || style == CLOCK_STYLE_RING ||
+        style == CLOCK_STYLE_ROMAN || style == CLOCK_STYLE_STATION ||
+        style == CLOCK_STYLE_DIAL)
+        look.radius = 4096;
+    // The bare dial has no panel whatever the skin says.
+    if (style == CLOCK_STYLE_DIAL) look.bare = true;
     return look;
 }
 

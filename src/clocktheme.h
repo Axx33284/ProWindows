@@ -20,6 +20,12 @@ enum ClockStyle : int {
     CLOCK_STYLE_STACKED,       // hours over minutes, huge, the date down the side
     CLOCK_STYLE_WIDE,          // one thin line: weekday, date and time, for a screen edge
     CLOCK_STYLE_RING,          // the time inside a ring that fills as the minute passes
+    // Appended after the first eight so the config tokens above keep their
+    // meaning; the settings list shows them in this order too.
+    CLOCK_STYLE_ROMAN,         // a dial with Roman numerals and slim hands
+    CLOCK_STYLE_STATION,       // a dial with bold numerals and heavy hands, like a railway clock
+    CLOCK_STYLE_DIAL,          // a bare dial: four markers, no rim, thin hands
+    CLOCK_STYLE_CLASSIC,       // a framed readout: rules above and below the time, small capitals
     CLOCK_STYLE_COUNT
 };
 

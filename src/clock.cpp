@@ -18,6 +18,8 @@ namespace {
 
 constexpr wchar_t kClass[]     = L"ProWindows_Clock";
 constexpr UINT_PTR kTimerTick  = 1;    // the next second (or minute) has arrived
+constexpr UINT_PTR kTimerFlip  = 2;    // a split-flap tile is turning
+constexpr UINT     kFlipFrame  = 25;   // ms between flip frames
 
 enum : UINT {
     IDM_PIN = 1, IDM_DESKTOP, IDM_24H, IDM_SECONDS, IDM_DATE, IDM_WEEKDAY,
@@ -40,6 +42,30 @@ RECT  g_dragStart  = {};
 // - fifty-nine of every sixty with the seconds off - is not painted.
 std::wstring g_lastSig;
 bool         g_sigValid = false;
+
+// The split-flap animation. When the Flip style's digits change, the text
+// they changed from is kept and the board is redrawn every few milliseconds
+// with the turn's progress until it has landed. Only the digits count: the
+// date changing at midnight flips nothing.
+ClockText     g_lastText;
+bool          g_haveLastText = false;
+ClockText     g_flipFrom;
+bool          g_flipping     = false;
+LARGE_INTEGER g_flipStart    = {};
+
+bool DigitsDiffer(const ClockText& a, const ClockText& b, bool seconds) {
+    return a.hours != b.hours || a.minutes != b.minutes ||
+           (seconds && a.seconds != b.seconds);
+}
+
+float FlipProgress() {
+    LARGE_INTEGER now, freq;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    const double ms = (double)(now.QuadPart - g_flipStart.QuadPart) * 1000.0 /
+                      (double)(std::max)(1LL, (long long)freq.QuadPart);
+    return (float)(ms / (double)kClockFlipMs);
+}
 
 // The layered-window surface, kept across frames.
 HDC     g_surfaceDc   = nullptr;
@@ -90,6 +116,8 @@ std::wstring FrameSignature(const ClockPaintCtx& ctx, const ClockText& t, const 
     if (ClockStyleShowsSeconds(ctx.style, ctx.seconds)) sig += t.seconds;
     sig += ctx.date ? L"d" : L"-";
     sig += ctx.weekday ? L"w" : L"-";
+    if (ctx.flipFrom && ctx.flipT < 1.0f)
+        sig += L"|f" + std::to_wstring((int)(ctx.flipT * 200.0f));
     return sig;
 }
 
@@ -124,8 +152,34 @@ void ClampOnScreen(int* x, int* y, const SIZE& size) {
 void Redraw() {
     if (!g_wnd || !g_cfg) return;
 
-    const ClockPaintCtx ctx = LiveCtx();
+    ClockPaintCtx ctx = LiveCtx();
     const ClockText text = ClockBuildText(ctx);
+
+    // The flip. A change of digit on the Flip style starts one; while it
+    // runs the painter is handed where it started from and how far it is.
+    if (ctx.style == CLOCK_STYLE_FLIP) {
+        if (g_haveLastText && !g_flipping && DigitsDiffer(g_lastText, text, ctx.seconds)) {
+            g_flipFrom = g_lastText;
+            g_flipping = true;
+            QueryPerformanceCounter(&g_flipStart);
+            SetTimer(g_wnd, kTimerFlip, kFlipFrame, nullptr);
+        }
+        if (g_flipping) {
+            const float p = FlipProgress();
+            if (p >= 1.0f) {
+                g_flipping = false;
+                KillTimer(g_wnd, kTimerFlip);
+            } else {
+                ctx.flipFrom = &g_flipFrom;
+                ctx.flipT    = p;
+            }
+        }
+    } else if (g_flipping) {
+        g_flipping = false;
+        KillTimer(g_wnd, kTimerFlip);
+    }
+    if (!g_flipping) { g_lastText = text; g_haveLastText = true; }
+
     SIZE size = ClockMeasure(ctx);
 
     const std::wstring sig = FrameSignature(ctx, text, size);
@@ -374,6 +428,8 @@ LRESULT CALLBACK ClockProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == kTimerTick) {
                 Redraw();
                 ArmTick();
+            } else if (wp == kTimerFlip) {
+                Redraw();
             }
             return 0;
 
@@ -490,6 +546,8 @@ void ClockSetVisible(bool visible) {
         // on every game and every screen blank, and hiding cannot fail.
         if (g_wnd) {
             KillTimer(g_wnd, kTimerTick);
+            KillTimer(g_wnd, kTimerFlip);
+            g_flipping = false;
             ShowWindow(g_wnd, SW_HIDE);
         }
         ReleaseSurface();

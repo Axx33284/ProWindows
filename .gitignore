@@ -5,10 +5,10 @@ tests/build/
 # Rendered test artefacts. Regenerate with tests\monshot.bat / uishot.bat.
 tests/shots/
 
-# Stale reference renders that used to live in the project root. They predate
-# the current painter; tests\monshot.bat writes the current ones to tests\shots.
+# Renders belong in tests\shots, never in the project root.
 /skin-*.png
 /style-*.png
+/clock-*.png
 
 # MSVC intermediates
 *.obj

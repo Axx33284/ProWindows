@@ -837,7 +837,7 @@ hidden.
 ╰──────────────────────────╯
 ```
 
-**Eight styles**, each a different kind of clock rather than a recolouring:
+**Twelve styles**, each a different kind of clock rather than a recolouring:
 
 | | |
 | --- | --- |
@@ -849,6 +849,14 @@ hidden.
 | **Stacked** | hours over minutes at a size that fills a corner, the weekday, day and month down the side |
 | **Wide** | a single thin strip - weekday, date, time - for the top or bottom edge of a screen |
 | **Ring** | the time inside a ring that fills as the minute goes by |
+| **Roman** | a dial with serif Roman numerals, a dotted minute track and slim hands |
+| **Station** | the railway clock: bold numerals, heavy bar markers, a red second hand with a disc on its tip |
+| **Dial** | a bare dial - four markers, thin hands, no rim - for the Glass and Ink themes |
+| **Classic** | a framed readout: a double rule above and below the time, the date in small capitals |
+
+The Flip style animates: when a digit changes, the top half of the old digit
+folds down about the hinge and the bottom half of the new one unfolds beneath
+it, over 420 ms at 40 frames a second, then the board is still again.
 
 **Twenty-one themes**, and the theme chooses the typeface as well as the colours,
 because a phosphor terminal wants a monospace and a paper calendar wants a serif:
@@ -1025,7 +1033,8 @@ src/settings_clock.cpp   the Clock page: style, theme, what to show, the live pr
 src/app.h        the few services the settings pages need from the shell
 src/main.cpp     entry point, tray UI, event hooks
 res/app.rc       icon, manifest, and every dialog template
-res/gen_icon.py  regenerates res/app.ico from code
+res/gen_icon.py  regenerates res/app.ico from code, in the settings window's palette
+docs/            the review notes, one per pass: what was reported, what was found, what changed
 build.bat        one-step MSVC build
 ```
 

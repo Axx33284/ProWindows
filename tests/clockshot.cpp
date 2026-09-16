@@ -107,6 +107,24 @@ int wmain(int argc, wchar_t** argv) {
         Shot(out + L"\\clock-style-" + ClockStyleAt(i).id + L"-24h.png", ctx, png);
     }
 
+    // The split-flap board caught mid-turn, at three points of the flip.
+    wprintf(L"flip:\n");
+    {
+        ClockPaintCtx ctx = Base();
+        ctx.style = CLOCK_STYLE_FLIP;
+        ctx.skin  = &ClockSkinAt(0);
+        ClockText from = ClockBuildText(ctx);      // 10:08:42
+        ctx.time.wMinute = 9;                      // -> 10:09:42: the last minute tile turns
+        ctx.time.wSecond = 43;
+        for (float tt : { 0.25f, 0.5f, 0.75f }) {
+            ctx.flipFrom = &from;
+            ctx.flipT    = tt;
+            wchar_t name[64];
+            swprintf_s(name, L"\\clock-flip-%02d.png", (int)(tt * 100));
+            Shot(out + name, ctx, png);
+        }
+    }
+
     // Every skin, on the style it reads best in.
     wprintf(L"clock themes:\n");
     for (int i = 0; i < ClockSkinCount(); ++i) {
@@ -120,7 +138,10 @@ int wmain(int argc, wchar_t** argv) {
             ctx.style = CLOCK_STYLE_SEGMENTS;
         if (wcscmp(skin.id, L"nixie") == 0) ctx.style = CLOCK_STYLE_FLIP;
         if (wcscmp(skin.id, L"slayer") == 0) ctx.style = CLOCK_STYLE_STACKED;
-        if (wcscmp(skin.id, L"paper") == 0) ctx.style = CLOCK_STYLE_ANALOG;
+        if (wcscmp(skin.id, L"paper") == 0) ctx.style = CLOCK_STYLE_ROMAN;
+        if (wcscmp(skin.id, L"frost") == 0) ctx.style = CLOCK_STYLE_STATION;
+        if (wcscmp(skin.id, L"ink") == 0) ctx.style = CLOCK_STYLE_DIAL;
+        if (wcscmp(skin.id, L"gruvbox") == 0) ctx.style = CLOCK_STYLE_CLASSIC;
         if (wcscmp(skin.id, L"neon") == 0) ctx.style = CLOCK_STYLE_RING;
         Shot(out + L"\\clock-skin-" + skin.id + L".png", ctx, png);
     }
