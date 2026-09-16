@@ -192,7 +192,7 @@ public:
     void ActScratchpadToggle();
 
     // Flip the split the focused window sits under, or exchange its two
-    // halves. Dwindle only - Master, Grid and Monocle do not have a tree to
+    // halves. Dwindle only - Master and Grid do not have a tree to
     // flip, and pretending otherwise would silently do nothing.
     void ActToggleSplit();
     void ActSwapSplit();

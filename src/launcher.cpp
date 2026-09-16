@@ -404,7 +404,14 @@ void PaintInto(HDC dc, const SIZE& size) {
     const float s = g_scale;
     RECT all = { 0, 0, size.cx, size.cy };
     FillRect(dc, &all, theme::BrushBg());
-    theme::RoundRect(dc, all, (int)(12 * s), theme::Panel, theme::Border, true);
+    theme::Chamfer(dc, all, (int)(14 * s), theme::Panel, 255, theme::Border, 255);
+    // An accent rule along the top edge, as the settings header has.
+    {
+        RECT top = { (int)(14 * s), 0, size.cx, (int)(2 * s) };
+        HBRUSH b = CreateSolidBrush(theme::Accent);
+        FillRect(dc, &top, b);
+        DeleteObject(b);
+    }
 
     Graphics g(dc);
     g.SetSmoothingMode(SmoothingModeAntiAlias);
@@ -417,9 +424,14 @@ void PaintInto(HDC dc, const SIZE& size) {
     SetBkMode(dc, TRANSPARENT);
     HGDIOBJ oldFont = SelectObject(dc, theme::FontTitle());
 
-    RECT prompt = { pad + (int)(4 * s), 0, pad + (int)(26 * s), inputH };
-    SetTextColor(dc, theme::Accent);
-    DrawTextW(dc, L">", -1, &prompt, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    {
+        const float px = (float)(pad + 6 * s), py = (float)inputH / 2.0f;
+        PointF tri[3] = { { px, py - 6 * s }, { px + 9 * s, py }, { px, py + 6 * s } };
+        SolidBrush accent(Color(255, (BYTE)(theme::Accent & 0xFF),
+                                (BYTE)((theme::Accent >> 8) & 0xFF),
+                                (BYTE)((theme::Accent >> 16) & 0xFF)));
+        g.FillPolygon(&accent, tri, 3);
+    }
 
     RECT text = { pad + (int)(28 * s), 0, size.cx - pad, inputH };
     if (g_query.empty()) {
@@ -477,15 +489,7 @@ void PaintInto(HDC dc, const SIZE& size) {
         const Hit& hit = g_hits[(size_t)i];
         const std::wstring& name = hit.name;
 
-        if (active) {
-            theme::RoundRect(dc, row, (int)(8 * s), theme::RowSel, 0, false);
-            // A rail rather than an outline. An outline around a row this wide
-            // draws the eye to the border instead of to the row, and it fights
-            // with the rounded corners of the panel behind it.
-            RECT rail = { row.left + (int)(2 * s), row.top + (int)(6 * s),
-                          row.left + (int)(5 * s), row.bottom - (int)(6 * s) };
-            theme::FillRoundBar(dc, rail, (int)(2 * s), theme::Accent, 255);
-        }
+        if (active) theme::Slant(dc, row, (int)(7 * s), theme::Accent, 255, theme::Accent, 255);
 
         // The icon the shell would show for this entry, if it has one and has
         // had time to fetch it. Until then, the lettered tile - which is what
@@ -500,9 +504,9 @@ void PaintInto(HDC dc, const SIZE& size) {
         if (icon) {
             AppIconDraw(dc, icon, badge);
         } else {
-            theme::RoundRect(dc, badge, (int)(7 * s),
-                             active ? theme::Accent : theme::PanelAlt,
-                             active ? theme::Accent : theme::Border, true);
+            theme::Chamfer(dc, badge, (int)(5 * s),
+                           active ? theme::AccentText : theme::PanelAlt, 255,
+                           active ? theme::AccentText : theme::Border, 255);
 
             // The badge says what kind of thing this is at a glance: a symbol
             // for the sources that are not apps, and for apps the initial
@@ -523,7 +527,7 @@ void PaintInto(HDC dc, const SIZE& size) {
                     break;
             }
 
-            SetTextColor(dc, active ? RGB(255, 255, 255) : theme::TextDim);
+            SetTextColor(dc, active ? theme::Accent : theme::TextDim);
             oldFont = SelectObject(dc, theme::FontBold());
             DrawTextW(dc, glyph, -1, &badge,
                       DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
@@ -537,12 +541,13 @@ void PaintInto(HDC dc, const SIZE& size) {
         RECT tagBox = { row.right - (int)(12 * s), row.top,
                         row.right - (int)(12 * s), row.bottom };
         if (tag) {
-            oldFont = SelectObject(dc, theme::FontSmall());
+            const std::wstring caps = theme::Caps(tag);
+            oldFont = SelectObject(dc, theme::FontHeading());
             RECT tagFit = { 0, 0, 0, 0 };
-            DrawTextW(dc, tag, -1, &tagFit, DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX);
-            tagBox.left -= (tagFit.right - tagFit.left);
-            SetTextColor(dc, active ? RGB(178, 196, 232) : RGB(112, 118, 130));
-            DrawTextW(dc, tag, -1, &tagBox,
+            DrawTextW(dc, caps.c_str(), -1, &tagFit, DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX);
+            tagBox.left -= (tagFit.right - tagFit.left) + (int)(8 * s);
+            SetTextColor(dc, active ? theme::AccentText : RGB(112, 118, 130));
+            DrawTextW(dc, caps.c_str(), -1, &tagBox,
                       DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             SelectObject(dc, oldFont);
         }
@@ -553,7 +558,7 @@ void PaintInto(HDC dc, const SIZE& size) {
 
         if (hit.detail.empty()) {
             RECT label = { labelLeft, row.top, labelRight, row.bottom };
-            SetTextColor(dc, active ? theme::Text : RGB(206, 210, 218));
+            SetTextColor(dc, active ? theme::AccentText : RGB(206, 210, 218));
             oldFont = SelectObject(dc, active ? theme::FontBold() : theme::FontUI());
             DrawTextW(dc, name.c_str(), -1, &label, DT_LEFT | DT_VCENTER |
                       DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
@@ -563,14 +568,14 @@ void PaintInto(HDC dc, const SIZE& size) {
             // what pressing Enter will do. Split the row rather than centring.
             const int mid = (row.top + row.bottom) / 2;
             RECT label = { labelLeft, row.top + (int)(3 * s), labelRight, mid + (int)(1 * s) };
-            SetTextColor(dc, active ? theme::Text : RGB(206, 210, 218));
+            SetTextColor(dc, active ? theme::AccentText : RGB(206, 210, 218));
             oldFont = SelectObject(dc, active ? theme::FontBold() : theme::FontUI());
             DrawTextW(dc, name.c_str(), -1, &label, DT_LEFT | DT_BOTTOM |
                       DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
             SelectObject(dc, oldFont);
 
             RECT sub = { labelLeft, mid, labelRight, row.bottom - (int)(2 * s) };
-            SetTextColor(dc, theme::TextDim);
+            SetTextColor(dc, active ? RGB(78, 52, 18) : theme::TextDim);
             oldFont = SelectObject(dc, theme::FontSmall());
             // Ellipsise a long path from the *left*: the end of it is the part
             // that tells you which of three "notes.txt" this one is.
@@ -592,10 +597,10 @@ void PaintInto(HDC dc, const SIZE& size) {
 
         RECT hint = { pad + (int)(14 * s), footerTop, size.cx - pad - (int)(14 * s),
                       size.cy };
-        SetTextColor(dc, RGB(104, 110, 122));
-        oldFont = SelectObject(dc, theme::FontSmall());
-        DrawTextW(dc, L"↑↓ select      Enter open      "
-                      L"Ctrl+Shift+Enter as administrator      Esc close",
+        SetTextColor(dc, RGB(120, 126, 136));
+        oldFont = SelectObject(dc, theme::FontHeading());
+        DrawTextW(dc, L"\x2191\x2193 SELECT      ENTER OPEN      "
+                      L"CTRL+SHIFT+ENTER AS ADMINISTRATOR      ESC CLOSE",
                   -1, &hint, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(dc, oldFont);
     }

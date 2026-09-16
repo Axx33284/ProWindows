@@ -10,8 +10,10 @@ enum class LayoutKind : int {
     Dwindle = 0,   // Hyprland-style binary space partitioning
     Master  = 1,   // master area + stack
     Grid    = 2,   // even grid
-    Monocle = 3,   // one full-size window at a time
-    COUNT   = 4
+    // Monocle (one full-size window at a time) was removed in 1.3: Alt+F
+    // covers the one case it was used for. "monocle" in a config file is
+    // read as dwindle.
+    COUNT   = 3
 };
 
 const wchar_t* LayoutName(LayoutKind k);

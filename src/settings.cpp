@@ -316,12 +316,6 @@ const LayoutInfo kLayoutInfo[(int)LayoutKind::COUNT] = {
       L"and so on.\r\n\r\n"
       L"Best for comparing things side by side, or for dashboards where no "
       L"single window is more important than the others." },
-
-    { L"Monocle",
-      L"One window at a time, filling the whole screen. The others stay "
-      L"stacked behind it and you bring them forward with the focus keys.\r\n\r\n"
-      L"Best on a laptop or a small display, where splitting the screen just "
-      L"makes everything too cramped to use." },
 };
 
 // A small painted sample of what the selected layout does, drawn from the same
@@ -372,7 +366,7 @@ void DrawLayoutPreview(const DRAWITEMSTRUCT* dis, LayoutKind kind) {
             count = 4;
             break;
         }
-        case LayoutKind::Grid: {
+        default: {   // Grid
             const int mx = area.left + w / 2;
             const int my = area.top + h / 2;
             panes[0] = { area.left, area.top, mx, my };
@@ -382,23 +376,13 @@ void DrawLayoutPreview(const DRAWITEMSTRUCT* dis, LayoutKind kind) {
             count = 4;
             break;
         }
-        default: {   // Monocle - one window in front, the rest hinted behind
-            panes[0] = { area.left + 8, area.top + 8, area.right, area.bottom };
-            panes[1] = { area.left + 4, area.top + 4, area.right - 4, area.bottom - 4 };
-            panes[2] = { area.left, area.top, area.right - 8, area.bottom - 8 };
-            count = 3;
-            break;
-        }
     }
 
-    // For monocle the front-most pane is drawn last so it sits on top.
     for (int i = count - 1; i >= 0; --i) {
         RECT r = panes[i];
-        if (kind != LayoutKind::Monocle) {
-            r.right  -= gap;
-            r.bottom -= gap;
-        }
-        const bool focused = (kind == LayoutKind::Monocle) ? (i == count - 1) : (i == 0);
+        r.right  -= gap;
+        r.bottom -= gap;
+        const bool focused = (i == 0);
         theme::Chamfer(dc, r, 3, focused ? theme::Accent : theme::PanelAlt, 255,
                        focused ? theme::AccentHover : theme::Border, 255);
     }

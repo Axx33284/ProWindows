@@ -216,7 +216,7 @@ it keeps — the file index cache, the log if you turn it on — lives in that s
 folder. Deleting the folder resets it completely; deleting the executable
 removes it, apart from the `Run` entry if you ticked the autostart box.
 
-If it behaves differently on one machine than another, the tray menu has
+If it behaves differently on one machine than another, the tray menu has, under **Tools**,
 **Diagnostics report...**, which writes `%APPDATA%\ProWindows\diagnostics.txt`
 and opens it: Windows build, DPI, every monitor, whether it is running elevated,
 how many windows it is not allowed to move, and which of your keyboard shortcuts
@@ -336,8 +336,6 @@ Press `Alt+Space` to cycle. Each workspace on each monitor remembers its own.
 - **Master** — one large pane plus a stack, the classic dwm/tall layout.
   `Alt+Ctrl+Left/Right` grows and shrinks the master area.
 - **Grid** — even rows and columns.
-- **Monocle** — one window at full size at a time; focus switching brings the
-  next one forward.
 
 **Reshaping one split rather than the whole layout.** Dwindle splits the longer
 edge of whatever you were focused on, which is right nearly every time and
@@ -353,7 +351,7 @@ workspace hides the windows of the outgoing one and restores the incoming ones
 exactly where they were.
 
 Because inactive workspaces are hidden windows, there is a safety net: **tray
-icon → *Show all hidden windows*** brings everything back at once, and the app
+icon → *Tools* → *Show all hidden windows*** brings everything back at once, and the app
 also un-hides everything when it exits, when Windows shuts down, and even if it
 crashes.
 
@@ -376,7 +374,7 @@ program name.
 mod       = alt          # alt | ctrl | shift | win (combine with +)
 gap_inner = 8
 gap_outer = 8
-layout    = dwindle      # dwindle | master | grid | monocle
+layout    = dwindle      # dwindle | master | grid
 
 accent_border  = true    # coloured DWM border on the focused window
 active_color   = #7AA2F7
@@ -732,11 +730,11 @@ translucency and rounded corners either way.
 | **Bars** | vertical column meters side by side, like a mixing desk |
 | **Graph** | chart first: a large history graph per metric, reading overlaid |
 | **Ticker** | a single thin line — a dot, a name and a number each, for a screen edge |
-| **OSD** | the MSI Afterburner / RivaTuner on-screen display: monospace text, one line per readout, label in its colour, sparkline beside it |
-| **HUD** | the layout the benchmark channels build on Afterburner: one line per *device* — `GPU  24%  69°  3.8 GB` — with the device tag in colour and the numbers big and white |
+| **OSD** | an in-game on-screen display: monospace text, one line per readout, label in its colour, sparkline beside it |
+| **HUD** | the benchmark-video layout: one line per *device* — `GPU  24%  69°  3.8 GB` — with the device tag in colour and the numbers big and white |
 
 The last two are the two looks nearly every in-game overlay converges on. The
-Afterburner OSD is a column of monospace text with each item on its own line;
+in-game OSD is a column of monospace text with each item on its own line;
 the benchmark-video HUD groups everything about the GPU on one line and
 everything about the CPU on the next, so the eye reads a device at a time. Both
 were made to go with the two **bare** themes below, which draw no panel at
@@ -801,7 +799,7 @@ theme, so each one is a genuinely different readout rather than a recoloured acc
 | **Terminal** · **Amber** | one colour on black, square corners, like a phosphor screen |
 | **Neon** | saturated cyan and magenta, big corners |
 | **Frost** · **Paper** | light panels with dark text, for a light wallpaper |
-| **Afterburner** · **Benchmark** | *no panel*: text straight on the screen. RivaTuner's default orange, or green GPU / blue CPU / white numbers |
+| **Overlay** · **Benchmark** | *no panel*: text straight on the screen. Orange, or green GPU / blue CPU / white numbers |
 
 Pick a theme and a style from the overlay's right-click menu, or from the **Monitor** tab, which
 previews the pair live — at the current opacity, with the style and the busiest-app lines you have
@@ -954,7 +952,7 @@ clear of them. If you run a bar of your own, anywhere on screen, the tiling fits
   line, so a window sitting on top of everything is explained rather than
   mysterious.
 
-  To include them, the tray menu has **Restart as administrator** for right now,
+  To include them, the tray menu has, under **Startup**, **Restart as administrator** for right now,
   and **Always start as administrator** to make it stick. The second one
   registers a logon task with Windows Task Scheduler, which is the only way to
   start elevated without a UAC prompt every single time; creating it asks for

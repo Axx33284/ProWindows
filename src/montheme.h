@@ -50,7 +50,7 @@ enum MonStyle : int {
     MON_STYLE_GRAPH,      // chart first: a big area graph per metric
     MON_STYLE_CARDS,      // each metric on its own raised card with an accent rail
     MON_STYLE_TICKER,     // one thin line: a dot, a name and a number per metric
-    MON_STYLE_OSD,        // the MSI Afterburner / RTSS look: monospace text lines
+    MON_STYLE_OSD,        // the in-game OSD look: monospace text lines
     MON_STYLE_HUD,        // the benchmark-channel look: one line per device
     MON_STYLE_COUNT
 };

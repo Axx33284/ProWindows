@@ -72,7 +72,7 @@ const FontFamily* UiFamily() {
 }
 
 // The OSD style is columns of text, and columns of text only line up in a
-// monospace face - which is also simply what RivaTuner's overlay looks like.
+// monospace face - which is also what an in-game overlay looks like.
 // Consolas ships with Windows; the fallback is for a machine that has had its
 // fonts pruned.
 const FontFamily* MonoFamily() {
@@ -849,7 +849,7 @@ void DrawTickerCell(Graphics* g, const MonRow& row, const MonPaintCtx& ctx,
             VAlign::Middle, w - (labelX - x) - labelW - 6 * s);
 }
 
-// The MSI Afterburner / RivaTuner on-screen display: one monospace line per
+// The in-game on-screen display: one monospace line per
 // readout, label in the readout's colour, the number beside it, the detail
 // dimmer, everything in columns that line up down the panel because the face
 // is fixed-pitch. With graphs on, a sparkline sits at the right of the line
@@ -894,7 +894,7 @@ void DrawOsdCell(Graphics* g, const MonRow& row, const MonPaintCtx& ctx,
     (void)h;
 }
 
-// The HUD the benchmark channels build on top of Afterburner: one line per
+// The HUD the benchmark videos use: one line per
 // device, with everything known about it across the line - "GPU 24% 71°C
 // 3.1 GB" - the device tag in its colour, the numbers big and white. The
 // readouts on a line are the ones the user has switched on, in the order they

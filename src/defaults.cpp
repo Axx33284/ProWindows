@@ -21,7 +21,7 @@ static const wchar_t* kBindingReference = LR"AWA(
 #      focus left|right|up|down        swap left|right|up|down
 #      resize left|right|up|down       focusnext / focusprev
 #      workspace <1-9>                 movetoworkspace <1-9>
-#      cyclelayout                     layout dwindle|master|grid|monocle
+#      cyclelayout                     layout dwindle|master|grid
 #      togglefloat                     togglefullscreen
 #      close                           minimize
 #      launcher                        promote
@@ -115,7 +115,7 @@ bool Config::SaveToFile(const std::wstring& path) const {
              cornerPref == 1 ? L"square" : cornerPref == 2 ? L"round" : L"default");
 
     fwprintf(f, L"# ------------------------------------------------------------ layout\n");
-    fwprintf(f, L"# dwindle | master | grid | monocle\n");
+    fwprintf(f, L"# dwindle | master | grid\n");
     fwprintf(f, L"layout       = %s\n", ToLower(LayoutName(layout)).c_str());
     fwprintf(f, L"master_ratio = %.2f\n", masterRatio);
     fwprintf(f, L"master_count = %d\n\n", masterCount);

@@ -191,8 +191,8 @@ const MonitorSkin kSkins[] = {
 // glass. The panel colours are still filled in for the settings-page swatches
 // and the fallback painter.
 {
-    L"afterburner", L"Afterburner",
-    L"No panel. RivaTuner's default orange text, the in-game OSD look.",
+    L"afterburner", L"Overlay",
+    L"No panel. Orange text straight on the screen, the in-game OSD look.",
     RGB(0, 0, 0), RGB(0, 0, 0), RGB(0, 0, 0), 0, 0,
     RGB(255, 160, 0), RGB(214, 134, 0), RGB(255, 160, 0),
     RGB(255, 160, 0), 60, 40, 235, 0,
@@ -237,7 +237,7 @@ const MonitorStyleInfo kStyles[] = {
     { L"ticker", L"Ticker",
       L"A single thin line - a dot, a name and a number each. Sits on an edge." },
     { L"osd", L"OSD",
-      L"MSI Afterburner's on-screen display: monospace text, one line each." },
+      L"An in-game on-screen display: monospace text, one line each." },
     { L"hud", L"HUD",
       L"The benchmark-video HUD: one line per device, all its readings across." },
 };

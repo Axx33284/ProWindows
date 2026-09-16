@@ -34,7 +34,8 @@ enum : UINT {
     IDM_TILING = 100, IDM_GAPS, IDM_RETILE, IDM_RELOAD, IDM_EDITCFG,
     IDM_OPENDIR, IDM_AUTOSTART, IDM_RESTOREALL, IDM_EXIT,
     IDM_SETTINGS, IDM_SHORTCUTS, IDM_MONITOR, IDM_MONITOR_PIN, IDM_ELEVATE,
-    IDM_ELEVAUTO, IDM_DIAG, IDM_CLOCK, IDM_CLOCK_PIN,
+    IDM_ELEVAUTO, IDM_DIAG, IDM_CLOCK, IDM_CLOCK_PIN, IDM_MONITOR_SETTINGS,
+    IDM_CLOCK_SETTINGS,
     IDM_LAYOUT_BASE = 200,
     IDM_WORKSPACE_BASE = 300,
 };
@@ -751,21 +752,16 @@ static void ShowTrayMenu() {
     AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, header);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
+    // Five groups, top to bottom: the windows, the tiling, the overlays,
+    // maintenance, and leaving. Everything that used to be a top-level item
+    // with a related item beside it is a submenu now, so the menu reads as
+    // a short list of things rather than a long list of switches.
     AppendMenuW(menu, MF_STRING, IDM_SETTINGS, L"Settings...");
     SetMenuDefaultItem(menu, IDM_SETTINGS, FALSE);
     AppendMenuW(menu, MF_STRING, IDM_SHORTCUTS, L"Keyboard shortcuts...");
-    AppendMenuW(menu, MF_STRING | (g_cfg.monitorEnabled ? MF_CHECKED : 0),
-                IDM_MONITOR, L"System monitor");
-    if (g_cfg.monitorEnabled)
-        AppendMenuW(menu, MF_STRING | (g_cfg.monitorPinned ? MF_CHECKED : 0),
-                    IDM_MONITOR_PIN, L"    Pin the monitor");
-    AppendMenuW(menu, MF_STRING | (g_cfg.clockEnabled ? MF_CHECKED : 0),
-                IDM_CLOCK, L"Clock");
-    if (g_cfg.clockEnabled)
-        AppendMenuW(menu, MF_STRING | (g_cfg.clockPinned ? MF_CHECKED : 0),
-                    IDM_CLOCK_PIN, L"    Pin the clock");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
+    // ---- tiling
     AppendMenuW(menu, MF_STRING | (g_wm.TilingEnabled() ? MF_CHECKED : 0),
                 IDM_TILING, L"Tiling active");
     AppendMenuW(menu, MF_STRING | (g_wm.GapsEnabled() ? MF_CHECKED : 0),
@@ -786,36 +782,64 @@ static void ShowTrayMenu() {
                     IDM_WORKSPACE_BASE + i, label);
     }
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)spaces, L"Workspace");
+    AppendMenuW(menu, MF_STRING, IDM_RETILE, L"Re-arrange now");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
+    // ---- overlays: each one a submenu of show / pin / its settings page
+    HMENU monitor = CreatePopupMenu();
+    AppendMenuW(monitor, MF_STRING | (g_cfg.monitorEnabled ? MF_CHECKED : 0),
+                IDM_MONITOR, L"Show");
+    AppendMenuW(monitor, MF_STRING | (g_cfg.monitorPinned ? MF_CHECKED : 0) |
+                         (g_cfg.monitorEnabled ? 0 : MF_GRAYED),
+                IDM_MONITOR_PIN, L"Pin in place");
+    AppendMenuW(monitor, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(monitor, MF_STRING, IDM_MONITOR_SETTINGS, L"Monitor settings...");
+    AppendMenuW(menu, MF_POPUP | (g_cfg.monitorEnabled ? MF_CHECKED : 0),
+                (UINT_PTR)monitor, L"System monitor");
+
+    HMENU clock = CreatePopupMenu();
+    AppendMenuW(clock, MF_STRING | (g_cfg.clockEnabled ? MF_CHECKED : 0),
+                IDM_CLOCK, L"Show");
+    AppendMenuW(clock, MF_STRING | (g_cfg.clockPinned ? MF_CHECKED : 0) |
+                       (g_cfg.clockEnabled ? 0 : MF_GRAYED),
+                IDM_CLOCK_PIN, L"Pin in place");
+    AppendMenuW(clock, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(clock, MF_STRING, IDM_CLOCK_SETTINGS, L"Clock settings...");
+    AppendMenuW(menu, MF_POPUP | (g_cfg.clockEnabled ? MF_CHECKED : 0),
+                (UINT_PTR)clock, L"Clock");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, IDM_RETILE,  L"Re-arrange now");
-    AppendMenuW(menu, MF_STRING, IDM_RELOAD,  L"Reload settings");
-    AppendMenuW(menu, MF_STRING, IDM_OPENDIR, L"Open settings folder");
-    AppendMenuW(menu, MF_STRING, IDM_DIAG,    L"Diagnostics report...");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0),
+
+    // ---- maintenance
+    HMENU tools = CreatePopupMenu();
+    AppendMenuW(tools, MF_STRING, IDM_RELOAD,     L"Reload settings from disk");
+    AppendMenuW(tools, MF_STRING, IDM_EDITCFG,    L"Edit the config file...");
+    AppendMenuW(tools, MF_STRING, IDM_OPENDIR,    L"Open the settings folder");
+    AppendMenuW(tools, MF_STRING, IDM_DIAG,       L"Diagnostics report...");
+    AppendMenuW(tools, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(tools, MF_STRING, IDM_RESTOREALL, L"Show all hidden windows");
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)tools, L"Tools");
+
+    HMENU startup = CreatePopupMenu();
+    AppendMenuW(startup, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0),
                 IDM_AUTOSTART, L"Start with Windows");
-    AppendMenuW(menu, MF_STRING, IDM_RESTOREALL, L"Show all hidden windows");
-
-    // Only worth offering when it would change anything. Running elevated is
-    // the only way to arrange windows that are themselves elevated.
+    // Running elevated is the only way to arrange windows that are themselves
+    // elevated; the item is only offered when it would change anything.
     if (!SelfIsElevated())
-        AppendMenuW(menu, MF_STRING, IDM_ELEVATE, L"Restart as administrator");
-
-    // Making that stick. Checking the state costs a schtasks call, so it is
-    // only asked for when the menu is actually being built.
+        AppendMenuW(startup, MF_STRING, IDM_ELEVATE, L"Restart as administrator");
     {
+        // Checking the state costs a schtasks call, so it is only asked for
+        // when the menu is actually being built. Creating or removing the
+        // task needs administrator rights, so the item is greyed rather than
+        // hidden: the user can see the option exists and what it would take.
         const bool haveTask = ElevatedAutostartInstalled();
         UINT flags = MF_STRING | (haveTask ? MF_CHECKED : 0);
-        // Creating or removing the task needs administrator rights, so the
-        // item is shown greyed rather than hidden: the user can see the option
-        // exists and what it would take to use it.
         if (!SelfIsElevated() && !haveTask) flags |= MF_GRAYED;
-        AppendMenuW(menu, flags, IDM_ELEVAUTO,
+        AppendMenuW(startup, flags, IDM_ELEVAUTO,
                     SelfIsElevated() || haveTask
                         ? L"Always start as administrator"
                         : L"Always start as administrator (restart as admin first)");
     }
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)startup, L"Startup");
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_EXIT, L"Exit");
@@ -934,6 +958,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDM_CLOCK_PIN:
                     ClockSetPinned(!g_cfg.clockPinned);
                     break;
+                case IDM_MONITOR_SETTINGS: SettingsOpenTab(PAGE_MONITOR); break;
+                case IDM_CLOCK_SETTINGS:   SettingsOpenTab(PAGE_CLOCK); break;
                 case IDM_TILING:    g_wm.ActToggleTiling(); TrayUpdate();
                                     SettingsRefreshStatus(); break;
                 case IDM_GAPS:      g_wm.ActToggleGaps(); TrayUpdate(); break;

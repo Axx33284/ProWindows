@@ -853,9 +853,6 @@ void ComputeLayout(const LayoutParams& p, const std::vector<HWND>& order,
         case LayoutKind::Grid:
             LayoutGrid(order, area, out, useCons);
             break;
-        case LayoutKind::Monocle:
-            for (HWND h : order) out->push_back({ h, area });
-            break;
         default:
             break;
     }

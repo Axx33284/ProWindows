@@ -11,7 +11,6 @@ const wchar_t* LayoutName(LayoutKind k) {
         case LayoutKind::Dwindle: return L"Dwindle";
         case LayoutKind::Master:  return L"Master";
         case LayoutKind::Grid:    return L"Grid";
-        case LayoutKind::Monocle: return L"Monocle";
         default:                  return L"?";
     }
 }
@@ -21,7 +20,8 @@ bool ParseLayout(const std::wstring& s, LayoutKind* out) {
     if (v == L"dwindle" || v == L"bsp")  { *out = LayoutKind::Dwindle; return true; }
     if (v == L"master"  || v == L"tall") { *out = LayoutKind::Master;  return true; }
     if (v == L"grid")                    { *out = LayoutKind::Grid;    return true; }
-    if (v == L"monocle" || v == L"full") { *out = LayoutKind::Monocle; return true; }
+    // A layout that no longer exists, from an older config file.
+    if (v == L"monocle" || v == L"full") { *out = LayoutKind::Dwindle; return true; }
     return false;
 }
 

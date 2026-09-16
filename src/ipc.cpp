@@ -317,7 +317,7 @@ std::wstring IpcHelpText() {
         L"  movetoworkspace <1-9>           send the focused window there\n"
         L"  focusmonitor next|prev          switch monitor\n"
         L"  movetomonitor next|prev         send the focused window there\n"
-        L"  layout dwindle|master|grid|monocle\n"
+        L"  layout dwindle|master|grid\n"
         L"  cyclelayout                     next layout\n"
         L"  togglesplit | swapsplit         flip or mirror the split (dwindle only)\n"
         L"  togglesticky                    keep this window on every workspace\n"

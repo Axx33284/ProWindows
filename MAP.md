@@ -133,7 +133,7 @@ Apply → each page's Save() writes into the live Config
 2. **Hidden windows must always be reachable again.** Workspace switching hides windows with
    `SW_HIDE`. If the app dies with windows hidden, they are gone from the user's point of view.
    Hence: `RestoreAllWindows()` runs on exit, on `WM_ENDSESSION`, from the crash handler, and from
-   the tray's "Show all hidden windows". Anything that reduces the workspace count must first
+   the tray's Tools → "Show all hidden windows". Anything that reduces the workspace count must first
    migrate windows off the workspaces being removed.
 
 3. **The low-level keyboard hook must return fast.** It runs on the UI thread and Windows silently

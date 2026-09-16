@@ -1377,9 +1377,6 @@ void WindowManager::RetileMonitor(int monitorIndex) {
     if (fullscreen) {
         PlaceWindow(fullscreen, mon->info.full, nullptr);
         BringWindowToTop(fullscreen);
-    } else if (ws.layout == LayoutKind::Monocle && focused_ && Find(focused_)) {
-        ManagedWindow* mw = Find(focused_);
-        if (mw && mw->monitor == monitorIndex && !mw->floating) BringWindowToTop(focused_);
     }
 }
 
@@ -1921,10 +1918,7 @@ void WindowManager::OnForeground(HWND hwnd) {
     }
     focused_ = hwnd;
     activeMonitor_ = mw->monitor;
-    if (Workspace* ws = WorkspaceFor(*mw)) {
-        ws->lastFocused = hwnd;
-        if (ws->layout == LayoutKind::Monocle && !mw->floating) BringWindowToTop(hwnd);
-    }
+    if (Workspace* ws = WorkspaceFor(*mw)) ws->lastFocused = hwnd;
     UpdateBorders();
 }
 
@@ -2350,7 +2344,7 @@ void WindowManager::ActResizeDir(Dir d) {
             break;
         }
         default:
-            break;   // Grid and Monocle have nothing to resize
+            break;   // Grid has nothing to resize
     }
 }
 

@@ -813,10 +813,15 @@ bool g_editShow[MON_METRIC_COUNT] = {};
 void RefreshMetricRows(HWND page) {
     for (int slot = 0; slot < MON_METRIC_COUNT; ++slot) {
         const int m = MetricInRow(slot);
-        SetDlgItemTextW(page, IDC_MON_SHOW_FIRST + slot,
-                        m >= 0 ? MonitorMetricAt(m).menu : L"");
-        SetCheck(page, IDC_MON_SHOW_FIRST + slot, m >= 0 && g_editShow[m]);
-        InvalidateRect(GetDlgItem(page, IDC_MON_COL_FIRST + slot), nullptr, FALSE);
+        const wchar_t* label = m >= 0 ? MonitorMetricAt(m).menu : L"";
+        const bool on = m >= 0 && g_editShow[m];
+        HWND row = GetDlgItem(page, IDC_MON_SHOW_FIRST + slot);
+        if (GetText(row) != label) {
+            SetWindowTextW(row, label);
+            InvalidateRect(GetDlgItem(page, IDC_MON_COL_FIRST + slot), nullptr, FALSE);
+        }
+        if (GetCheck(page, IDC_MON_SHOW_FIRST + slot) != on)
+            SetCheck(page, IDC_MON_SHOW_FIRST + slot, on);
     }
     // The ends of the list have nowhere to go, and a button that cannot do
     // anything should say so rather than doing nothing when pressed.
@@ -1022,9 +1027,8 @@ void UpdateMonitorEnabling(HWND page) {
     else
         hint += L"Drag it anywhere, then pin it so it cannot be moved by "
                 L"accident. Right-click it for all of this.";
-    hint += L"\r\nDrag the rows on the left into the order you want - or hold "
-            L"a readout on the panel itself and drag it.";
-    SetDlgItemTextW(page, IDC_MON_HINT, hint.c_str());
+    if (GetItemText(page, IDC_MON_HINT) != hint)
+        SetDlgItemTextW(page, IDC_MON_HINT, hint.c_str());
 }
 
 void RedrawSwatches(HWND page) {
