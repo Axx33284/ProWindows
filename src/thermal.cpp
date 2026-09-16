@@ -102,9 +102,103 @@ private:
     bool tried_ = false;
 };
 
+// ============================================================== NVIDIA / NvAPI
+// The same die sensor NVML reports, through the driver's other library.
+// Tried first, and for one reason: memory. On the development machine
+// nvmlInit_v2 commits 19.3 MB of private memory in the calling process - the
+// driver's user-mode state - and nvmlShutdown plus FreeLibrary give none of it
+// back, so switching the temperature off later did not help either. NvAPI
+// reads the same 47 degrees for 2.8 MB, and unloads (tests\gputemp.bat
+// measures all three sources). NVML stays as the fallback for a driver old
+// enough not to answer here.
+//
+// NvAPI has one export; everything else is fetched by id. The ids are the
+// ones every open-source hardware monitor uses and have not changed in a
+// decade.
+class NvApiSensor {
+public:
+    bool Open() {
+        if (tried_) return ready_;
+        tried_ = true;
+        dll_ = LoadLibraryW(L"nvapi64.dll");
+        if (!dll_) return false;
+        auto query = (QueryInterface)GetProcAddress(dll_, "nvapi_QueryInterface");
+        if (!query) { Close(); return false; }
+        initialize_ = (Initialize)query(0x0150E828);
+        unload_     = (Unload)query(0xD22BDD7E);
+        enumGpus_   = (EnumGpus)query(0xE5AC921F);
+        thermal_    = (GetThermal)query(0xE3640A56);
+        if (!initialize_ || !enumGpus_ || !thermal_) { Close(); return false; }
+        if (initialize_() != 0) { Close(); return false; }
+        started_ = true;
+        count_ = 0;
+        if (enumGpus_(gpus_, &count_) != 0 || count_ <= 0) { Close(); return false; }
+        ready_ = true;
+        return true;
+    }
+
+    bool Available() const { return ready_; }
+
+    void Close() {
+        if (started_ && unload_) unload_();
+        started_ = false;
+        ready_   = false;
+        count_   = 0;
+        if (dll_) FreeLibrary(dll_);
+        dll_ = nullptr;
+        initialize_ = nullptr; unload_ = nullptr; enumGpus_ = nullptr; thermal_ = nullptr;
+    }
+
+    // The hottest board, as the others do; within a board the hottest
+    // sensor it reports, which is the GPU itself on every card seen.
+    bool Read(double* celsius) {
+        if (!ready_) return false;
+        double top = 0.0;
+        bool any = false;
+        for (int i = 0; i < count_ && i < kMaxGpus; ++i) {
+            ThermalSettings ts = {};
+            ts.version = (unsigned)(sizeof(ThermalSettings) | (1u << 16));
+            if (thermal_(gpus_[i], 15 /* every sensor */, &ts) != 0) continue;
+            for (unsigned k = 0; k < ts.count && k < 3; ++k) {
+                const double c = (double)ts.sensor[k].currentTemp;
+                if (!Plausible(c)) continue;
+                if (!any || c > top) { top = c; any = true; }
+            }
+        }
+        if (!any) return false;
+        *celsius = top;
+        return true;
+    }
+
+    ~NvApiSensor() { Close(); }
+
+private:
+    static constexpr int kMaxGpus = 64;
+    struct ThermalSettings {
+        unsigned version;
+        unsigned count;
+        struct { int controller; int defaultMin; int defaultMax; int currentTemp; int target; } sensor[3];
+    };
+    typedef void* (*QueryInterface)(unsigned id);
+    typedef int (*Initialize)();
+    typedef int (*Unload)();
+    typedef int (*EnumGpus)(void** handles, int* count);
+    typedef int (*GetThermal)(void* gpu, int sensorIndex, ThermalSettings* out);
+
+    HMODULE    dll_        = nullptr;
+    Initialize initialize_ = nullptr;
+    Unload     unload_     = nullptr;
+    EnumGpus   enumGpus_   = nullptr;
+    GetThermal thermal_    = nullptr;
+    void*      gpus_[kMaxGpus] = {};
+    int        count_      = 0;
+    bool       tried_ = false, started_ = false, ready_ = false;
+};
+
 // ============================================================== NVIDIA / NVML
 // nvml.dll ships with the driver, is installed into System32 by every recent
 // one, and reports the GPU's own die sensor without any privilege at all.
+// The fallback behind NvApiSensor, for the memory reason given there.
 class NvidiaSensor {
 public:
     bool Open() {
@@ -923,6 +1017,7 @@ private:
             locator = nullptr;
 
         ZoneCounter            zones;
+        NvApiSensor            nvapi;
         NvidiaSensor           nvidia;
         AmdSensor              amd;
         HardwareMonitorSensors hwmon;
@@ -1006,7 +1101,11 @@ private:
                 // The vendor libraries first: both read the die sensor
                 // directly, need no privilege and no third-party tool, and are
                 // present on any machine with the driver installed.
-                if (nvidia.Open() && nvidia.Read(&celsius))
+                // NvAPI before NVML, and NVML only if NvAPI could not be
+                // opened at all: a single failed read must not load 19 MB.
+                if (nvapi.Open() && nvapi.Read(&celsius))
+                    reading = { true, celsius, L"nvidia" };
+                else if (!nvapi.Available() && nvidia.Open() && nvidia.Read(&celsius))
                     reading = { true, celsius, L"nvidia" };
                 else if (amd.Open() && amd.Read(&celsius))
                     reading = { true, celsius, L"amd" };

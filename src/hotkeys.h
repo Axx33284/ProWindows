@@ -40,4 +40,10 @@ int  HotkeysBlockedCount();     // chords nothing could claim
 int  HotkeysHookedCount();      // chords served by the keyboard hook
 bool HotkeysHookInstalled();
 
+// Keep the keyboard hook in whether or not any chord needs it, and report
+// every press and release of a modifier key to ModDragModifier. The mouse
+// hook is only worth having while the mod-drag modifier is down, and the
+// keyboard hook is the one place that can see it go down.
+void HotkeysWatchModifiers(bool on);
+
 } // namespace awa

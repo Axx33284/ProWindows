@@ -35,6 +35,11 @@ void ModDragBegin(WPARAM wp);
 
 bool ModDragHookInstalled();
 
+// From the keyboard hook's thread: a modifier key went down or up. Decides
+// whether the mod-drag chord is now held and puts the mouse hook in or takes
+// it out to match. Nothing is looked at here beyond a few key states.
+void ModDragModifier(UINT vk, bool down);
+
 // The windows the gesture may pick up, published for the hook thread.
 //
 // The hook has to decide whether to swallow the click *before* anyone can look

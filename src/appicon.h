@@ -40,6 +40,13 @@ void AppIconShutdown();
 // own placeholder rather than wait.
 HBITMAP AppIconFor(const std::wstring& target, int pixels);
 
+// Lets every bitmap go. The search bar calls this once it has been hidden
+// for a few minutes: the icons are in icons.cache, and the next time a row
+// needs one the loader reads the cache back - one sequential read, a lettered
+// tile for the frame or two before it lands - rather than the bitmaps sitting
+// in memory all day for a window nobody is looking at.
+void AppIconRelease();
+
 // Fetch these in the background, at `pixels` square, so that by the time
 // anybody searches for one it is already there. Requests made through
 // `AppIconFor` always overtake these, however long the list is.

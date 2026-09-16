@@ -1389,6 +1389,22 @@ void MonitorDrawPreview(HDC dc, const RECT& area, const MonitorPreview& look) {
     MonDraw(&g, size.cx, size.cy, rows, ctx);
 }
 
+std::wstring MonitorReadingsText() {
+    std::wstring out;
+    if (!g_haveReading) return L"no reading yet\r\n";
+    for (int m = 0; m < MON_METRIC_COUNT; ++m) {
+        const Metric* r = MetricReading(m);
+        out += MonitorMetricAt(m).id;
+        out += L": ";
+        if (!r->available) { out += L"n/a\r\n"; continue; }
+        out += r->value;
+        if (!r->detail.empty()) { out += L" ("; out += r->detail; out += L")"; }
+        if (!r->topApp.empty()) { out += L" top "; out += r->topApp; }
+        out += L"\r\n";
+    }
+    return out;
+}
+
 void MonitorApplyConfig() {
     if (!g_wnd || !g_cfg) return;
 

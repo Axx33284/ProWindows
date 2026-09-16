@@ -57,6 +57,7 @@ void AppSaveConfig()      {}
 void AppRefreshSettings() {}
 void AppOpenMonitorSettings() {}
 void AppOpenClockSettings()   {}
+void AppScheduleTrim(UINT)    {}
 bool AppAutostartEnabled()    { return false; }
 void AppSetAutostart(bool)    {}
 void AppGameModeChanged(bool) {}

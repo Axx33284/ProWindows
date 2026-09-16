@@ -65,6 +65,9 @@ HANDLE g_wake     = nullptr;
 HANDLE g_quit     = nullptr;
 LONG   g_stopping = 0;
 bool   g_dirty    = false;   // something was fetched that the cache does not hold
+// Set by AppIconRelease: the table was emptied, and the cache file should be
+// read back before anything is fetched from the shell again.
+bool   g_reload   = false;
 
 bool Stopping() { return InterlockedCompareExchange(&g_stopping, 0, 0) != 0; }
 
@@ -356,6 +359,22 @@ DWORD WINAPI LoaderThread(LPVOID) {
     HANDLE waits[2] = { g_quit, g_wake };
     bool lowered = false;
     for (;;) {
+        bool reload = false;
+        EnterCriticalSection(&g_lock);
+        reload = g_reload;
+        g_reload = false;
+        LeaveCriticalSection(&g_lock);
+        if (reload) {
+            // Released while hidden; somebody is looking again. The cache
+            // first, so the sweep below finds most of what it wants already
+            // there and asks the shell for nothing.
+            LoadCache();
+            EnterCriticalSection(&g_lock);
+            g_prefetchAt    = 0;
+            g_prefetchAfter = GetTickCount64() + kPrefetchDelayMs;
+            LeaveCriticalSection(&g_lock);
+        }
+
         std::wstring key;
         bool background = false;
         const DWORD idle = NextKey(&key, &background);
@@ -500,6 +519,28 @@ HBITMAP AppIconFor(const std::wstring& target, int pixels) {
 
     if (queue && g_wake) SetEvent(g_wake);
     return found;
+}
+
+void AppIconRelease() {
+    if (!g_lockReady || Stopping()) return;
+    bool dirty = false;
+    EnterCriticalSection(&g_lock);
+    dirty = g_dirty;
+    LeaveCriticalSection(&g_lock);
+    // Anything fetched this run goes to the file first, or it would be
+    // fetched from the shell all over again.
+    if (dirty) SaveCache();
+
+    int freed = 0;
+    EnterCriticalSection(&g_lock);
+    for (auto& e : g_cache)
+        if (e.second.bitmap) { DeleteObject(e.second.bitmap); ++freed; }
+    g_cache.clear();
+    g_queue.clear();
+    g_dirty  = false;
+    g_reload = true;
+    LeaveCriticalSection(&g_lock);
+    AWA_LOG(L"icons: %d released; the cache will be read back on demand", freed);
 }
 
 void AppIconPrefetch(const std::vector<std::wstring>& targets, int pixels) {

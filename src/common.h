@@ -79,6 +79,12 @@ enum : UINT_PTR {
     // classified - it has no title yet, it is still cloaked, its styles are
     // not applied. Stops as soon as the last one is resolved or given up on.
     TIMER_PENDING  = 6,
+    // One-shot: give memory back once the process has been idle for a while.
+    // See TrimMemory in main.cpp.
+    TIMER_TRIM     = 7,
+    // Runs only while the display is believed to be off, and clears that
+    // belief the moment the user touches anything. See SetDisplayOff.
+    TIMER_DISPLAY  = 8,
 };
 
 // DWM attributes that are missing from the 19041 SDK headers.

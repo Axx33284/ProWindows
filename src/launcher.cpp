@@ -3,6 +3,7 @@
 #include "search.h"
 #include "theme.h"
 #include "appicon.h"
+#include "app.h"
 #include <objidl.h>
 #include <shlobj.h>      // IShellLinkW, for resolving what a .lnk points at
 #include <cwchar>        // _wcsnicmp
@@ -22,6 +23,10 @@ namespace {
 
 constexpr wchar_t kClass[]    = L"ProWindows_Launcher";
 constexpr UINT_PTR kTimerCaret = 1;
+// Set when the bar is hidden; when it fires the bar has been out of sight
+// long enough that its icon bitmaps are not worth holding.
+constexpr UINT_PTR kTimerIdle  = 2;
+constexpr UINT     kIdleMs     = 3 * 60 * 1000;
 constexpr int kMaxRows = 8;        // more than this and you should type more
 
 // Posted by the icon loader when one has arrived and the list is worth
@@ -900,6 +905,14 @@ LRESULT CALLBACK LauncherProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 1;
 
         case WM_TIMER:
+            if (wp == kTimerIdle) {
+                KillTimer(wnd, kTimerIdle);
+                if (!IsWindowVisible(wnd)) {
+                    AppIconRelease();
+                    AppScheduleTrim(2 * 1000);
+                }
+                return 0;
+            }
             if (wp == kTimerCaret) {
                 g_caretOn = !g_caretOn;
                 InvalidateRect(wnd, nullptr, FALSE);
@@ -1122,6 +1135,7 @@ void LauncherHide() {
     if (!g_wnd) return;
     KillTimer(g_wnd, kTimerCaret);
     ShowWindow(g_wnd, SW_HIDE);
+    SetTimer(g_wnd, kTimerIdle, kIdleMs, nullptr);
 }
 
 void LauncherRefresh() { StartLoad(); }
@@ -1138,6 +1152,7 @@ void LauncherToggle() {
     GetCursorPos(&g_mouseAnchor);
     g_mouseIdle = true;
 
+    KillTimer(g_wnd, kTimerIdle);
     ShowWindow(g_wnd, SW_SHOW);
     // A tray process has no foreground rights of its own, so a plain
     // SetForegroundWindow leaves the window drawn but not typed into.

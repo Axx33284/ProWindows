@@ -24,6 +24,14 @@ void AppTrayBalloon(const wchar_t* title, const wchar_t* text);
 // monitor overlay, which changes settings from its own context menu.
 void AppSaveConfig();
 
+// Asks the shell to give memory back after `delayMs` of nothing happening:
+// unused COM libraries unloaded, the heap compacted, and the working set
+// trimmed to what is actually being touched. Called after anything large has
+// just been put away - the settings window, the search bar - and on a slow
+// timer besides. Re-arming it postpones it, so a burst of activity ends in
+// one trim, not several.
+void AppScheduleTrim(UINT delayMs);
+
 // Pulls the settings window's controls back into step with the live Config.
 void AppRefreshSettings();
 

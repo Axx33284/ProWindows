@@ -19,7 +19,7 @@ namespace {
 constexpr wchar_t kClass[]     = L"ProWindows_Clock";
 constexpr UINT_PTR kTimerTick  = 1;    // the next second (or minute) has arrived
 constexpr UINT_PTR kTimerFlip  = 2;    // a split-flap tile is turning
-constexpr UINT     kFlipFrame  = 25;   // ms between flip frames
+constexpr UINT     kFlipFrame  = 33;   // ms between flip frames: 30 a second is enough for a flap
 
 enum : UINT {
     IDM_PIN = 1, IDM_DESKTOP, IDM_24H, IDM_SECONDS, IDM_DATE, IDM_WEEKDAY,

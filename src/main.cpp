@@ -16,6 +16,7 @@
 #include "ipc.h"
 #include "resource.h"
 #include <commctrl.h>
+#include <psapi.h>
 #include <cstdlib>
 
 #pragma comment(lib, "comctl32.lib")
@@ -26,6 +27,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "psapi.lib")
 
 namespace awa {
 
@@ -59,6 +61,9 @@ static const wchar_t kRunValue[] = L"ProWindows";
 static void SetAutostart(bool on);
 // Defined with the rest of the overlay's state, below; used from here up.
 static void UpdateOverlayVisibility();
+// The screen is off (or the machine has gone to sleep). Nobody can see the
+// overlays, so nothing about them is worth spending anything on.
+static bool g_displayOff = false;
 
 // The command line currently registered to run at logon, or empty.
 static std::wstring AutostartCommand() {
@@ -358,7 +363,56 @@ std::wstring JsonMonitors(const WindowManager::Snapshot& s) {
     return out + L"]";
 }
 
+// Where the memory is. Every heap in the process - the CRT's, GDI+'s, COM's
+// - walked and summed, beside the process-wide counters, so "it uses 30 MB"
+// can be answered with which part does. Diagnostics and `get memory`.
+std::wstring MemoryReport() {
+    std::wstring out;
+    wchar_t line[256];
+
+    PROCESS_MEMORY_COUNTERS_EX pmc = {};
+    pmc.cb = sizeof(pmc);
+    if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc))) {
+        swprintf_s(line, L"private commit %5.1f MB   working set %5.1f MB   peak %5.1f MB\r\n",
+                   pmc.PrivateUsage / 1048576.0, pmc.WorkingSetSize / 1048576.0,
+                   pmc.PeakWorkingSetSize / 1048576.0);
+        out += line;
+    }
+    swprintf_s(line, L"gdi objects %u   user objects %u\r\n",
+               GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS),
+               GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS));
+    out += line;
+
+    HANDLE heaps[64];
+    const DWORD n = GetProcessHeaps((DWORD)ARRAYSIZE(heaps), heaps);
+    SIZE_T totalUsed = 0, totalCommitted = 0;
+    for (DWORD i = 0; i < n && i < ARRAYSIZE(heaps); ++i) {
+        SIZE_T used = 0, committed = 0;
+        if (!HeapLock(heaps[i])) continue;
+        PROCESS_HEAP_ENTRY e = {};
+        while (HeapWalk(heaps[i], &e)) {
+            if (e.wFlags & PROCESS_HEAP_REGION) committed += e.Region.dwCommittedSize;
+            else if (e.wFlags & PROCESS_HEAP_ENTRY_BUSY) used += e.cbData;
+        }
+        HeapUnlock(heaps[i]);
+        totalUsed += used;
+        totalCommitted += committed;
+        if (committed >= 65536 || used >= 65536) {
+            swprintf_s(line, L"heap %2u%s  used %6.2f MB  committed %6.2f MB\r\n", i,
+                       heaps[i] == GetProcessHeap() ? L" (crt)" : L"      ",
+                       used / 1048576.0, committed / 1048576.0);
+            out += line;
+        }
+    }
+    swprintf_s(line, L"all heaps: used %.2f MB, committed %.2f MB in %u heaps\r\n",
+               totalUsed / 1048576.0, totalCommitted / 1048576.0, n);
+    out += line;
+    return out;
+}
+
 std::wstring IpcQuery(const std::wstring& what) {
+    if (what == L"memory")  return MemoryReport();
+    if (what == L"monitor") return MonitorReadingsText();
     if (what == L"version")
         return L"{\"name\":" + JsonStr(kAppName) + L",\"version\":" + JsonStr(kVersion) +
                L",\"elevated\":" + JsonBool(SelfIsElevated()) + L"}";
@@ -372,6 +426,9 @@ std::wstring IpcQuery(const std::wstring& what) {
                L",\"tiling\":" + JsonBool(s.tiling) +
                L",\"gaps\":" + JsonBool(s.gaps) +
                L",\"gameMode\":" + JsonBool(s.gameMode) +
+               L",\"displayOff\":" + JsonBool(g_displayOff) +
+               L",\"monitorShown\":" + JsonBool(MonitorVisible()) +
+               L",\"clockShown\":" + JsonBool(ClockVisible()) +
                L",\"blocked\":" + JsonNum(s.blocked) +
                L",\"activeMonitor\":" + JsonNum(s.activeMonitor) +
                L",\"activeWorkspace\":" + JsonNum(s.activeWorkspace + 1) +
@@ -381,7 +438,7 @@ std::wstring IpcQuery(const std::wstring& what) {
                L",\"windows\":" + JsonWindows(s) + L"}";
     }
     return L"error: unknown query '" + what + L"'. Try: windows, workspaces, "
-           L"monitors, state, version";
+           L"monitors, state, version, memory, monitor";
 }
 
 std::wstring IpcCommandHandler(const std::wstring& line) {
@@ -560,9 +617,37 @@ void AppTrayBalloon(const wchar_t* title, const wchar_t* text) {
 
 void AppSaveConfig() { g_cfg.SaveToFile(ConfigPath()); }
 
-// The screen is off (or the machine has gone to sleep). Nobody can see the
-// overlay, so nothing about it is worth spending anything on.
-static bool g_displayOff = false;
+// Memory a tray application does not need to hold while it waits. Three
+// things, each cheap and each honest about what it does:
+//
+//  - CoFreeUnusedLibraries: the shell's AppsFolder enumeration and the COM
+//    objects behind it drag several large DLLs in (windows.storage,
+//    StateRepository, CoreUI). Once the scan is over they have no objects
+//    left and unload on request; they are loaded again the next time they
+//    are needed.
+//  - HeapCompact: returns freed pages at the end of the process heap to the
+//    system, after a settings window or a result list has been freed.
+//  - SetProcessWorkingSetSizeEx(-1, -1): moves every page the process is not
+//    actively touching from its working set to the standby list. The pages
+//    are not written anywhere - a page that is touched again comes back with
+//    a soft fault, a few microseconds - but they no longer count against
+//    the process, and Task Manager's memory column shows what the process
+//    is actually using rather than everything it has ever touched.
+//
+// Never on the way to doing something: only after the windows have been
+// put away and the timer has run out with nothing else having happened.
+static constexpr UINT kTrimIdleMs     = 15 * 60 * 1000;   // and then again, every so often
+static void TrimMemory() {
+    CoFreeUnusedLibrariesEx(0, 0);
+    HeapCompact(GetProcessHeap(), 0);
+    SetProcessWorkingSetSizeEx(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1, 0);
+    AWA_LOG(L"memory trimmed");
+}
+
+void AppScheduleTrim(UINT delayMs) {
+    if (g_wnd) SetTimer(g_wnd, TIMER_TRIM, delayMs, nullptr);
+}
+
 
 // One place that decides whether the overlay exists at all, because three
 // separate things now have an opinion about it and each of them used to set it
@@ -597,10 +682,34 @@ void AppGameModeChanged(bool on) {
 static const GUID kConsoleDisplayState =
     { 0x6fe69556, 0x704a, 0x47a0, { 0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47 } };
 
+// Milliseconds since the user last pressed or moved anything.
+static ULONGLONG IdleMs() {
+    LASTINPUTINFO lii = { sizeof(lii), 0 };
+    if (!GetLastInputInfo(&lii)) return 0;
+    return (ULONGLONG)(GetTickCount() - lii.dwTime);
+}
+
+// The console-display-state notification is the only thing that says the
+// screen has gone dark, and it is not always right: on this machine the
+// notification delivered at registration reported the display as off while
+// it was being looked at, and both overlays stayed hidden - sampler parked,
+// clock stopped - for the rest of the session, with nothing in the settings
+// to explain it. A display does not switch itself off under a hand on the
+// mouse, so "off" is only believed after a stretch of no input, and while it
+// is believed a slow timer watches for input and clears it, in case the
+// matching "on" never arrives either.
+static constexpr ULONGLONG kDisplayOffNeedsIdleMs = 45 * 1000;
 static void SetDisplayOff(bool off) {
+    if (off && IdleMs() < kDisplayOffNeedsIdleMs) {
+        AWA_LOG(L"display reported off with input %llu ms ago - not believed",
+                IdleMs());
+        return;
+    }
     if (g_displayOff == off) return;
     g_displayOff = off;
-    AWA_LOG(L"display %s", off ? L"off - suspending the overlay" : L"on");
+    AWA_LOG(L"display %s", off ? L"off - suspending the overlays" : L"on");
+    if (off) SetTimer(g_wnd, TIMER_DISPLAY, 5 * 1000, nullptr);
+    else     KillTimer(g_wnd, TIMER_DISPLAY);
     UpdateOverlayVisibility();
 }
 void AppRefreshSettings() { SettingsRefresh(); }
@@ -699,6 +808,9 @@ static std::wstring DiagnosticsText() {
             m.full.x, m.full.y, m.full.w, m.full.h,
             m.work.x, m.work.y, m.work.w, m.work.h);
     }
+
+    out += L"\r\nmemory:\r\n";
+    out += MemoryReport();
 
     add(L"\nwindows managed : %d", g_wm.ManagedCount());
     add(L"blocked by uipi : %d  (running as administrator; cannot be moved)",
@@ -933,6 +1045,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_wm.OnDragTick();
             } else if (wp == TIMER_PENDING) {
                 g_wm.RetryPending();
+            } else if (wp == TIMER_DISPLAY) {
+                // Input while the display is "off" means it is not.
+                if (g_displayOff && IdleMs() < 5 * 1000) SetDisplayOff(false);
+            } else if (wp == TIMER_TRIM) {
+                // Not while something is on screen that is about to be used:
+                // the trim would only be undone by the next repaint.
+                if (!SettingsVisible() && !LauncherVisible() && !g_wm.Dragging()) {
+                    TrimMemory();
+                    SetTimer(hwnd, TIMER_TRIM, kTrimIdleMs, nullptr);
+                } else {
+                    SetTimer(hwnd, TIMER_TRIM, 30 * 1000, nullptr);
+                }
             }
             return 0;
 
@@ -1310,6 +1434,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
     MigrateLegacyAutostart();
     RepairAutostartPath();
     if (g_cfg.focusFollowsMouse)  SetTimer(g_wnd, TIMER_MOUSE, 120, nullptr);
+    // Startup allocates and then forgets a great deal: the app scan, the
+    // index and icon caches, the first pass over every window. Give it back
+    // once the machine has settled.
+    AppScheduleTrim(45 * 1000);
 
     const bool startHidden = g_cfg.startMinimized ||
                              (cmdLine && (wcsstr(cmdLine, L"--tray") ||

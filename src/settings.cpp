@@ -1053,9 +1053,18 @@ void SettingsOpenTab(int index) {
     ShowPage(index);
 }
 
+// Hiding is destroying. The window and its eight pages - three list views,
+// a dozen combo boxes, every owner-drawn control and the theme's bookkeeping
+// for each - are a few megabytes and several hundred GDI objects, held for a
+// window that is open for a minute a week. It is rebuilt from the template in
+// well under a hundred milliseconds when the tray icon is clicked, and every
+// page reloads from the live Config, so nothing is lost except edits that
+// were never applied - which is what closing a settings window means.
 void SettingsHide() {
     if (!g_dlg) return;
     ShowWindow(g_dlg, SW_HIDE);
+    SettingsDestroy();
+    AppScheduleTrim(5 * 1000);
     if (!g_toldAboutTray) {
         g_toldAboutTray = true;
         AppTrayBalloon(kAppName,

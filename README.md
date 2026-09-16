@@ -37,6 +37,32 @@ Measured on one machine, several samples each, not estimated. Your numbers will
 differ — the file index in particular is proportional to how many files you
 have, at roughly 300 bytes an entry.
 
+**Where the memory goes, and what 1.3 did about it.** `prowindowsctl get memory`
+prints the process's private commit, working set, GDI object count and every
+heap's size, and the diagnostics report includes the same. Measured with it:
+
+| | before | after |
+|---|---|---|
+| Base: tiler, search bar, index, icons, both hooks | 6.5 MB | 6.5 MB |
+| + the monitor overlay (performance counters) | +4 MB | +4 MB |
+| + GPU temperature on an NVIDIA card | **+19 MB** | **+2.8 MB** |
+| Working set while idle | 65 MB | ~2 MB after the trim, growing back only to what is touched |
+
+The 19 MB was NVML: `nvmlInit` commits that much driver state in the calling
+process and never returns it, even after `nvmlShutdown`. The same sensor is
+read through NvAPI now for 2.8 MB; NVML is only loaded on a driver too old to
+answer NvAPI. `tests\gputemp.bat` measures both, and WMI, on your machine.
+
+The rest is habits rather than one fix: the settings window is destroyed when
+it is hidden rather than kept (it rebuilds in under 100 ms); the search bar
+lets its icon bitmaps go after three minutes out of sight and reads them back
+from `icons.cache` when next opened; the mouse hook behind `Alt`+drag is only
+installed while the modifier is held, so the thousand-events-a-second stream
+from a gaming mouse is not delivered into this process at all the rest of the
+time; and once the process has been idle for a while it unloads COM libraries
+nothing is using, compacts its heap and trims its working set - which is what
+takes the number in Task Manager from 65 MB to a few.
+
 The tray-only row is the honest floor: with the monitor closed and file search
 off, the process does nothing at all between window events, and the CPU counter
 does not move. Everything above that floor is something you switched on. The

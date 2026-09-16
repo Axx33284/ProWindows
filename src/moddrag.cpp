@@ -1,4 +1,5 @@
 #include "moddrag.h"
+#include "hotkeys.h"
 #include "winutil.h"
 #include "wm.h"
 #include "app.h"
@@ -23,6 +24,17 @@ LONG g_mods = 0;
 // A button-down we swallowed, so its up can be let through deliberately rather
 // than by accident. Left is 1, right is 2.
 LONG g_swallowed = 0;
+
+// Whether every key in g_mods is down right now, as last reported by the
+// keyboard hook. The mouse hook is only installed while this is set: a
+// WH_MOUSE_LL hook is called for every pointer movement on the machine, a
+// thousand times a second on a gaming mouse, and all but a handful of those
+// calls used to be a round trip into this process to decide "not a button,
+// carry on". Keystrokes are a hundred times rarer, so watching the modifier
+// from the keyboard hook and holding the mouse hook only while it is down
+// costs almost nothing when the gesture is not being used - which is nearly
+// always.
+LONG g_modsHeld = 0;
 
 // What the window manager is arranging, for the hook to test against. Sorted,
 // so the hook's look-up is a binary search over a few dozen pointers rather
@@ -116,7 +128,8 @@ LRESULT CALLBACK LowLevelMouseProc(int code, WPARAM wp, LPARAM lp) {
 }
 
 void ApplyHookState() {
-    const bool wanted = InterlockedCompareExchange(&g_mods, 0, 0) != 0;
+    const bool wanted = InterlockedCompareExchange(&g_mods, 0, 0) != 0 &&
+                        InterlockedCompareExchange(&g_modsHeld, 0, 0) != 0;
 
     if (wanted && !g_hook) {
         g_hook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc,
@@ -219,17 +232,43 @@ void ModDragPublishWindows(const std::vector<HWND>& windows) {
 
 void ModDragApplyConfig(const Config* cfg) {
     const LONG want = (cfg && cfg->modDrag) ? (LONG)cfg->modMask : 0;
-    const LONG had  = InterlockedExchange(&g_mods, want);
-    if (want == had && (want != 0) == (InterlockedCompareExchange(&g_hookOn, 0, 0) != 0))
-        return;                                  // already in the wanted state
-
+    InterlockedExchange(&g_mods, want);
+    InterlockedExchange(&g_modsHeld, 0);
+    // The keyboard hook watches the modifier for us; the mouse hook thread is
+    // started now, idle, so the first press of the modifier only has to post
+    // to it rather than create it.
+    HotkeysWatchModifiers(want != 0);
     if (!want && !g_thread) return;              // nothing on, nothing running
     if (!EnsureHookThread()) return;
     PostThreadMessageW(g_threadId, WM_AWA_APPLYMOUSEHOOK, 0, 0);
 }
 
+void ModDragModifier(UINT vk, bool down) {
+    const UINT want = (UINT)InterlockedCompareExchange(&g_mods, 0, 0);
+    if (!want || !g_thread) return;
+
+    // The key that caused this event is not yet in the async key state when
+    // a low-level hook sees it, so it is taken from the event and the rest
+    // from the state.
+    auto pressed = [&](int left, int right, int generic) {
+        if (vk == (UINT)left || vk == (UINT)right || vk == (UINT)generic) return down;
+        return (GetAsyncKeyState(left) & 0x8000) != 0 ||
+               (GetAsyncKeyState(right) & 0x8000) != 0;
+    };
+    bool held = true;
+    if (want & MOD_ALT)     held = held && pressed(VK_LMENU, VK_RMENU, VK_MENU);
+    if (want & MOD_CONTROL) held = held && pressed(VK_LCONTROL, VK_RCONTROL, VK_CONTROL);
+    if (want & MOD_SHIFT)   held = held && pressed(VK_LSHIFT, VK_RSHIFT, VK_SHIFT);
+    if (want & MOD_WIN)     held = held && pressed(VK_LWIN, VK_RWIN, VK_LWIN);
+
+    const LONG was = InterlockedExchange(&g_modsHeld, held ? 1 : 0);
+    if ((was != 0) != held)
+        PostThreadMessageW(g_threadId, WM_AWA_APPLYMOUSEHOOK, 0, 0);
+}
+
 void ModDragShutdown() {
     InterlockedExchange(&g_mods, 0);
+    InterlockedExchange(&g_modsHeld, 0);
     if (g_thread) {
         PostThreadMessageW(g_threadId, WM_QUIT, 0, 0);
         WaitForSingleObject(g_thread, 2000);

@@ -852,6 +852,49 @@ Apply → each page's Save() writes into the live Config
     path with `RestoreAllWindows`, in every version that has shipped - waits for the process, and
     takes the mutex over. `RepairAutostartPath` then moves the Run entry to the new copy.
 
+65. **NvAPI before NVML for the GPU temperature.** `nvmlInit_v2` commits 19.3 MB of private
+    memory in this process - the driver's user-mode state - and `nvmlShutdown` plus `FreeLibrary`
+    return none of it, so "turn the temperature off" did not help either. `NvApiSensor` reads the
+    same die sensor through `nvapi64.dll` for 2.8 MB, and unloads. NVML is the fallback, and only
+    when NvAPI could not be *opened*: a single failed read must not load 19 MB. `tests\gputemp.bat`
+    measures the three sources on the machine it runs on.
+
+66. **The settings window is destroyed when hidden, not kept.** Eight pages, three list views and
+    every owner-drawn control are a few megabytes and hundreds of GDI objects for a window open a
+    minute a week; it rebuilds in under 100 ms and every page reloads from the live Config. The
+    one thing lost is an edit that was never applied, which is what closing a settings window means.
+
+67. **Memory is given back on idle, never on the way to doing something.** `AppScheduleTrim` arms
+    `TIMER_TRIM`; when it fires with nothing on screen, `TrimMemory` unloads COM libraries with no
+    objects left (`CoFreeUnusedLibrariesEx`), compacts the heap, and trims the working set
+    (`SetProcessWorkingSetSizeEx(-1, -1)`). The last moves untouched pages to the standby list -
+    a soft fault brings one back - so it changes what the process is charged for, not what it has.
+    Scheduled 45 s after startup, a few seconds after the settings window or search bar is put
+    away, and every fifteen minutes.
+
+68. **The search bar's icon bitmaps are not held for a hidden window.** `AppIconRelease` after
+    three minutes out of sight: the fresh ones are written to `icons.cache` first, every bitmap is
+    freed, and the loader thread reads the cache back on the next request (invariant 42's rule -
+    never on the way to the screen - still holds; a lettered tile shows for the frame or two before
+    the cache lands).
+
+69. **The mouse hook is installed only while the mod-drag modifier is held.** A `WH_MOUSE_LL` hook
+    is delivered for every pointer movement on the machine, a thousand times a second on a gaming
+    mouse, and each one was a round trip into this process to decide "not a button". The keyboard
+    hook (invariant 3), which is installed whenever mod-drag is on, reports modifier transitions to
+    `ModDragModifier`, which asks the mouse hook thread to put the hook in or take it out. The
+    thread itself is created at configuration time and idles, so the first press of the modifier
+    is one posted message away from a live hook.
+
+70. **"The display is off" is only believed after a stretch of no input.** The console-display-
+    state notification is the one source for it, and it arrives at registration with the current
+    value - which is genuinely "off" when the process starts while the user is away. That is
+    correct, and it parks both overlays; the guard in `SetDisplayOff` is for the other case, a
+    notification that is wrong, which would otherwise hide both overlays until the next real "on".
+    While "off" is believed, `TIMER_DISPLAY` watches `GetLastInputInfo` and clears it on input.
+    `get state` reports `displayOff`, `monitorShown` and `clockShown` so this is visible from
+    outside.
+
 ## Things that surprised us, recorded so they surprise nobody twice
 
 - **The shell owns almost every `Win`+letter chord.** `RegisterHotKey` was refused for all but

@@ -1,4 +1,5 @@
 #include "hotkeys.h"
+#include "moddrag.h"
 
 namespace awa {
 
@@ -60,6 +61,22 @@ std::vector<Chord> g_chords;           // guarded by g_lock
 // bindings changed is recognised as stale and dropped rather than running
 // whichever action has since inherited that slot. Guarded by g_lock.
 LONG g_chordGen = 0;
+
+// Whether the hook stays in for mod-drag's sake even with nothing to match.
+// Interlocked: written by the UI thread, read on the hook thread.
+LONG g_watchMods = 0;
+
+bool IsModifierKey(UINT vk) {
+    switch (vk) {
+        case VK_LMENU: case VK_RMENU: case VK_MENU:
+        case VK_LCONTROL: case VK_RCONTROL: case VK_CONTROL:
+        case VK_LSHIFT: case VK_RSHIFT: case VK_SHIFT:
+        case VK_LWIN: case VK_RWIN:
+            return true;
+        default:
+            return false;
+    }
+}
 
 HANDLE g_thread   = nullptr;
 DWORD  g_threadId = 0;
@@ -133,6 +150,12 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wp, LPARAM lp) {
     const bool down = (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN);
     const bool up   = (wp == WM_KEYUP   || wp == WM_SYSKEYUP);
 
+    // Modifier transitions go to mod-drag, which decides whether the mouse
+    // hook is wanted right now. A comparison and, rarely, a post.
+    if ((down || up) && IsModifierKey(kb->vkCode) &&
+        InterlockedCompareExchange(&g_watchMods, 0, 0) != 0)
+        ModDragModifier(kb->vkCode, down);
+
     const ULONGLONG now = GetTickCount64();
     if (!g_swallowed.empty()) ExpireSwallowed(now);
 
@@ -184,7 +207,8 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wp, LPARAM lp) {
 // Hook thread only: a hook must be released by the thread that set it.
 void ApplyHookState() {
     EnterCriticalSection(&g_lock);
-    const bool wanted = !g_chords.empty();
+    const bool wanted = !g_chords.empty() ||
+                        InterlockedCompareExchange(&g_watchMods, 0, 0) != 0;
     LeaveCriticalSection(&g_lock);
 
     if (wanted && !g_hook) {
@@ -269,7 +293,8 @@ bool EnsureHookThread() {
 // the one caller that asks whether the hook actually went in straight
 // afterwards; removing it is not worth stalling a settings reload over.
 void PublishChords(std::vector<Chord> chords, bool wait) {
-    const bool empty = chords.empty();
+    const bool empty = chords.empty() &&
+                       InterlockedCompareExchange(&g_watchMods, 0, 0) == 0;
     if (empty && !g_thread) return;        // nothing to do, nothing running
     if (!EnsureHookThread()) return;
 
@@ -390,6 +415,14 @@ const Keybind* HotkeyForHookIndex(WPARAM packed) {
 
     if (index < 0 || index >= (int)g_hooked.size()) return nullptr;
     return BindAt(g_hooked[(size_t)index]);
+}
+
+void HotkeysWatchModifiers(bool on) {
+    const LONG had = InterlockedExchange(&g_watchMods, on ? 1 : 0);
+    if ((had != 0) == on && (!on || HotkeysHookInstalled())) return;
+    if (!on && !g_thread) return;
+    if (!EnsureHookThread()) return;
+    PostThreadMessageW(g_threadId, WM_AWA_APPLYHOOK, 0, 0);
 }
 
 int  HotkeysBlockedCount()  { return g_blocked; }

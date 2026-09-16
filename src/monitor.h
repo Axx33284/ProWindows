@@ -23,6 +23,11 @@ bool MonitorPinned();
 // whether the panel floats on top or sits down on the desktop.
 void MonitorApplyConfig();
 
+// The last reading of every metric, one line each - "cpu_temp: 41°C (thermal
+// zone)" - for the control channel's `get monitor`, so a script or a bug
+// report can say what the panel is showing without a screenshot.
+std::wstring MonitorReadingsText();
+
 // Explorer restarting destroys the desktop window the overlay is owned by when
 // it is in desktop mode, taking the overlay with it. Call this from the
 // TaskbarCreated handler to put it back.
