@@ -50,9 +50,12 @@ constexpr size_t kMaxIcons = 512;
 // a 28-pixel icon is about 3 KB, and the ceiling above puts the whole thing
 // comfortably under two megabytes.
 constexpr unsigned kCacheMagic   = 0x43494D50;   // "PMIC"
-// 2: rows are genuinely top-down. Version 1 files hold every icon inverted,
-// and are thrown away rather than read - one background sweep rebuilds them.
-constexpr unsigned kCacheVersion = 2;
+// 3: rows are top-down, and stay that way across a save. Version 1 files hold
+// every icon inverted; version 2 files hold the icons inverted on every second
+// save, because ReadPixels guessed the orientation from the handle - see
+// TopDownCopy. Either is thrown away rather than read; one background sweep
+// rebuilds it.
+constexpr unsigned kCacheVersion = 3;
 // A shell icon does change - an application updates, a shortcut is repointed -
 // just not often. Rebuilding the lot once a fortnight costs one background pass
 // nobody is waiting on.
@@ -83,35 +86,34 @@ struct Pixels {
     std::vector<BYTE> bgra;          // top-down, premultiplied
 };
 
+// Every bitmap in the table is top-down - TopDownCopy makes sure of it on the
+// way in - so the rows can be copied in memory order.
+//
+// They have to be, because the handle cannot say which way up it is: GetObject
+// reports dsBmih.biHeight positive for every DIB section, top-down or not
+// (measured on Windows 11; the sign the bitmap was created with is not kept).
+// An earlier version of this function tested that sign, took every bitmap to
+// be bottom-up, and turned it over - which was right for the shell's bitmaps
+// and wrong for the ones MakeBitmap had just restored from the cache. So each
+// save after a load inverted every restored icon, and the search bar showed
+// them upside down from the second launch on, and again three minutes after it
+// was last used, once the table started being released and read back.
 bool ReadPixels(HBITMAP bitmap, Pixels* out) {
     DIBSECTION dib = {};
     if (GetObjectW(bitmap, sizeof(dib), &dib) != sizeof(dib)) return false;
     if (dib.dsBm.bmBitsPixel != 32 || !dib.dsBm.bmBits) return false;
 
     const int w = dib.dsBm.bmWidth;
-    const int h = dib.dsBm.bmHeight < 0 ? -dib.dsBm.bmHeight : dib.dsBm.bmHeight;
+    const int h = dib.dsBm.bmHeight;
     if (w <= 0 || h <= 0 || w > 512 || h > 512) return false;
-
-    // The shell hands its icons back as *bottom-up* DIBs - the first row in
-    // memory is the bottom of the picture - which is the GDI default, and
-    // AlphaBlend reads them correctly. Pixels are always stored top-down, and
-    // MakeBitmap rebuilds them as top-down, so a bottom-up source has to be
-    // turned over on the way in. It was not, and so every icon that came back
-    // from the cache - which is every icon from the second launch on - was
-    // drawn upside down.
-    //
-    // dsBm.bmHeight is always positive; the orientation lives in the header.
-    const bool bottomUp = dib.dsBmih.biHeight > 0;
 
     out->w = w;
     out->h = h;
     out->bgra.resize((size_t)w * (size_t)h * 4);
     const BYTE* src = static_cast<const BYTE*>(dib.dsBm.bmBits);
-    for (int y = 0; y < h; ++y) {
-        const int srcRow = bottomUp ? (h - 1 - y) : y;
+    for (int y = 0; y < h; ++y)
         memcpy(out->bgra.data() + (size_t)y * w * 4,
-               src + (size_t)srcRow * (size_t)dib.dsBm.bmWidthBytes, (size_t)w * 4);
-    }
+               src + (size_t)y * (size_t)dib.dsBm.bmWidthBytes, (size_t)w * 4);
     return true;
 }
 
@@ -137,18 +139,53 @@ HBITMAP MakeBitmap(const Pixels& px) {
     return bmp;
 }
 
+// A top-down, 32-bit copy of whatever the shell handed back. GetDIBits knows
+// the source's real orientation where GetObject does not, and asked for a
+// negative height it turns a bottom-up source over itself; for a 32-bit source
+// it copies the alpha byte through untouched (measured, pixel for pixel). The
+// copy is made here, on the loader thread, before the bitmap is shared with
+// anyone - GetDIBits must not run on a bitmap that is selected into a DC, and
+// AppIconDraw selects every one it draws.
+HBITMAP TopDownCopy(HBITMAP source) {
+    BITMAP bm = {};
+    if (GetObjectW(source, sizeof(bm), &bm) != sizeof(bm)) return nullptr;
+    if (bm.bmWidth <= 0 || bm.bmHeight <= 0 || bm.bmWidth > 512 || bm.bmHeight > 512)
+        return nullptr;
+
+    Pixels px;
+    px.w = bm.bmWidth;
+    px.h = bm.bmHeight;
+    px.bgra.resize((size_t)px.w * (size_t)px.h * 4);
+
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth       = px.w;
+    bi.bmiHeader.biHeight      = -px.h;
+    bi.bmiHeader.biPlanes      = 1;
+    bi.bmiHeader.biBitCount    = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (!dc) return nullptr;
+    const int rows = GetDIBits(dc, source, 0, (UINT)px.h, px.bgra.data(), &bi, DIB_RGB_COLORS);
+    DeleteDC(dc);
+    if (rows != px.h) return nullptr;
+
+    return MakeBitmap(px);
+}
+
 // IShellItemImageFactory hands back a 32-bit DIB section with *straight* alpha.
 // AlphaBlend wants it premultiplied, and the difference is not subtle - every
 // icon comes out with a bright halo where it should be feathering into the
-// background. The bitmap is a DIB section, so its bits can be corrected in
-// place rather than copied through GetDIBits and back.
+// background. Applied to the top-down copy, which is a DIB section of our
+// own, so its bits can be corrected in place.
 void Premultiply(HBITMAP bitmap) {
     DIBSECTION dib = {};
     if (GetObjectW(bitmap, sizeof(dib), &dib) != sizeof(dib)) return;
     if (dib.dsBm.bmBitsPixel != 32 || !dib.dsBm.bmBits) return;
 
     const int width  = dib.dsBm.bmWidth;
-    const int height = dib.dsBm.bmHeight < 0 ? -dib.dsBm.bmHeight : dib.dsBm.bmHeight;
+    const int height = dib.dsBm.bmHeight;
     BYTE* row = static_cast<BYTE*>(dib.dsBm.bmBits);
 
     for (int y = 0; y < height; ++y) {
@@ -187,8 +224,14 @@ HBITMAP LoadIconBitmap(const std::wstring& target, int pixels) {
     }
     item->Release();
 
-    if (bitmap) Premultiply(bitmap);
-    return bitmap;
+    if (!bitmap) return nullptr;
+
+    // Kept in our own orientation, not the shell's; see TopDownCopy. Nothing
+    // is drawn from the shell's bitmap, so it goes as soon as it is copied.
+    HBITMAP copy = TopDownCopy(bitmap);
+    DeleteObject(bitmap);
+    if (copy) Premultiply(copy);
+    return copy;
 }
 
 // ---------------------------------------------------------------- the cache
@@ -321,9 +364,13 @@ constexpr DWORD kNothingToDo = INFINITE;
 DWORD NextKey(std::wstring* key, bool* background) {
     *background = false;
     EnterCriticalSection(&g_lock);
-    if (!g_queue.empty()) {
+    while (!g_queue.empty()) {
         *key = std::move(g_queue.back());
         g_queue.pop_back();
+        // Queued while the table was empty after a release, and then restored
+        // by the reload that ran before this call: nothing to fetch.
+        auto it = g_cache.find(*key);
+        if (it != g_cache.end() && it->second.tried) continue;
         LeaveCriticalSection(&g_lock);
         return 0;
     }
@@ -336,7 +383,9 @@ DWORD NextKey(std::wstring* key, bool* background) {
     }
 
     while (g_prefetchAt < g_prefetch.size()) {
-        std::wstring candidate = std::move(g_prefetch[g_prefetchAt++]);
+        // Copied, not moved: the sweep starts over from the same list after a
+        // release, and a moved-from entry would come back as an empty key.
+        std::wstring candidate = g_prefetch[g_prefetchAt++];
         auto it = g_cache.find(candidate);
         if (it != g_cache.end() && it->second.tried) continue;   // already have it
         g_cache[candidate];                    // reserve, so it is queued once

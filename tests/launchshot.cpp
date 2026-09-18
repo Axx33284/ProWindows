@@ -32,6 +32,10 @@ using std::max;
 
 using namespace awa;
 
+// The launcher asks the shell to trim memory once it has been hidden for a
+// while. There is no shell here.
+namespace awa { void AppScheduleTrim(UINT) {} }
+
 namespace {
 
 CLSID PngEncoder() {

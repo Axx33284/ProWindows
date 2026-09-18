@@ -638,7 +638,14 @@ void AppSaveConfig() { g_cfg.SaveToFile(ConfigPath()); }
 // put away and the timer has run out with nothing else having happened.
 static constexpr UINT kTrimIdleMs     = 15 * 60 * 1000;   // and then again, every so often
 static void TrimMemory() {
-    CoFreeUnusedLibrariesEx(0, 0);
+    // The default delay, not zero. A zero delay also unloads DLLs whose
+    // objects live in the multithreaded apartment the instant they report
+    // no objects left, and the thermal probe creates WMI objects from an
+    // MTA thread of its own: a DLL could be unloaded between that thread
+    // entering DllGetClassObject and the new object being counted. The shell
+    // DLLs this call is here for were loaded from single-threaded apartments
+    // and still go at once; the WMI ones follow on a later trim.
+    CoFreeUnusedLibrariesEx(INFINITE, 0);
     HeapCompact(GetProcessHeap(), 0);
     SetProcessWorkingSetSizeEx(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1, 0);
     AWA_LOG(L"memory trimmed");

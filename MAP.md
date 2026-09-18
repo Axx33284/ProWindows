@@ -72,7 +72,7 @@ build.bat
 | `src\main.cpp` | Entry point, tray UI, event hooks, and the `app.h` implementations. |
 | `res\app.rc` | Icon, manifest, and every dialog template. The layout lives here, not in code. |
 | `docs\` | The review notes: what was reported, what was found, what changed, per pass. |
-| `tests\` | `run.bat` asserts on layout geometry; `probe.bat` prints how each live window would be classified without moving any of it; `tempprobe.bat` prints which temperature source this machine can answer from, and self-tests the two shared-memory readers; `monshot.bat`, `clockshot.bat`, `launchshot.bat`, `uishot.bat`, `bindshot.bat` and `rowdragshot.bat` render the pieces of UI to PNG without starting the tiler (`clocklive.bat` runs the real clock window for a few seconds and captures it off the screen) (`bindshot` presses real keys into the shortcut recorder, `rowdragshot` drags a Monitor-tab row with the real mouse, and `monshot` also renders a readout mid-drag); `searchprobe.bat` runs the file and program index alone and prints what it found, per drive, which is the only way to see whether the walk reaches this machine's other disks; `analyze.bat` runs MSVC `/analyze` over whichever sources you name. None is part of the product build. |
+| `tests\` | `run.bat` asserts on layout geometry; `probe.bat` prints how each live window would be classified without moving any of it; `tempprobe.bat` prints which temperature source this machine can answer from, and self-tests the two shared-memory readers; `monshot.bat`, `clockshot.bat`, `launchshot.bat`, `uishot.bat`, `bindshot.bat` and `rowdragshot.bat` render the pieces of UI to PNG without starting the tiler (`clocklive.bat` runs the real clock window for a few seconds and captures it off the screen) (`bindshot` presses real keys into the shortcut recorder, `rowdragshot` drags a Monitor-tab row with the real mouse, and `monshot` also renders a readout mid-drag); `searchprobe.bat` runs the file and program index alone and prints what it found, per drive, which is the only way to see whether the walk reaches this machine's other disks; `iconcache.bat` checks that a shell icon comes back from `icons.cache` the right way up, through a save, a release and a reload, twice; `analyze.bat` runs MSVC `/analyze` over whichever sources you name. None is part of the product build. |
 
 ## Data flow
 
@@ -866,7 +866,8 @@ Apply → each page's Save() writes into the live Config
 
 67. **Memory is given back on idle, never on the way to doing something.** `AppScheduleTrim` arms
     `TIMER_TRIM`; when it fires with nothing on screen, `TrimMemory` unloads COM libraries with no
-    objects left (`CoFreeUnusedLibrariesEx`), compacts the heap, and trims the working set
+    objects left (`CoFreeUnusedLibrariesEx` with the default delay, not zero: a zero delay races the
+    thermal probe's MTA thread), compacts the heap, and trims the working set
     (`SetProcessWorkingSetSizeEx(-1, -1)`). The last moves untouched pages to the standby list -
     a soft fault brings one back - so it changes what the process is charged for, not what it has.
     Scheduled 45 s after startup, a few seconds after the settings window or search bar is put
@@ -894,6 +895,17 @@ Apply → each page's Save() writes into the live Config
     While "off" is believed, `TIMER_DISPLAY` watches `GetLastInputInfo` and clears it on input.
     `get state` reports `displayOff`, `monitorShown` and `clockShown` so this is visible from
     outside.
+
+71. **Every icon bitmap is top-down, made so on the way in, and never asked which way up it is.**
+    `GetObject` reports `dsBmih.biHeight` positive for every DIB section, top-down or not, so a
+    handle cannot say how its rows are ordered. `TopDownCopy` in `appicon.cpp` copies whatever the
+    shell hands back through `GetDIBits` with a negative height - GDI knows the source's real
+    orientation and turns it over if it must - and the shell's bitmap is deleted. From then on
+    `ReadPixels` copies rows in memory order. Anything that guesses the orientation from the
+    handle will be right for one of the two kinds of bitmap in the table and wrong for the other,
+    which is how the cache came to invert every restored icon on each save (`icons.cache` version
+    2). `tests\iconcache.bat` checks the round trip pixel for pixel; run it after touching any of
+    this.
 
 ## Things that surprised us, recorded so they surprise nobody twice
 
