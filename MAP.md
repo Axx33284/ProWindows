@@ -87,7 +87,7 @@ build.bat
 | `src\launcher.*` | The search bar's window: query, ranking, painting, the row menu and the app catalogue scan. |
 | `src\search.*` | What the search bar finds: the file and program index and its walk thread, the ms-settings table, the calculator, and the fuzzy scorer every source shares. No Win32 UI. |
 | `src\appicon.*` | The shell icons the search bar draws, fetched on a thread of their own and cached in `icons.cache`. |
-| `src\theme.*` | **The look**, after Battlefront II's options screens: the palette, the fonts (Bahnschrift, per DPI), spaced capitals, the backdrop, the amber glow, the notched panel frame, cut-corner boxes, and the painters every settings-style control is drawn with (`DrawPair`, `DrawSelector`, `DrawSlider`, `DrawAction`, `Keycap`/`Chord`, `DrawButton`, `Prompt`, `RowFocus`). No window, no state. The overlays are not themed by it. |
+| `src\theme.*` | **The look**, modelled on Resident Evil Requiem's menus: pure black, grey hairlines, white type, Bahnschrift for headers and tabs, Segoe UI for content. A brushed-metal focus bar with bright edges and glow replaces the amber glow. Section plates with slants, segment indicators for choices, ruler sliders with markers, open-in icons for actions, and the painters for every row type (`DrawToggle`, `DrawSelector`, `DrawSlider`, `DrawAction`, `Keycap`/`Chord`, `Prompt`, `RowFocus`). No window, no state. The overlays are not themed by it. |
 | `src\rowlist.*` | A list of settings rows (`ui::Row`: a kind, a label, a description, get/set onto the edit copy) and `ui::RowList`, which lays them out, paints them, owns the focus and its fade, scrolling, reordering, and every key and click on a row. Not a window: its host paints it and feeds it input. |
 | `src\modal.*` | `ui::Confirm`, `ui::Ask`, `ui::Notice` and `ui::Pick`: modal screens in the same look, each a window of its own with its own message loop, the owner disabled and dimmed. |
 | `src\settings.*` | The settings window: one custom-drawn window with its own frame - header, category column, the panel, the description and preview, footer buttons and prompts - plus the edit copy, Apply, Reset, search across every category, and shortcut capture. |
@@ -563,13 +563,9 @@ appended at the end of the numbering.
     `SetProcessWorkingSetSizeEx(-1, -1)`. Scheduled 45 s after start, a few seconds after the
     settings window or search bar is put away, and every fifteen minutes.
 
-72. **The backdrop is one picture per canvas size, and the canvas is not the window.**
-    `RenderBackdrop` is a pure function of the pixel (hashes, not `rand()`, with a little noise
-    before rounding - a gradient this dark bands visibly without it), rendered into a DIB at most
-    three of which are cached. The settings window renders it at its **monitor's** size and shows
-    the top-left part, so a resize never re-renders; the search bar renders it at its **tallest**
-    size (`CanvasSize()`), so rows coming and going never do either. Nothing else draws a
-    background: there are no child controls left to phase a brush for.
+72. *Retired in 1.6 — the backdrop is gone.* The settings window and search bar now fill with flat
+    black (`theme::Bg`) instead of a rendered picture. The screen is pure black, matching Resident
+    Evil Requiem's menu design.
 
 73. *Retired in 1.5 — see 80.* The category row was a window class of its own; categories are
     now part of the settings window, and Ctrl+Tab is handled by its own `WM_KEYDOWN`.
@@ -619,8 +615,8 @@ appended at the end of the numbering.
     suggested rectangle and lays out again; `WM_GETMINMAXINFO` holds it at 980 × 620 DIPs. It
     draws its own frame: `WM_NCCALCSIZE` makes the whole window client, `WM_NCHITTEST` answers the
     resize edges and makes the header draggable where nothing in it is clickable, and a one-pixel
-    DWM margin keeps the shadow. Corners are square (`DWMWCP_DONOTROUND`), as the game's screens
-    are.
+    DWM margin keeps the shadow. Corners are square (`DWMWCP_DONOTROUND`), matching Resident Evil
+    Requiem's menu screens.
 
 81. **A shortcut is recorded through a hook of its own, only while a row is listening.**
     `BeginCapture` installs a `WH_KEYBOARD_LL` hook on the UI thread that swallows every key while

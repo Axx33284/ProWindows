@@ -1,18 +1,16 @@
 // ProWindows - the look, and the pieces it is drawn with.
 //
-// Modelled on the options screens of Star Wars Battlefront II (2017). Nothing
-// there is a box on a box: the screen is black, a single hairline frame with
-// two shallow notches in it holds a list of settings, and each setting is one
-// full-width row - its name on the left in condensed capitals, its control on
-// the right. The controls are few and always the same:
+// Modelled on the options screens of Resident Evil Requiem. The screen is pure black;
+// the settings are rows, each with its name on the left and its control on the right.
+// The controls are few and always the same:
 //
-//   ON | OFF       two words side by side; the chosen one sits on a pale bar
-//   <  VALUE  >    a value between two solid arrowheads
-//   [####    65 ]  a bar filled from the left, the number in the middle
+//   Off | On          two words; the chosen one sits on a segment
+//   <  VALUE  >       a value between two chevrons, with segment indicators
+//   [-────●────  75]  a ruler slider with marker and number
 //
-// The row under the pointer or the keyboard is the only thing lit: a bar of
-// brushed metal over the whole row, its name turned white. Disabled rows fall
-// back to grey. Prompts are a keycap and a word.
+// The row with keyboard or pointer focus is a brushed-metal bar with bright edges
+// and a soft glow, its name turned white. Sections are slanted plates with hairlines.
+// Disabled rows and unselected tabs fall back to grey. Prompts are keycaps and words.
 //
 // Everything here is plain GDI and GDI+ drawing into whatever DC the caller
 // hands over - the settings window, its modal screens and the search bar are

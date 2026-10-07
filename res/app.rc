@@ -5,8 +5,8 @@ IDI_APPICON ICON        "app.ico"
 1           RT_MANIFEST "app.manifest"
 
 VS_VERSION_INFO VERSIONINFO
-    FILEVERSION     1,5,0,0
-    PRODUCTVERSION  1,5,0,0
+    FILEVERSION     1,6,0,0
+    PRODUCTVERSION  1,6,0,0
     FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
     FILEFLAGS       0x0L
     FILEOS          VOS_NT_WINDOWS32
@@ -19,11 +19,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "ProWindows"
             VALUE "FileDescription",  "Automatic tiling window manager for Windows 11"
-            VALUE "FileVersion",      "1.5.0.0"
+            VALUE "FileVersion",      "1.6.0.0"
             VALUE "InternalName",     "ProWindows"
             VALUE "OriginalFilename", "ProWindows.exe"
             VALUE "ProductName",      "ProWindows"
-            VALUE "ProductVersion",   "1.5.0.0"
+            VALUE "ProductVersion",   "1.6.0.0"
         END
     END
     BLOCK "VarFileInfo"

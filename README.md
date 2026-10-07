@@ -6,8 +6,7 @@ snapping, no overlap. Everything is driven from the keyboard.
 
 Native C++ / Win32. One 1 MB executable, no runtime to install, no services,
 no background polling. Everything is configurable from a settings window laid
-out like the options screens of *Star Wars Battlefront II*, which opens when you
-launch it.
+out like the menus of *Resident Evil Requiem*, which opens when you launch it.
 
 ```
 ┌─────────────────┬───────────────┐
@@ -184,7 +183,7 @@ Launch the exe. The settings window opens and tiling starts immediately.
  ⟨ APPLY ⟩⟨ RESET TO DEFAULTS ⟩⟨ CLOSE ⟩                  [←→] CHANGE [ESC] BACK
 ```
 
-The window is laid out like an options screen in **Star Wars Battlefront II**:
+The window is laid out like the menus in **Resident Evil Requiem**:
 the screen's name as a breadcrumb at the top left - **PROWINDOWS / LAYOUT** -
 the categories down the left, and every setting as one full-width row in a
 single panel whose frame dips into two shallow notches. Each row is its name in
