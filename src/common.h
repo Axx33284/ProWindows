@@ -33,7 +33,7 @@ constexpr wchar_t kAppName[]      = L"ProWindows";
 constexpr wchar_t kAppShort[]     = L"ProWindows";
 constexpr wchar_t kWndClass[]     = L"ProWindows_MsgWnd";
 constexpr wchar_t kMutexName[]    = L"Local\\ProWindows_SingleInstance";
-constexpr wchar_t kVersion[]      = L"1.3.0";
+constexpr wchar_t kVersion[]      = L"1.5.0";
 
 // Private window messages
 enum : UINT {

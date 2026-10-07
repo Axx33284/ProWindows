@@ -41,6 +41,8 @@ cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UN
     "%ROOT%\tests\uishot.cpp" ^
     "%ROOT%\src\settings.cpp" "%ROOT%\src\settings_keys.cpp" ^
     "%ROOT%\src\settings_search.cpp" "%ROOT%\src\theme.cpp" ^
+    "%ROOT%\src\settings_pages.cpp" "%ROOT%\src\settings_monitor.cpp" ^
+    "%ROOT%\src\rowlist.cpp" "%ROOT%\src\modal.cpp" ^
     "%ROOT%\src\monitor.cpp" "%ROOT%\src\monpaint.cpp" "%ROOT%\src\montheme.cpp" ^
     "%ROOT%\src\clock.cpp" "%ROOT%\src\clockpaint.cpp" "%ROOT%\src\clocktheme.cpp" "%ROOT%\src\settings_clock.cpp" ^
     "%ROOT%\src\sysinfo.cpp" "%ROOT%\src\thermal.cpp" ^

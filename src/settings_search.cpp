@@ -1,68 +1,33 @@
-// The Search tab: which sources the search bar draws on, and how the file
-// index is built. Follows the same Load()/Save() contract as every other page
-// (settings_internal.h) - nothing here writes to the Config until Apply.
+// ProWindows - the Search page: which sources the search bar draws on, and how
+// the file index is built. Rows over the edit copy, like every other page;
+// nothing reaches the live config until Apply.
 #include "settings_internal.h"
 #include "search.h"
-#include "theme.h"
-#include <shlobj.h>
 
 namespace awa {
+
+using ui::Row;
 
 namespace {
 
 // Offered ceilings for the index. Bigger is not better: each entry costs
-// roughly 300 bytes held for the life of the process, and past a point you are
-// scrolling rather than searching.
+// roughly 300 bytes held for the life of the process, and past a point you
+// are scrolling rather than searching.
 const int kEntryCaps[] = { 5000, 10000, 20000, 50000, 100000 };
 
 // How far below each root to walk. Deeper finds more and costs more; past
 // about eight levels you are indexing build output, not documents.
 const int kDepths[] = { 2, 3, 4, 5, 6, 8, 12 };
 
-// The folder list being edited. Empty means "the defaults", which is stored as
-// an empty list rather than expanded - see Config::searchFolders.
-std::vector<std::wstring> g_editFolders;
-
-void FillFolderList(HWND page) {
-    HWND list = GetDlgItem(page, IDC_SRCH_FOLDERS);
-    if (!list) return;
-
-    SendMessageW(list, WM_SETREDRAW, FALSE, 0);
-    ListView_DeleteAllItems(list);
-
-    // An empty list means the defaults, so show what those actually resolve to
-    // rather than an empty box the user cannot make sense of.
-    const std::vector<std::wstring> show =
-        g_editFolders.empty() ? SearchDefaultFolders() : g_editFolders;
-
-    int row = 0;
-    for (const auto& folder : show) {
-        LVITEMW item = {};
-        item.mask     = LVIF_TEXT;
-        item.iItem    = row++;
-        item.pszText  = const_cast<wchar_t*>(folder.c_str());
-        ListView_InsertItem(list, &item);
-    }
-
-    SendMessageW(list, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(list, nullptr, TRUE);
-
-    // "Remove" only means something for a list the user actually chose.
-    EnableWindow(GetDlgItem(page, IDC_SRCH_REMOVE), !g_editFolders.empty());
-    EnableWindow(GetDlgItem(page, IDC_SRCH_DEFAULTS), !g_editFolders.empty());
+std::wstring Thousands(int n) {
+    std::wstring s = std::to_wstring(n);
+    for (int i = (int)s.size() - 3; i > 0; i -= 3) s.insert((size_t)i, L",");
+    return s;
 }
 
-// Names the drives the program walk will actually visit, so ticking the box
-// says something concrete rather than making a promise the machine may not
-// keep. Fixed disks only - a USB stick or a mapped share is not walked, and
-// the row saying so is cheaper than a support question about it.
-void UpdateDriveList(HWND page) {
-    if (!GetCheck(page, IDC_SRCH_DRIVES)) {
-        SetDlgItemTextW(page, IDC_SRCH_DRIVELIST,
-                        L"Program Files and %LOCALAPPDATA%\\Programs only.");
-        return;
-    }
-
+// The drives the program walk will visit, so the switch says something
+// concrete. Fixed disks only - a USB stick or a share is not walked.
+std::wstring FixedDrives() {
     std::wstring drives;
     const DWORD mask = GetLogicalDrives();
     for (int i = 0; i < 26; ++i) {
@@ -72,264 +37,167 @@ void UpdateDriveList(HWND page) {
         if (!drives.empty()) drives += L"  ";
         drives += root.substr(0, 2);
     }
-    SetDlgItemTextW(page, IDC_SRCH_DRIVELIST,
-                    drives.empty()
-                        ? L"No fixed drives found besides the system one."
-                        : (L"Fixed drives found: " + drives).c_str());
-}
-
-void UpdateStatus(HWND page) {
-    const bool on = GetCheck(page, IDC_SRCH_FILES);
-
-    wchar_t text[200] = L"";
-    if (!on) {
-        wcscpy_s(text, L"File search is off, so no index is held.");
-    } else if (!SearchIndexReady()) {
-        wcscpy_s(text, L"Indexing your files...");
-    } else {
-        const int n = SearchIndexCount();
-        // The memory figure is the honest reason there is a ceiling at all.
-        swprintf_s(text, L"%d files and folders indexed, about %d MB.",
-                   n, (std::max)(1, n * 300 / (1024 * 1024)));
-    }
-    SetDlgItemTextW(page, IDC_SRCH_STATUS, text);
-}
-
-// Everything below the "Files, folders and programs" tick only matters when it
-// is on.
-//
-// The folder list itself is deliberately *not* in that set. A disabled list
-// view paints its own background with the system window colour and ignores
-// every colour we have set on it, so switching file search off - the default -
-// put a bright white rectangle in the middle of a black page. It is also the
-// one control here worth reading while the feature is off, since it is what
-// the feature would index if it were on. The buttons around it still grey out,
-// which is what says the list is not in use.
-void UpdateEnabling(HWND page) {
-    const bool on = GetCheck(page, IDC_SRCH_FILES);
-    const int gated[] = {
-        IDC_SRCH_ADD, IDC_SRCH_DEPTH,
-        IDC_SRCH_MAXENTRIES, IDC_SRCH_HIDDEN, IDC_SRCH_REINDEX,
-        IDC_SRCH_DRIVES, IDC_SRCH_DEEPEXE,
-    };
-    for (int id : gated) EnableWindow(GetDlgItem(page, id), on);
-    UpdateDriveList(page);
-
-    EnableWindow(GetDlgItem(page, IDC_SRCH_REMOVE), on && !g_editFolders.empty());
-    EnableWindow(GetDlgItem(page, IDC_SRCH_DEFAULTS), on && !g_editFolders.empty());
-    UpdateStatus(page);
-}
-
-void UpdateHint(HWND page) {
-    const bool calc = GetCheck(page, IDC_SRCH_CALC);
-    const bool cmd  = GetCheck(page, IDC_SRCH_COMMANDS);
-
-    const wchar_t* text =
-        (calc && cmd) ? L"A sum jumps to the top of the list; anything that looks "
-                        L"like a path, a URL or a command line offers to run as typed."
-      : calc          ? L"Type something like 1920*0.75 and the answer is the first result."
-      : cmd           ? L"Anything that looks like a path, a URL or a command line "
-                        L"offers to run as typed."
-                      : L"Only apps, and whatever else is ticked above, are searched.";
-    SetDlgItemTextW(page, IDC_SRCH_HINT, text);
-}
-
-// The shell's folder picker.
-bool BrowseForFolder(HWND parent, std::wstring* chosen) {
-    IFileDialog* dialog = nullptr;
-    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&dialog))) || !dialog)
-        return false;
-
-    bool picked = false;
-    DWORD options = 0;
-    if (SUCCEEDED(dialog->GetOptions(&options)))
-        dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-    dialog->SetTitle(L"Choose a folder to index");
-
-    if (SUCCEEDED(dialog->Show(parent))) {
-        IShellItem* item = nullptr;
-        if (SUCCEEDED(dialog->GetResult(&item)) && item) {
-            PWSTR path = nullptr;
-            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
-                *chosen = path;
-                picked = true;
-                CoTaskMemFree(path);
-            }
-            item->Release();
-        }
-    }
-    dialog->Release();
-    return picked;
-}
-
-void AddFolder(HWND page) {
-    std::wstring folder;
-    if (!BrowseForFolder(page, &folder) || folder.empty()) return;
-
-    for (const auto& have : g_editFolders)
-        if (IEquals(have, folder)) return;      // already listed
-
-    // Note that the first folder added replaces the defaults rather than
-    // joining them, because an empty list is what *means* "the defaults".
-    // "Use the default folders" puts them back.
-    g_editFolders.push_back(folder);
-    FillFolderList(page);
-    UpdateEnabling(page);
-}
-
-void RemoveFolder(HWND page) {
-    if (g_editFolders.empty()) return;
-    HWND list = GetDlgItem(page, IDC_SRCH_FOLDERS);
-    const int sel = list ? ListView_GetNextItem(list, -1, LVNI_SELECTED) : -1;
-    if (sel < 0 || sel >= (int)g_editFolders.size()) {
-        MessageBoxW(page, L"Pick a folder from the list first.", kAppName,
-                    MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-    g_editFolders.erase(g_editFolders.begin() + sel);
-    FillFolderList(page);
-    UpdateEnabling(page);
+    return drives;
 }
 
 } // namespace
 
-// ---------------------------------------------------------------- page proc
-INT_PTR CALLBACK PageSearchProc(HWND page, UINT msg, WPARAM wp, LPARAM lp) {
-    INT_PTR themed = 0;
-    if (theme::DialogMessage(page, msg, wp, lp, &themed)) return themed;
+void BuildSearchPage(std::vector<Row>& rows) {
+    Config& e = Edit();
+    const Config& s = Saved();
+    const auto files = []() { return Edit().searchFiles; };
 
-    switch (msg) {
-        case WM_INITDIALOG: {
-            // Hides the group boxes so the theme can paint them as cards, and
-            // makes the combos and the list dark. Every other page does this;
-            // this one was missing it and rendered as a light-mode dialog.
-            theme::PrepareDialog(page);
+    rows.push_back(ui::Section(L"What to search"));
+    rows.push_back(ui::Toggle(L"files", L"Files and folders",
+        L"Finds files and folders by name, from an index of the folders listed below. "
+        L"The index is built once in the background and kept up to date after that.",
+        &e.searchFiles, &s.searchFiles));
+    rows.push_back(ui::Toggle(L"settingspages", L"Windows settings",
+        L"Finds pages of the Windows Settings app by what they are about - \"display\", "
+        L"\"bluetooth\", \"mouse speed\".",
+        &e.searchSettings, &s.searchSettings));
+    rows.push_back(ui::Toggle(L"calc", L"Calculator",
+        L"Type a sum like 1920*0.75 and the answer is the first result; Enter copies it.",
+        &e.searchCalc, &s.searchCalc));
+    rows.push_back(ui::Toggle(L"commands", L"Run what I type",
+        L"Anything that looks like a path, a web address or a command line is offered to "
+        L"run exactly as typed.",
+        &e.searchCommands, &s.searchCommands));
 
-            HWND list = GetDlgItem(page, IDC_SRCH_FOLDERS);
-            if (list) {
-                ListView_SetExtendedListViewStyle(
-                    list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-                RECT r;
-                GetClientRect(list, &r);
-                LVCOLUMNW col = {};
-                col.mask = LVCF_WIDTH | LVCF_TEXT;
-                col.cx   = r.right - GetSystemMetrics(SM_CXVSCROLL) - 4;
-                col.pszText = const_cast<wchar_t*>(L"Folder");
-                ListView_InsertColumn(list, 0, &col);
-            }
-
-            for (int depth : kDepths) {
-                wchar_t label[32];
-                swprintf_s(label, L"%d folders", depth);
-                SendDlgItemMessageW(page, IDC_SRCH_DEPTH, CB_ADDSTRING, 0,
-                                    (LPARAM)label);
-            }
-            for (int cap : kEntryCaps) {
-                wchar_t label[32];
-                swprintf_s(label, L"%d items", cap);
-                SendDlgItemMessageW(page, IDC_SRCH_MAXENTRIES, CB_ADDSTRING, 0,
-                                    (LPARAM)label);
-            }
-            return TRUE;
-        }
-
-        case WM_COMMAND:
-            switch (LOWORD(wp)) {
-                case IDC_SRCH_ADD:      AddFolder(page); return TRUE;
-                case IDC_SRCH_REMOVE:   RemoveFolder(page); return TRUE;
-                case IDC_SRCH_DEFAULTS:
-                    g_editFolders.clear();
-                    FillFolderList(page);
-                    UpdateEnabling(page);
-                    return TRUE;
-                case IDC_SRCH_REINDEX:
-                    // Deliberately works on what is saved, not on what is on
-                    // screen: re-walking for settings the user has not applied
-                    // would build an index that does not match anything.
-                    SearchReindex();
-                    UpdateStatus(page);
-                    return TRUE;
-                case IDC_SRCH_DRIVES:
-                    if (HIWORD(wp) == BN_CLICKED) UpdateDriveList(page);
-                    return TRUE;
-                case IDC_SRCH_FILES:
-                    if (HIWORD(wp) == BN_CLICKED) UpdateEnabling(page);
-                    return TRUE;
-                case IDC_SRCH_CALC:
-                case IDC_SRCH_COMMANDS:
-                    if (HIWORD(wp) == BN_CLICKED) UpdateHint(page);
-                    return TRUE;
-                default:
-                    break;
-            }
-            break;
-
-        case WM_NOTIFY:
-            if (((LPNMHDR)lp)->idFrom == IDC_SRCH_FOLDERS &&
-                ((LPNMHDR)lp)->code == NM_DBLCLK) {
-                RemoveFolder(page);
-                return TRUE;
-            }
-            break;
-
-        default:
-            break;
+    rows.push_back(ui::Section(L"Programs"));
+    rows.push_back(ui::Toggle(L"programs", L"Programs without a shortcut",
+        L"Also finds programs that have no Start menu entry - a portable tool, a game "
+        L"unpacked into a folder - by walking Program Files and the like for .exe files.",
+        &e.searchPrograms, &s.searchPrograms));
+    {
+        const std::wstring drives = FixedDrives();
+        Row r = ui::Toggle(L"drives", L"Every drive",
+            L"Looks for programs on every fixed drive, not only the one Windows is on - "
+            L"where games and anything large usually live." +
+            (drives.empty() ? std::wstring() : L"\r\n\r\nFixed drives on this PC: " + drives + L"."),
+            &e.searchDrives, &s.searchDrives);
+        r.enabled = []() { return Edit().searchPrograms; };
+        rows.push_back(r);
+        Row h = ui::Toggle(L"deepexe", L"Helper programs too",
+            L"Includes the helper .exe files that apps ship to serve themselves - updaters, "
+            L"crash reporters, tools. Many more results, rarely what you meant.",
+            &e.searchDeepExe, &s.searchDeepExe);
+        h.enabled = []() { return Edit().searchPrograms; };
+        rows.push_back(h);
     }
-    return FALSE;
+
+    rows.push_back(ui::Section(L"File index"));
+    {
+        std::vector<int> depths(std::begin(kDepths), std::end(kDepths));
+        std::vector<std::wstring> names;
+        for (int d : kDepths) names.push_back(std::to_wstring(d) + L" levels");
+        Row r = ui::ChoiceOf(L"depth", L"Folder depth",
+            L"How many folders deep below each indexed folder to look. Deeper finds more "
+            L"and takes longer; past eight you are indexing build output, not documents.",
+            &e.searchDepth, &s.searchDepth, depths, names);
+        r.enabled = files;
+        rows.push_back(r);
+    }
+    {
+        std::vector<int> caps(std::begin(kEntryCaps), std::end(kEntryCaps));
+        std::vector<std::wstring> names;
+        for (int c : kEntryCaps) names.push_back(Thousands(c) + L" items");
+        Row r = ui::ChoiceOf(L"maxentries", L"Index size limit",
+            L"The most files and folders kept in the index. Each costs about 300 bytes of "
+            L"memory for as long as ProWindows runs.",
+            &e.searchMaxEntries, &s.searchMaxEntries, caps, names);
+        r.enabled = files;
+        rows.push_back(r);
+    }
+    {
+        Row r = ui::Toggle(L"hidden", L"Hidden files",
+            L"Indexes hidden and system files too.", &e.searchHidden, &s.searchHidden);
+        r.enabled = files;
+        rows.push_back(r);
+    }
+    {
+        Row r = ui::Info(L"status", L"Index",
+            L"What is in the index now. It reflects the saved settings, not changes that "
+            L"have not been applied.",
+            []() -> std::wstring {
+                if (!Saved().searchFiles) return L"Off";
+                if (!SearchIndexReady()) return L"Indexing...";
+                const int n = SearchIndexCount();
+                return Thousands(n) + L" items  \x00B7  " +
+                       std::to_wstring((std::max)(1, n * 300 / (1024 * 1024))) + L" MB";
+            });
+        rows.push_back(r);
+        Row a = ui::Action(L"reindex", L"Rebuild the index",
+            L"Walks the indexed folders again from scratch. Uses the saved settings: apply "
+            L"first if you have changed them.",
+            L"Rebuild", []() { SearchReindex(); SettingsToast(L"Rebuilding the file index"); });
+        a.enabled = []() { return Saved().searchFiles; };
+        rows.push_back(a);
+    }
+
+    rows.push_back(ui::Section(L"Folders to index"));
+    const bool defaults = e.searchFolders.empty();
+    const std::vector<std::wstring> shown = defaults ? SearchDefaultFolders() : e.searchFolders;
+    for (size_t i = 0; i < shown.size(); ++i) {
+        const std::wstring folder = shown[i];
+        Row r;
+        r.kind   = ui::Kind::Item;
+        r.id     = L"folder:" + ToLower(folder);
+        const size_t slash = folder.find_last_of(L"\\/");
+        r.label  = (slash != std::wstring::npos && slash + 1 < folder.size()) ? folder.substr(slash + 1) : folder;
+        r.detail = folder;
+        r.raw    = true;
+        r.enabled = files;
+        if (defaults) {
+            r.kind  = ui::Kind::Info;
+            r.value = []() { return std::wstring(L"Default"); };
+            r.help  = folder + L"\r\n\r\nOne of the default folders. Add a folder of your own "
+                      L"and the list becomes yours to edit.";
+        } else {
+            r.button = L"Remove";
+            r.help   = folder + L"\r\n\r\nDelete takes it off the list.";
+            r.remove = [folder]() {
+                auto& list = Edit().searchFolders;
+                for (size_t k = 0; k < list.size(); ++k)
+                    if (IEquals(list[k], folder)) { list.erase(list.begin() + (ptrdiff_t)k); break; }
+                SettingsRebuild();
+            };
+        }
+        rows.push_back(r);
+    }
+    {
+        Row r = ui::Action(L"addfolder", L"Add a folder",
+            L"Adds a folder to index. The first one you add replaces the defaults; the "
+            L"default folders can be put back below.",
+            L"Browse", []() {
+                std::wstring folder;
+                if (!BrowseForFolder(SettingsHwnd(), &folder) || folder.empty()) return;
+                auto& list = Edit().searchFolders;
+                for (const auto& have : list) if (IEquals(have, folder)) return;
+                list.push_back(folder);
+                SettingsRebuild();
+            });
+        r.enabled = files;
+        rows.push_back(r);
+        Row d = ui::Action(L"defaultfolders", L"Use the default folders",
+            L"Goes back to indexing Desktop, Documents, Downloads, Pictures, Music and "
+            L"Videos - wherever Windows keeps them for you.",
+            L"Restore", []() { Edit().searchFolders.clear(); SettingsRebuild(); });
+        d.enabled = []() { return Edit().searchFiles && !Edit().searchFolders.empty(); };
+        rows.push_back(d);
+    }
 }
 
-void PageSearchLoad(HWND page) {
-    const Config& cfg = AppConfig();
-
-    SetCheck(page, IDC_SRCH_FILES,    cfg.searchFiles);
-    SetCheck(page, IDC_SRCH_SETTINGS, cfg.searchSettings);
-    SetCheck(page, IDC_SRCH_CALC,     cfg.searchCalc);
-    SetCheck(page, IDC_SRCH_COMMANDS, cfg.searchCommands);
-    SetCheck(page, IDC_SRCH_HIDDEN,   cfg.searchHidden);
-    SetCheck(page, IDC_SRCH_DRIVES,   cfg.searchDrives);
-    SetCheck(page, IDC_SRCH_DEEPEXE,  cfg.searchDeepExe);
-
-    g_editFolders = cfg.searchFolders;
-    FillFolderList(page);
-
-    // Nearest offered value at or above what is configured, so a hand-edited
-    // number in the file never silently becomes something smaller.
-    int depthSel = (int)ARRAYSIZE(kDepths) - 1;
-    for (int i = 0; i < (int)ARRAYSIZE(kDepths); ++i)
-        if (kDepths[i] >= cfg.searchDepth) { depthSel = i; break; }
-    SendDlgItemMessageW(page, IDC_SRCH_DEPTH, CB_SETCURSEL, (WPARAM)depthSel, 0);
-
-    int capSel = (int)ARRAYSIZE(kEntryCaps) - 1;
-    for (int i = 0; i < (int)ARRAYSIZE(kEntryCaps); ++i)
-        if (kEntryCaps[i] >= cfg.searchMaxEntries) { capSel = i; break; }
-    SendDlgItemMessageW(page, IDC_SRCH_MAXENTRIES, CB_SETCURSEL, (WPARAM)capSel, 0);
-
-    UpdateHint(page);
-    UpdateEnabling(page);
-}
-
-void PageSearchSave(HWND page) {
-    Config& cfg = AppConfig();
-
-    cfg.searchFiles    = GetCheck(page, IDC_SRCH_FILES);
-    cfg.searchSettings = GetCheck(page, IDC_SRCH_SETTINGS);
-    cfg.searchCalc     = GetCheck(page, IDC_SRCH_CALC);
-    cfg.searchCommands = GetCheck(page, IDC_SRCH_COMMANDS);
-    cfg.searchHidden   = GetCheck(page, IDC_SRCH_HIDDEN);
-    cfg.searchDrives   = GetCheck(page, IDC_SRCH_DRIVES);
-    cfg.searchDeepExe  = GetCheck(page, IDC_SRCH_DEEPEXE);
-    cfg.searchFolders  = g_editFolders;
-
-    const int depthSel = (int)SendDlgItemMessageW(page, IDC_SRCH_DEPTH,
-                                                  CB_GETCURSEL, 0, 0);
-    if (depthSel >= 0 && depthSel < (int)ARRAYSIZE(kDepths))
-        cfg.searchDepth = kDepths[depthSel];
-
-    const int capSel = (int)SendDlgItemMessageW(page, IDC_SRCH_MAXENTRIES,
-                                                CB_GETCURSEL, 0, 0);
-    if (capSel >= 0 && capSel < (int)ARRAYSIZE(kEntryCaps))
-        cfg.searchMaxEntries = kEntryCaps[capSel];
+void ResetSearchPage() {
+    Config d;
+    d.LoadDefaults();
+    Config& e = Edit();
+    e.searchFiles = d.searchFiles;       e.searchSettings = d.searchSettings;
+    e.searchCalc = d.searchCalc;         e.searchCommands = d.searchCommands;
+    e.searchHidden = d.searchHidden;     e.searchDepth = d.searchDepth;
+    e.searchMaxEntries = d.searchMaxEntries;
+    e.searchFolders = d.searchFolders;   e.searchPrograms = d.searchPrograms;
+    e.searchDrives = d.searchDrives;     e.searchDeepExe = d.searchDeepExe;
 }
 
 } // namespace awa

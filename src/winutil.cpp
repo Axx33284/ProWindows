@@ -136,7 +136,29 @@ bool IsOnCurrentVirtualDesktop(HWND h) {
 
     BOOL onCurrent = TRUE;
     if (FAILED(vdm->IsWindowOnCurrentVirtualDesktop(h, &onCurrent))) return true;
-    return onCurrent != FALSE;
+    if (onCurrent || IsCloaked(h)) return onCurrent != FALSE;
+
+    // "Not on this desktop" about a window DWM is drawing. Windows on another
+    // virtual desktop are cloaked, so the object and the screen disagree - and
+    // the object is the one kept for the whole session. A copy of it that had
+    // gone wrong turned every new Brave window away, silently, until the
+    // tiler was restarted. Ask a fresh one before believing it.
+    vdm->Release();
+    vdm = nullptr;
+    IVirtualDesktopManager* fresh = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_VirtualDesktopManager, nullptr, CLSCTX_ALL,
+                                IID_PPV_ARGS(&fresh)))) {
+        // The same back-off as the first attempt, or every window event
+        // until the shell answers pays for another activation.
+        retryAt = GetTickCount64() + 5000;
+        return true;
+    }
+    vdm = fresh;
+    BOOL again = TRUE;
+    if (FAILED(vdm->IsWindowOnCurrentVirtualDesktop(h, &again))) again = TRUE;
+    AWA_LOG(L"virtual desktop manager said %p is elsewhere; a fresh one says %s",
+            (void*)h, again ? L"here (the old one was stale)" : L"elsewhere too");
+    return again != FALSE;
 }
 
 Rect VisibleRect(HWND h) {
@@ -595,66 +617,70 @@ static bool ContainsAny(const std::vector<std::wstring>& list, const std::wstrin
     return false;
 }
 
-ManageVerdict Classify(HWND h, const Config& cfg, IgnoreReason* why) {
+ManageVerdict Classify(HWND h, const Config& cfg, IgnoreReason* why,
+                       const wchar_t** rule) {
     // Written out at every rejection rather than set once at the top, so a new
-    // rule cannot be added without deciding which kind of "no" it is.
-    const auto ignore = [&](IgnoreReason reason) {
-        if (why) *why = reason;
+    // rule cannot be added without deciding which kind of "no" it is - or
+    // without naming it.
+    const auto ignore = [&](IgnoreReason reason, const wchar_t* name) {
+        if (why)  *why  = reason;
+        if (rule) *rule = name;
         return ManageVerdict::Ignore;
     };
-    if (why) *why = IgnoreReason::None;
+    if (why)  *why  = IgnoreReason::None;
+    if (rule) *rule = L"";
 
-    if (!h || !IsWindow(h))                    return ignore(IgnoreReason::Permanent);
+    if (!h || !IsWindow(h))                    return ignore(IgnoreReason::Permanent, L"not a window");
     // Asked before visibility, deliberately. A child window is never going to
     // become a top-level one, and EVENT_OBJECT_SHOW arrives for every child
     // an application shows - a control, a tooltip, a tab strip - usually
     // while its parent is still hidden. Testing visibility first put every one
     // of those on the pending list for two seconds of second looks, which on a
     // busy desktop kept TIMER_PENDING ticking for nothing.
-    if (GetAncestor(h, GA_ROOT) != h)          return ignore(IgnoreReason::Permanent);
+    if (GetAncestor(h, GA_ROOT) != h)          return ignore(IgnoreReason::Permanent, L"not top-level");
     // A window that has been created but not shown yet. Ordinary during
     // startup of almost any application.
-    if (!IsWindowVisible(h))                   return ignore(IgnoreReason::Transient);
+    if (!IsWindowVisible(h))                   return ignore(IgnoreReason::Transient, L"not visible");
 
     // Never manage our own settings window.
     DWORD ownPid = 0;
     GetWindowThreadProcessId(h, &ownPid);
-    if (ownPid == GetCurrentProcessId())       return ignore(IgnoreReason::Permanent);
+    if (ownPid == GetCurrentProcessId())       return ignore(IgnoreReason::Permanent, L"our own");
 
     const LONG style = GetWindowLongW(h, GWL_STYLE);
     const LONG ex    = GetWindowLongW(h, GWL_EXSTYLE);
 
-    if (style & WS_CHILD)                      return ignore(IgnoreReason::Permanent);
-    if (ex & WS_EX_TOOLWINDOW)                 return ignore(IgnoreReason::Permanent);
-    if (ex & WS_EX_NOACTIVATE)                 return ignore(IgnoreReason::Permanent);
+    if (style & WS_CHILD)                      return ignore(IgnoreReason::Permanent, L"WS_CHILD");
+    if (ex & WS_EX_TOOLWINDOW)                 return ignore(IgnoreReason::Permanent, L"WS_EX_TOOLWINDOW");
+    if (ex & WS_EX_NOACTIVATE)                 return ignore(IgnoreReason::Permanent, L"WS_EX_NOACTIVATE");
     // DWM cloaks a window while it opens, and for the whole time it sits on
     // another virtual desktop. Both end.
-    if (IsCloaked(h))                          return ignore(IgnoreReason::Transient);
+    if (IsCloaked(h))                          return ignore(IgnoreReason::Transient, L"cloaked");
 
     const std::wstring cls = WindowClass(h);
-    if (MatchesAny(BuiltinIgnoreClass(), cls)) return ignore(IgnoreReason::Permanent);
-    if (MatchesAny(cfg.ignoreClass, cls))      return ignore(IgnoreReason::Permanent);
+    if (MatchesAny(BuiltinIgnoreClass(), cls)) return ignore(IgnoreReason::Permanent, L"built-in ignored class");
+    if (MatchesAny(cfg.ignoreClass, cls))      return ignore(IgnoreReason::Permanent, L"ignore_class");
 
     const std::wstring title = WindowTitle(h);
     // The single most common reason a real window is turned away: Electron,
     // Chrome, Qt and JetBrains applications all create the window first and
     // set its title on a later turn of their message pump.
-    if (title.empty())                         return ignore(IgnoreReason::Transient);
+    if (title.empty())                         return ignore(IgnoreReason::Transient, L"no title");
     // A title the user asked to ignore. Titles change, so this is not final -
     // but EVENT_OBJECT_NAMECHANGE re-examines the window when it does, which
     // is cheaper than keeping it on a retry list.
-    if (ContainsAny(cfg.ignoreTitle, title))   return ignore(IgnoreReason::Permanent);
+    if (ContainsAny(cfg.ignoreTitle, title))   return ignore(IgnoreReason::Permanent, L"ignore_title");
 
     const std::wstring proc = ProcessName(h);
-    if (MatchesAny(BuiltinIgnoreProcess(), proc)) return ignore(IgnoreReason::Permanent);
-    if (MatchesAny(cfg.ignoreProcess, proc))   return ignore(IgnoreReason::Permanent);
+    if (MatchesAny(BuiltinIgnoreProcess(), proc)) return ignore(IgnoreReason::Permanent, L"built-in ignored process");
+    if (MatchesAny(cfg.ignoreProcess, proc))   return ignore(IgnoreReason::Permanent, L"ignore_process");
 
     // Anything covering a whole monitor with no title bar is a game, a video
     // player or a presentation. Touching one of those is at best pointless and
     // at worst throws it out of exclusive fullscreen, so it is never managed -
     // not tiled, not floated, not even given a DWM border. Transient because a
     // window created borderless-maximised briefly looks exactly like one.
-    if (IsFullscreenWindow(h))                 return ignore(IgnoreReason::Transient);
+    if (IsFullscreenWindow(h))                 return ignore(IgnoreReason::Transient, L"fullscreen");
 
     // A window at a higher integrity level cannot be moved by us at all: UIPI
     // refuses the SetWindowPos and reports nothing. Reserving a tile for one
@@ -675,6 +701,13 @@ ManageVerdict Classify(HWND h, const Config& cfg, IgnoreReason* why) {
     if (GetWindow(h, GW_OWNER) != nullptr)     return ManageVerdict::Float;
 
     return ManageVerdict::Tile;
+}
+
+bool ExcludedByUser(HWND h, const Config& cfg) {
+    if (!h || !IsWindow(h)) return false;
+    return MatchesAny(cfg.ignoreClass, WindowClass(h)) ||
+           MatchesAny(cfg.ignoreProcess, ProcessName(h)) ||
+           ContainsAny(cfg.ignoreTitle, WindowTitle(h));
 }
 
 // ---------------------------------------------------------------- mutation

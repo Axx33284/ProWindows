@@ -40,23 +40,28 @@ void AddRoundedPath(GraphicsPath* path, const RectF& r, float radius) {
 struct FaceSpec { const wchar_t* family; INT style; };
 
 const FontFamily* FamilyFor(ClockFace face) {
-    static const FontFamily* cache[6] = {};
+    static const FontFamily* cache[CLOCK_FACE_COUNT] = {};
     const int i = (int)face;
-    if (i < 0 || i >= 6) return FamilyFor(CLOCK_FACE_REGULAR);
+    if (i < 0 || i >= CLOCK_FACE_COUNT) return FamilyFor(CLOCK_FACE_REGULAR);
     if (cache[i]) return cache[i];
 
-    static const wchar_t* const kNames[6] = {
+    static const wchar_t* const kNames[CLOCK_FACE_COUNT] = {
         L"Segoe UI Light", L"Segoe UI", L"Segoe UI Semibold",
         L"Consolas", L"Bahnschrift SemiBold Condensed", L"Georgia",
+        L"Bahnschrift Light",
     };
     FontFamily* f = new FontFamily(kNames[i]);
     if (!f->IsAvailable()) {
         delete f;
-        // The condensed face has a second choice before the plain one: a
-        // narrow semibold keeps the game-menu look better than a light does.
+        // The two Bahnschrift faces have a second choice before the plain
+        // one: the family's regular weight keeps its shapes, which matter
+        // more to the look than the weight does.
         if (face == CLOCK_FACE_CONDENSED) {
             f = new FontFamily(L"Bahnschrift");
             if (!f->IsAvailable()) { delete f; f = new FontFamily(L"Segoe UI Semibold"); }
+        } else if (face == CLOCK_FACE_WIDE) {
+            f = new FontFamily(L"Bahnschrift");
+            if (!f->IsAvailable()) { delete f; f = new FontFamily(L"Segoe UI Light"); }
         } else {
             f = new FontFamily(L"Segoe UI");
         }
@@ -89,8 +94,8 @@ const Font* CachedFont(ClockFace face, float px, bool bold = false) {
     }
     // The tiles and the stacked digits ask for weight; a Light face has none
     // to give, so those take the Semibold family instead.
-    const FontFamily* family = FamilyFor((bold && face == CLOCK_FACE_LIGHT)
-                                         ? CLOCK_FACE_SEMIBOLD : face);
+    const bool light = (face == CLOCK_FACE_LIGHT || face == CLOCK_FACE_WIDE);
+    const FontFamily* family = FamilyFor((bold && light) ? CLOCK_FACE_SEMIBOLD : face);
     INT style = FontStyleRegular;
     // A face that is already a weight of its own (Light, Semibold) is not
     // emboldened further: GDI+ would synthesise a smeared bold. Regular and
@@ -297,9 +302,12 @@ struct Style {
     // The date face: the same family, except the condensed and serif faces
     // keep their character and the rest set the date in plain Segoe UI so
     // a light 60 px time is not paired with a light 12 px date nobody can read.
+    // The wide face takes its narrow sibling, which is what the game sets its
+    // small capitals in.
     const Font* D(float px) const {
-        const ClockFace face = (skin.face == CLOCK_FACE_CONDENSED || skin.face == CLOCK_FACE_SERIF ||
-                                skin.face == CLOCK_FACE_MONO) ? skin.face : CLOCK_FACE_REGULAR;
+        ClockFace face = (skin.face == CLOCK_FACE_CONDENSED || skin.face == CLOCK_FACE_SERIF ||
+                          skin.face == CLOCK_FACE_MONO) ? skin.face : CLOCK_FACE_REGULAR;
+        if (skin.face == CLOCK_FACE_WIDE) face = CLOCK_FACE_CONDENSED;
         return CachedFont(face, px * s, false);
     }
     void Put(const std::wstring& text, const Font* f, COLORREF c, float x, float y) const {

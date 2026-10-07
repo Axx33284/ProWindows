@@ -12,8 +12,30 @@ namespace {
 //              time, date, accent, dim, tile, glow, face, [bare]
 const ClockSkin kSkins[] = {
 {
+    L"frontline", L"Frontline",
+    L"The default, in the settings window's own look: thin wide digits on black glass "
+    L"inside a hairline, with an amber second hand.",
+    RGB(12, 13, 15), RGB(6, 7, 9), RGB(150, 156, 164), 150, 0, 0,
+    RGB(242, 244, 246), RGB(148, 154, 162), RGB(255, 176, 0),
+    RGB(46, 50, 56), RGB(18, 20, 24), 0, CLOCK_FACE_WIDE
+},
+{
+    L"holonet", L"Holonet",
+    L"Thin wide digits on dark glass, square, with a gold second hand.",
+    RGB(14, 18, 26), RGB(5, 7, 11), RGB(220, 228, 238), 70, 10, 0,
+    RGB(240, 244, 248), RGB(140, 152, 168), RGB(232, 190, 96),
+    RGB(46, 54, 66), RGB(16, 20, 28), 0, CLOCK_FACE_WIDE
+},
+{
+    L"hologram", L"Hologram",
+    L"A blue projection: glowing cyan digits on deep blue, square.",
+    RGB(6, 18, 32), RGB(2, 8, 16), RGB(110, 190, 255), 130, 0, 0,
+    RGB(150, 214, 255), RGB(86, 146, 196), RGB(210, 240, 255),
+    RGB(26, 58, 88), RGB(8, 22, 38), 60, CLOCK_FACE_WIDE
+},
+{
     L"midnight", L"Midnight",
-    L"The default. Near-black glass, white digits, a blue second hand.",
+    L"Near-black glass, white digits, a blue second hand.",
     RGB(26, 27, 33), RGB(18, 19, 23), RGB(70, 74, 84), 180, 26, 14,
     RGB(244, 245, 248), RGB(150, 155, 165), RGB(88, 140, 255),
     RGB(58, 61, 70), RGB(34, 36, 42), 0, CLOCK_FACE_LIGHT
@@ -34,7 +56,7 @@ const ClockSkin kSkins[] = {
 },
 {
     L"slayer", L"Slayer",
-    L"Gunmetal and hazard orange, condensed capitals. The DOOM one.",
+    L"Gunmetal and hazard orange in condensed capitals.",
     RGB(24, 26, 29), RGB(14, 15, 17), RGB(245, 146, 30), 150, 14, 3,
     RGB(245, 146, 30), RGB(196, 200, 206), RGB(214, 58, 42),
     RGB(62, 66, 72), RGB(32, 35, 39), 0, CLOCK_FACE_CONDENSED

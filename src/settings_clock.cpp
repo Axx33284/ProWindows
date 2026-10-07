@@ -1,168 +1,106 @@
-// ProWindows - the Clock page.
-//
-// Same contract as every other page: Load() pulls the live Config into the
-// controls, Save() pushes them back, and the preview draws whatever the
-// controls currently say through the clock's own painter.
+// ProWindows - the Clock page. Rows over the edit copy, like every other page,
+// and a preview drawn through the clock's own painter.
 #include "settings_internal.h"
 #include "clock.h"
 #include "clocktheme.h"
-#include "theme.h"
 
 namespace awa {
 
+using ui::Row;
+
 namespace {
-
-int SelectedSkin(HWND page) {
-    const int sel = (int)SendDlgItemMessageW(page, IDC_CLK_THEME, CB_GETCURSEL, 0, 0);
-    return (sel >= 0 && sel < ClockSkinCount()) ? sel : 0;
+bool On() { return Edit().clockEnabled; }
 }
 
-int SelectedStyle(HWND page) {
-    const int sel = (int)SendDlgItemMessageW(page, IDC_CLK_STYLE, CB_GETCURSEL, 0, 0);
-    return (sel >= 0 && sel < ClockStyleCount()) ? sel : 0;
-}
+void BuildClockPage(std::vector<Row>& rows) {
+    Config& e = Edit();
+    const Config& s = Saved();
+    auto add = [&](Row r) { r.enabled = On; rows.push_back(r); };
 
-ClockPreview PreviewFromPage(HWND page) {
-    ClockPreview look;
-    look.theme   = SelectedSkin(page);
-    look.style   = SelectedStyle(page);
-    look.opacity = (int)SendDlgItemMessageW(page, IDC_CLK_OPACITY, TBM_GETPOS, 0, 0);
-    look.hours24 = GetCheck(page, IDC_CLK_24H);
-    look.seconds = GetCheck(page, IDC_CLK_SECONDS);
-    look.date    = GetCheck(page, IDC_CLK_DATE);
-    look.weekday = GetCheck(page, IDC_CLK_WEEKDAY);
-    return look;
-}
+    rows.push_back(ui::Section(L"Clock"));
+    rows.push_back(ui::Toggle(L"enabled", L"Desktop clock",
+        L"A clock that sits on your screen in one of a dozen styles. Drag it anywhere; "
+        L"right-click it for all of this.", &e.clockEnabled, &s.clockEnabled));
+    add(ui::Toggle(L"pinned", L"Pin in place",
+        L"Locks it where it is: it cannot be dragged, and clicks go straight through to "
+        L"whatever is underneath.", &e.clockPinned, &s.clockPinned));
+    add(ui::Toggle(L"desktop", L"On the desktop",
+        L"Sits on the desktop behind every window instead of over them.",
+        &e.clockOnDesktop, &s.clockOnDesktop));
+    add(ui::Action(L"resetpos", L"Position", L"Puts the clock back in its corner. Takes effect at once.",
+        L"Reset", []() {
+            Config& cfg = AppConfig();
+            cfg.clockX = INT_MIN;
+            cfg.clockY = INT_MIN;
+            ClockApplyConfig();
+            AppSaveConfig();
+            SettingsToast(L"The clock is back in its corner");
+        }));
 
-void UpdateEnabling(HWND page) {
-    const bool on = GetCheck(page, IDC_CLK_ENABLED);
-    const int gated[] = { IDC_CLK_PINNED, IDC_CLK_DESKTOP, IDC_CLK_RESET_POS,
-                          IDC_CLK_STYLE, IDC_CLK_THEME, IDC_CLK_24H, IDC_CLK_SECONDS,
-                          IDC_CLK_DATE, IDC_CLK_WEEKDAY, IDC_CLK_OPACITY,
-                          IDC_CLK_SCALE, IDC_CLK_PREVIEW };
-    for (int id : gated) EnableWindow(GetDlgItem(page, id), on);
-}
-
-void UpdateLook(HWND page) {
-    SetDlgItemTextW(page, IDC_CLK_THEME_DESC, ClockSkinAt(SelectedSkin(page)).blurb);
-    SetDlgItemTextW(page, IDC_CLK_STYLE_DESC, ClockStyleAt(SelectedStyle(page)).blurb);
-    InvalidateRect(GetDlgItem(page, IDC_CLK_PREVIEW), nullptr, TRUE);
-}
-
-// The sample sits on a scrap of "desktop" so a translucent panel reads as
-// translucent, exactly as the monitor's preview does.
-void DrawPreview(const DRAWITEMSTRUCT* dis, HWND page) {
-    RECT r = dis->rcItem;
-    FillRect(dis->hDC, &r, theme::BrushPanel());
-    theme::Chamfer(dis->hDC, r, 8, theme::Bg, 255, theme::Border, 255);
-    RECT inner = { r.left + 6, r.top + 5, r.right - 6, r.bottom - 5 };
-    ClockDrawPreview(dis->hDC, inner, PreviewFromPage(page));
-}
-
-void ShowPercent(HWND page, int slider, int label) {
-    wchar_t buf[16];
-    swprintf_s(buf, L"%d%%", (int)SendDlgItemMessageW(page, slider, TBM_GETPOS, 0, 0));
-    SetDlgItemTextW(page, label, buf);
-}
-
-} // namespace
-
-void PageClockLoad(HWND page) {
-    const Config& cfg = AppConfig();
-    SetCheck(page, IDC_CLK_ENABLED, cfg.clockEnabled);
-    SetCheck(page, IDC_CLK_PINNED,  cfg.clockPinned);
-    SetCheck(page, IDC_CLK_DESKTOP, cfg.clockOnDesktop);
-    SetCheck(page, IDC_CLK_24H,     cfg.clockHours24);
-    SetCheck(page, IDC_CLK_SECONDS, cfg.clockSeconds);
-    SetCheck(page, IDC_CLK_DATE,    cfg.clockDate);
-    SetCheck(page, IDC_CLK_WEEKDAY, cfg.clockWeekday);
-    SendDlgItemMessageW(page, IDC_CLK_THEME, CB_SETCURSEL, (WPARAM)cfg.clockTheme, 0);
-    SendDlgItemMessageW(page, IDC_CLK_STYLE, CB_SETCURSEL, (WPARAM)cfg.clockStyle, 0);
-    SendDlgItemMessageW(page, IDC_CLK_OPACITY, TBM_SETPOS, TRUE, cfg.clockOpacity);
-    SendDlgItemMessageW(page, IDC_CLK_SCALE, TBM_SETPOS, TRUE, cfg.clockScale);
-    ShowPercent(page, IDC_CLK_OPACITY, IDC_CLK_OPACITY_VAL);
-    ShowPercent(page, IDC_CLK_SCALE, IDC_CLK_SCALE_VAL);
-    UpdateLook(page);
-    UpdateEnabling(page);
-}
-
-void PageClockSave(HWND page) {
-    Config& cfg = AppConfig();
-    cfg.clockEnabled   = GetCheck(page, IDC_CLK_ENABLED);
-    cfg.clockPinned    = GetCheck(page, IDC_CLK_PINNED);
-    cfg.clockOnDesktop = GetCheck(page, IDC_CLK_DESKTOP);
-    cfg.clockHours24   = GetCheck(page, IDC_CLK_24H);
-    cfg.clockSeconds   = GetCheck(page, IDC_CLK_SECONDS);
-    cfg.clockDate      = GetCheck(page, IDC_CLK_DATE);
-    cfg.clockWeekday   = GetCheck(page, IDC_CLK_WEEKDAY);
-    cfg.clockTheme     = SelectedSkin(page);
-    cfg.clockStyle     = SelectedStyle(page);
-    cfg.clockOpacity   = (int)SendDlgItemMessageW(page, IDC_CLK_OPACITY, TBM_GETPOS, 0, 0);
-    cfg.clockScale     = (int)SendDlgItemMessageW(page, IDC_CLK_SCALE, TBM_GETPOS, 0, 0);
-}
-
-INT_PTR CALLBACK PageClockProc(HWND page, UINT msg, WPARAM wp, LPARAM lp) {
-    INT_PTR themed = 0;
-    if (theme::DialogMessage(page, msg, wp, lp, &themed)) return themed;
-
-    switch (msg) {
-        case WM_INITDIALOG: {
-            theme::PrepareDialog(page);
-            for (int i = 0; i < ClockStyleCount(); ++i)
-                SendDlgItemMessageW(page, IDC_CLK_STYLE, CB_ADDSTRING, 0,
-                                    (LPARAM)ClockStyleAt(i).name);
-            for (int i = 0; i < ClockSkinCount(); ++i)
-                SendDlgItemMessageW(page, IDC_CLK_THEME, CB_ADDSTRING, 0,
-                                    (LPARAM)ClockSkinAt(i).name);
-            SendDlgItemMessageW(page, IDC_CLK_OPACITY, TBM_SETRANGE, TRUE,
-                                MAKELPARAM(20, 100));    // matches config.cpp
-            SendDlgItemMessageW(page, IDC_CLK_SCALE, TBM_SETRANGE, TRUE,
-                                MAKELPARAM(50, 250));
-            return TRUE;
-        }
-
-        case WM_DRAWITEM: {
-            auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
-            if (dis->CtlID == IDC_CLK_PREVIEW) { DrawPreview(dis, page); return TRUE; }
-            return FALSE;
-        }
-
-        case WM_HSCROLL:
-            if ((HWND)lp == GetDlgItem(page, IDC_CLK_OPACITY)) {
-                ShowPercent(page, IDC_CLK_OPACITY, IDC_CLK_OPACITY_VAL);
-                InvalidateRect(GetDlgItem(page, IDC_CLK_PREVIEW), nullptr, TRUE);
-            } else if ((HWND)lp == GetDlgItem(page, IDC_CLK_SCALE)) {
-                ShowPercent(page, IDC_CLK_SCALE, IDC_CLK_SCALE_VAL);
-            }
-            return TRUE;
-
-        case WM_COMMAND:
-            switch (LOWORD(wp)) {
-                case IDC_CLK_ENABLED:
-                    UpdateEnabling(page);
-                    return TRUE;
-                case IDC_CLK_24H:
-                case IDC_CLK_SECONDS:
-                case IDC_CLK_DATE:
-                case IDC_CLK_WEEKDAY:
-                    UpdateLook(page);
-                    return TRUE;
-                case IDC_CLK_THEME:
-                case IDC_CLK_STYLE:
-                    if (HIWORD(wp) == CBN_SELCHANGE) UpdateLook(page);
-                    return TRUE;
-                case IDC_CLK_RESET_POS: {
-                    Config& cfg = AppConfig();
-                    cfg.clockX = INT_MIN;
-                    cfg.clockY = INT_MIN;
-                    ClockApplyConfig();
-                    AppSaveConfig();
-                    return TRUE;
-                }
-            }
-            return FALSE;
+    rows.push_back(ui::Section(L"Look"));
+    {
+        Row r;
+        r.kind  = ui::Kind::Choice;
+        r.id    = L"style";
+        r.label = L"Style";
+        r.help  = ClockStyleAt(e.clockStyle).blurb;
+        for (int i = 0; i < ClockStyleCount(); ++i) r.options.push_back(ClockStyleAt(i).name);
+        r.get = []() { return (std::max)(0, (std::min)(ClockStyleCount() - 1, Edit().clockStyle)); };
+        r.set = [](int v) { Edit().clockStyle = v; };
+        r.modified = []() { return Edit().clockStyle != Saved().clockStyle; };
+        add(r);
     }
-    return FALSE;
+    {
+        Row r;
+        r.kind  = ui::Kind::Choice;
+        r.id    = L"theme";
+        r.label = L"Theme";
+        r.help  = ClockSkinAt(e.clockTheme).blurb;
+        for (int i = 0; i < ClockSkinCount(); ++i) r.options.push_back(ClockSkinAt(i).name);
+        r.get = []() { return (std::max)(0, (std::min)(ClockSkinCount() - 1, Edit().clockTheme)); };
+        r.set = [](int v) { Edit().clockTheme = v; };
+        r.modified = []() { return Edit().clockTheme != Saved().clockTheme; };
+        add(r);
+    }
+    add(ui::Slider(L"opacity", L"Opacity",
+        L"How solid the clock's panel is. Lower lets more of what is behind it show through.",
+        &e.clockOpacity, &s.clockOpacity, 20, 100, 1, 5, L"%"));
+    add(ui::Slider(L"scale", L"Size", L"The clock's size, as a share of its normal size.",
+        &e.clockScale, &s.clockScale, 50, 250, 1, 10, L"%"));
+
+    rows.push_back(ui::Section(L"What it shows"));
+    add(ui::Toggle(L"hours24", L"Hours", L"A 24-hour clock, or 12 hours with AM and PM.",
+        &e.clockHours24, &s.clockHours24, L"24-hour", L"12-hour"));
+    add(ui::Toggle(L"seconds", L"Seconds", L"Shows the seconds as well. The clock then wakes "
+        L"every second instead of every minute.", &e.clockSeconds, &s.clockSeconds));
+    add(ui::Toggle(L"date", L"Date", L"Shows the date under the time.", &e.clockDate, &s.clockDate));
+    add(ui::Toggle(L"weekday", L"Day of the week", L"Shows the day's name with the date.",
+        &e.clockWeekday, &s.clockWeekday));
+}
+
+void ResetClockPage() {
+    Config d;
+    d.LoadDefaults();
+    Config& e = Edit();
+    e.clockEnabled = d.clockEnabled;   e.clockPinned = d.clockPinned;
+    e.clockOnDesktop = d.clockOnDesktop;
+    e.clockTheme = d.clockTheme;       e.clockStyle = d.clockStyle;
+    e.clockHours24 = d.clockHours24;   e.clockSeconds = d.clockSeconds;
+    e.clockDate = d.clockDate;         e.clockWeekday = d.clockWeekday;
+    e.clockOpacity = d.clockOpacity;   e.clockScale = d.clockScale;
+}
+
+void PreviewClock(HDC dc, const RECT& area) {
+    const Config& e = Edit();
+    ClockPreview look;
+    look.theme   = e.clockTheme;
+    look.style   = e.clockStyle;
+    look.opacity = e.clockOpacity;
+    look.hours24 = e.clockHours24;
+    look.seconds = e.clockSeconds;
+    look.date    = e.clockDate;
+    look.weekday = e.clockWeekday;
+    ClockDrawPreview(dc, area, look);
 }
 
 } // namespace awa

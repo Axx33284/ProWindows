@@ -72,7 +72,16 @@ enum class IgnoreReason {
     Transient,   // might qualify shortly: no title yet, cloaked, not yet shown
 };
 
-ManageVerdict Classify(HWND h, const Config& cfg, IgnoreReason* why = nullptr);
+// `rule`, when asked for, names the check that turned the window away - a
+// string literal, so it can be kept and logged. "Why is this window not being
+// arranged?" had no answer from a running tiler before it.
+ManageVerdict Classify(HWND h, const Config& cfg, IgnoreReason* why = nullptr,
+                       const wchar_t** rule = nullptr);
+
+// Whether the user's own ignore_process / ignore_class / ignore_title rules
+// name this window. Unlike Classify, it says nothing about the window's state,
+// so it can be asked of a window that is hidden or minimised right now.
+bool ExcludedByUser(HWND h, const Config& cfg);
 
 // ---------------------------------------------------------------- fullscreen
 // True when `h` covers the whole of the monitor it is on (within a couple of

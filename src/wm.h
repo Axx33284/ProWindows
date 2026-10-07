@@ -126,6 +126,10 @@ public:
     // pass that has nothing left to do.
     bool RetilePending() const { return retilePending_; }
     void ApplyConfigChanged();
+    // Drops every size limit learned about the windows open now, so "restore
+    // every default" does not write them straight back into the config when
+    // those windows close.
+    void ForgetLearnedLimits();
 
     // ---- events ----------------------------------------------------------
     void OnWinEvent(DWORD event, HWND hwnd);
@@ -298,8 +302,9 @@ private:
     // window untiled until it is touched, so a rejection that might not last
     // buys the window a place here and a handful of second looks.
     struct Pending {
-        int       tries   = 0;
-        ULONGLONG firstAt = 0;
+        int            tries   = 0;
+        ULONGLONG      firstAt = 0;
+        const wchar_t* rule    = L"";   // why the last look said no
     };
     std::unordered_map<HWND, Pending> pending_;
 
@@ -311,8 +316,14 @@ private:
     static constexpr UINT kPendingIntervalMs = 200;
     static constexpr size_t kMaxPending      = 64;
 
-    void WatchForLater(HWND h);   // remember a window worth a second look
+    void WatchForLater(HWND h, const wchar_t* rule);   // worth a second look
     void ForgetPending(HWND h);
+
+    // One log line saying why a window that looks like an application window
+    // was turned away, once per window. Without it the log said nothing at all
+    // and "it will not arrange Brave" could only be diagnosed from outside.
+    std::unordered_set<HWND> explained_;
+    void ExplainSkip(HWND h, const wchar_t* rule);
 public:
     void RetryPending();          // driven by TIMER_PENDING
 private:
@@ -436,6 +447,15 @@ private:
     void SetHidden(ManagedWindow* mw, bool hidden);
 
     HWND FocusedManaged();
+    // The foreground window when it is an ordinary application window this
+    // manager does not arrange - an excluded app, the settings window - else
+    // nullptr. While one of those has the keyboard, "the focused window" is
+    // that one, not the managed window that had focus before it.
+    HWND ForeignForeground() const;
+    // The window a shortcut that changes "the focused window" should act on:
+    // FocusedManaged(), unless a foreign window is in front, in which case
+    // nothing - never a window the user is not looking at.
+    HWND ActionTarget();
     void FocusAndRemember(HWND h);
     HWND FindNeighbour(HWND from, Dir d);
 
@@ -485,6 +505,10 @@ private:
     HWND     msgWnd_       = nullptr;
     Config*  cfg_          = nullptr;
     bool     tilingEnabled_ = true;
+    // tiling_enabled as the config last said it. A reload applies the file's
+    // value only when that changed, so pausing from the tray or a shortcut is
+    // not undone by the next Apply in the settings window.
+    bool     cfgTiling_ = true;
     bool     gapsEnabled_   = true;
     bool     shutdown_      = false;   // Shutdown() has already run
     int      activeMonitor_ = 0;

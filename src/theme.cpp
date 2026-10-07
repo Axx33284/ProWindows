@@ -1,218 +1,70 @@
+// ProWindows - the look. See theme.h for what it is modelled on.
 #include "theme.h"
+#include "config.h"
 #include "winutil.h"
 #include <objidl.h>
+#include <cmath>
 // GDI+ headers use bare min/max, which NOMINMAX removes. Feed them the
 // std:: versions rather than re-enabling the Windows macros.
 #include <algorithm>
 using std::min;
 using std::max;
 #include <gdiplus.h>
-#include <windowsx.h>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "msimg32.lib")
-#pragma comment(lib, "uxtheme.lib")     // SetWindowTheme
 
 namespace awa {
 namespace theme {
 
-// Defined further down, next to the card bookkeeping.
-static bool OnCard(HWND dlg, HWND control, RECT* cardRect);
-static bool InHeader(HWND dlg, HWND control);
-// Whatever surface a control is sitting on, so its own painting can start
-// from the same colour instead of punching a rectangle out of the page.
-static HBRUSH Backdrop(HWND dlg, HWND control);
-// Fills `r` on `dc` with whatever `control` sits on, grain included and in
-// phase with the window around it. The one way a control's background is
-// painted by hand.
-static void FillBackdrop(HDC dc, const RECT& r, HWND dlg, HWND control);
-
 namespace {
 
 ULONG_PTR g_gdiplusToken = 0;
-HFONT  g_ui = nullptr, g_bold = nullptr, g_title = nullptr, g_small = nullptr,
-       g_number = nullptr, g_heading = nullptr, g_display = nullptr;
-HBRUSH g_bgBrush = nullptr, g_panelBrush = nullptr, g_fieldBrush = nullptr;
 
-// The grain. A pattern brush of the background colour with one diagonal
-// hairline a few counts lighter across every 8 px tile - the faint texture
-// under the game's menus, and what stops a black window reading as a black
-// rectangle. It is a GDI pattern brush rather than a GDI+ hatch because
-// every control erases its own background with the brush WM_CTLCOLOR hands
-// it, and a pattern brush can be phased (SetBrushOrgEx) so the lines run
-// straight through every control instead of breaking at its edges.
-HBITMAP g_grainBmp   = nullptr;
-HBRUSH  g_grainBrush = nullptr;
-constexpr int kGrainTile = 8;
-
-void BuildGrain() {
-    if (g_grainBrush) return;
-    // Bg lit by about 3.5% white on the line. Pixels are 0x00BBGGRR in a
-    // 32-bit DIB; the alpha byte is ignored by a pattern brush.
-    const DWORD r = (DWORD)(Bg & 0xFF), g = (DWORD)((Bg >> 8) & 0xFF), b = (DWORD)((Bg >> 16) & 0xFF);
-    const DWORD base = (r << 16) | (g << 8) | b;
-    const DWORD lit  = ((r + 8) << 16) | ((g + 8) << 8) | (b + 8);
-    DWORD px[kGrainTile * kGrainTile];
-    for (int y = 0; y < kGrainTile; ++y)
-        for (int x = 0; x < kGrainTile; ++x)
-            px[y * kGrainTile + x] = (((x + y) % kGrainTile) == 0) ? lit : base;
-    BITMAPINFO bi = {};
-    bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth       = kGrainTile;
-    bi.bmiHeader.biHeight      = -kGrainTile;
-    bi.bmiHeader.biPlanes      = 1;
-    bi.bmiHeader.biBitCount    = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    void* bits = nullptr;
-    HDC screen = GetDC(nullptr);
-    g_grainBmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    ReleaseDC(nullptr, screen);
-    if (g_grainBmp && bits) {
-        memcpy(bits, px, sizeof(px));
-        g_grainBrush = CreatePatternBrush(g_grainBmp);
-    }
-}
-
-// The brush origin that puts `wnd`'s grain in phase with the screen, so a
-// child's tile boundaries fall where its parent's do. Anchored to the screen
-// rather than to any window: then it holds across a dialog and its pages and
-// their controls alike, and moving the window only shifts a pattern nobody
-// can see the phase of.
-POINT GrainPhase(HWND wnd) {
-    POINT o = { 0, 0 };
-    ClientToScreen(wnd, &o);
-    return { ((-o.x) % kGrainTile + kGrainTile) % kGrainTile,
-             ((-o.y) % kGrainTile + kGrainTile) % kGrainTile };
-}
-
-void FillGrain(HDC dc, const RECT& r, HWND wnd) {
-    if (!g_grainBrush) { FillRect(dc, &r, g_bgBrush); return; }
-    const POINT ph = GrainPhase(wnd);
-    POINT old = {};
-    SetBrushOrgEx(dc, ph.x, ph.y, &old);
-    FillRect(dc, &r, g_grainBrush);
-    SetBrushOrgEx(dc, old.x, old.y, nullptr);
-}
-
-// The DPI everything above was built for. A per-monitor-v2 process gets its
-// dialogs laid out at the DPI of whichever monitor they open on, but a font
-// built from the screen DC is always at the *system* DPI - so on a 150% laptop
-// with a 100% external screen (or the other way round) every label was either
-// clipped or half the size of the box drawn round it. Fonts and hand-drawn
-// metrics now follow the window instead.
+// The DPI everything is currently drawn at. Each window points this at its own
+// DPI before it paints, so a per-monitor-v2 window on a 150% laptop screen and
+// the search bar on a 100% external one both come out the right size.
 UINT g_dpi = 96;
 
-// Which button the mouse is currently over, so hover can be drawn.
-HWND g_hotButton = nullptr;
-// Which tab the mouse is over, or -1. Tracked separately: a tab is an item
-// inside one control, not a window of its own.
-int  g_hotTab = -1;
-
-// BS_DEFPUSHBUTTON is lost when a button becomes owner-drawn, so the accent
-// ones are remembered here.
-std::unordered_set<HWND> g_primaryButtons;
-
-// ---------------------------------------------------------------- dark mode
-// Win32 has no public switch for this. `SetWindowTheme(L"DarkMode_Explorer")`
-// on its own does nothing to a list's scrollbars: the process has to have
-// opted in first, and the only way to opt in is by ordinal out of uxtheme.
-// Both are best-effort - on a build that does not have them the controls stay
-// exactly as they were, which is what they did before this existed.
-enum PreferredAppMode { AppModeDefault = 0, AllowDark = 1, ForceDark = 2 };
-
-using SetPreferredAppModeFn   = PreferredAppMode (WINAPI*)(PreferredAppMode);
-using AllowDarkModeForWindowFn = BOOL (WINAPI*)(HWND, BOOL);
-using FlushMenuThemesFn        = void (WINAPI*)();
-
-HMODULE UxTheme() {
-    static HMODULE dll = LoadLibraryExW(L"uxtheme.dll", nullptr,
-                                        LOAD_LIBRARY_SEARCH_SYSTEM32);
-    return dll;
-}
-
-void EnableProcessDarkMode() {
-    HMODULE ux = UxTheme();
-    if (!ux) return;
-    // 135 SetPreferredAppMode (1903+; on 1809 the same ordinal is the older
-    // AllowDarkModeForApp, which takes a BOOL - and 1 means the same thing to
-    // both, which is why this one call covers every build that has either).
-    auto setMode = (SetPreferredAppModeFn)GetProcAddress(ux, MAKEINTRESOURCEA(135));
-    // ForceDark, not AllowDark: AllowDark means "follow the system app-mode
-    // setting", and this application is dark whatever that setting says. On a
-    // machine set to light apps, AllowDark left every scrollbar white inside a
-    // black dialog.
-    if (setMode) setMode(ForceDark);
-    // 136 FlushMenuThemes, so the change reaches anything already themed.
-    auto flush = (FlushMenuThemesFn)GetProcAddress(ux, MAKEINTRESOURCEA(136));
-    if (flush) flush();
-}
-
-void AllowDarkModeForWindow(HWND wnd) {
-    HMODULE ux = UxTheme();
-    if (!ux || !wnd) return;
-    auto allow = (AllowDarkModeForWindowFn)GetProcAddress(ux, MAKEINTRESOURCEA(133));
-    if (allow) allow(wnd, TRUE);
-}
+inline int   Sc(int px)     { return MulDiv(px, (int)g_dpi, 96); }
+inline float ScF(float px)  { return px * (float)g_dpi / 96.0f; }
 
 Gdiplus::Color Argb(COLORREF c, BYTE a = 255) {
     return Gdiplus::Color(a, GetRValue(c), GetGValue(c), GetBValue(c));
 }
 
-// Corners cut at 45 degrees, top-left and bottom-right: the plate every
-// panel, button and field in the game's menus is drawn as.
-void AddChamferPath(Gdiplus::GraphicsPath* path, const Gdiplus::RectF& r, float cut) {
-    const float c = (std::min)(cut, (std::min)(r.Width, r.Height) / 2.5f);
-    if (c < 0.5f) { path->AddRectangle(r); return; }
-    const Gdiplus::PointF pts[6] = {
-        { r.X + c,          r.Y },
-        { r.GetRight(),     r.Y },
-        { r.GetRight(),     r.GetBottom() - c },
-        { r.GetRight() - c, r.GetBottom() },
-        { r.X,              r.GetBottom() },
-        { r.X,              r.Y + c },
-    };
-    path->AddPolygon(pts, 6);
+inline BYTE Lerp8(int a, int b, float t) {
+    const float v = (float)a + ((float)b - (float)a) * t;
+    return (BYTE)(v < 0.0f ? 0.0f : (v > 255.0f ? 255.0f : v + 0.5f));
 }
 
-void AddSlantPath(Gdiplus::GraphicsPath* path, const Gdiplus::RectF& r, float slant) {
-    const Gdiplus::PointF pts[4] = {
-        { r.X + slant,          r.Y },
-        { r.GetRight(),         r.Y },
-        { r.GetRight() - slant, r.GetBottom() },
-        { r.X,                  r.GetBottom() },
-    };
-    path->AddPolygon(pts, 4);
+// ---------------------------------------------------------------- dark mode
+// The one piece of system chrome left - the tray's popup menu and the odd
+// system dialog - follows the process's app mode, and the only way to set that
+// is by ordinal out of uxtheme. Best-effort: on a build without it the menus
+// simply stay light. MAP.md invariant 39.
+enum PreferredAppMode { AppModeDefault = 0, AllowDark = 1, ForceDark = 2 };
+using SetPreferredAppModeFn = PreferredAppMode (WINAPI*)(PreferredAppMode);
+using FlushMenuThemesFn     = void (WINAPI*)();
+
+void EnableProcessDarkMode() {
+    HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!ux) return;
+    // 135 SetPreferredAppMode (1903+; on 1809 the same ordinal takes a BOOL,
+    // and 1 or 2 means "dark" to both).
+    auto setMode = (SetPreferredAppModeFn)GetProcAddress(ux, MAKEINTRESOURCEA(135));
+    if (setMode) setMode(ForceDark);
+    auto flush = (FlushMenuThemesFn)GetProcAddress(ux, MAKEINTRESOURCEA(136));
+    if (flush) flush();
 }
 
-void AddRoundedPath(Gdiplus::GraphicsPath* path, const Gdiplus::Rect& r, int radius) {
-    const int d = radius * 2;
-    if (d <= 0) { path->AddRectangle(r); return; }
-    path->AddArc(r.X, r.Y, d, d, 180.0f, 90.0f);
-    path->AddArc(r.GetRight() - d, r.Y, d, d, 270.0f, 90.0f);
-    path->AddArc(r.GetRight() - d, r.GetBottom() - d, d, d, 0.0f, 90.0f);
-    path->AddArc(r.X, r.GetBottom() - d, d, d, 90.0f, 90.0f);
-    path->CloseFigure();
-}
-
-HFONT MakeFont(int points, int weight, UINT dpi, const wchar_t* face = L"Segoe UI") {
-    const int height = -MulDiv(points, (int)dpi, 72);
-
-    LOGFONTW lf = {};
-    lf.lfHeight  = height;
-    lf.lfWeight  = weight;
-    lf.lfCharSet = DEFAULT_CHARSET;
-    lf.lfQuality = CLEARTYPE_QUALITY;
-    wcscpy_s(lf.lfFaceName, face);
-    return CreateFontIndirectW(&lf);
-}
-
-// Whether a face is installed. GDI silently substitutes for a name it does
-// not know, and the substitute for a condensed face is a wide one, so the
-// heading font has to be checked rather than trusted.
+// ---------------------------------------------------------------- faces
+// Whether a face is installed. GDI silently substitutes for a name it does not
+// know, and the substitute for a condensed face is a wide one.
 bool FaceExists(const wchar_t* face) {
     LOGFONTW lf = {};
     lf.lfCharSet = DEFAULT_CHARSET;
-    wcscpy_s(lf.lfFaceName, face);
+    wcsncpy_s(lf.lfFaceName, face, _TRUNCATE);
     HDC dc = GetDC(nullptr);
     int found = 0;
     EnumFontFamiliesExW(dc, &lf, [](const LOGFONTW*, const TEXTMETRICW*, DWORD,
@@ -224,1173 +76,894 @@ bool FaceExists(const wchar_t* face) {
     return found != 0;
 }
 
-// The condensed capitals the headings are set in, or the closest thing this
-// machine has. Decided once.
-const wchar_t* HeadingFace() {
-    static const wchar_t* face = [] {
-        if (FaceExists(L"Bahnschrift SemiBold Condensed")) return L"Bahnschrift SemiBold Condensed";
-        if (FaceExists(L"Bahnschrift Condensed"))          return L"Bahnschrift Condensed";
-        if (FaceExists(L"Bahnschrift"))                    return L"Bahnschrift";
-        return L"Segoe UI Semibold";
-    }();
-    return face;
+// Bahnschrift's named instances are already the weight they say, so they are
+// asked for at normal; the plain family has to be asked for the weight.
+struct Face { const wchar_t* name; int weight; };
+
+Face Pick(std::initializer_list<Face> choices) {
+    for (const Face& f : choices)
+        if (FaceExists(f.name)) return f;
+    return { L"Segoe UI", FW_NORMAL };
 }
 
-// A length measured at 96 dpi, in the units the current window actually uses.
-// Every hand-drawn size in this file goes through here: the tick box, the combo
-// chevron, the card insets. Left as raw pixels they stayed the same size while
-// the dialog around them grew, which is what made the settings window look
-// wrong on any machine not running at 100%.
-inline int Sc(int px) { return MulDiv(px, (int)g_dpi, 96); }
-
-bool IsClass(HWND wnd, const wchar_t* name) {
-    wchar_t buf[64] = {};
-    GetClassNameW(wnd, buf, 64);
-    return _wcsicmp(buf, name) == 0;
+const Face& Strong() {      // SemiBold SemiCondensed: labels, values, buttons
+    static const Face f = Pick({ { L"Bahnschrift SemiBold SemiConden", FW_NORMAL },
+                                 { L"Bahnschrift SemiBold",            FW_NORMAL },
+                                 { L"Bahnschrift",                     FW_SEMIBOLD },
+                                 { L"Segoe UI Semibold",               FW_NORMAL } });
+    return f;
+}
+const Face& Plain() {       // SemiCondensed: the chosen word, captions
+    static const Face f = Pick({ { L"Bahnschrift SemiCondensed", FW_NORMAL },
+                                 { L"Bahnschrift",               FW_NORMAL },
+                                 { L"Segoe UI",                  FW_NORMAL } });
+    return f;
 }
 
-// ---------------------------------------------------------------- controls
-// Owner-drawn controls here all fill a background and then draw over it, which
-// on a plain window DC is two visible steps. Painting into a memory DC and
-// blitting once makes hover and focus changes silent.
-class Buffered {
-public:
-    Buffered(HDC target, const RECT& r) : target_(target), rect_(r) {
-        const int w = r.right - r.left, h = r.bottom - r.top;
-        if (w <= 0 || h <= 0) return;
-        mem_ = CreateCompatibleDC(target);
-        if (!mem_) return;
-        bmp_ = CreateCompatibleBitmap(target, w, h);
-        if (!bmp_) { DeleteDC(mem_); mem_ = nullptr; return; }
-        old_ = SelectObject(mem_, bmp_);
-        // Draw in the caller's coordinates; the bitmap starts at the rect.
-        SetViewportOrgEx(mem_, -r.left, -r.top, nullptr);
-    }
-
-    ~Buffered() {
-        if (!mem_) return;
-        SetViewportOrgEx(mem_, 0, 0, nullptr);
-        BitBlt(target_, rect_.left, rect_.top, rect_.right - rect_.left,
-               rect_.bottom - rect_.top, mem_, 0, 0, SRCCOPY);
-        SelectObject(mem_, old_);
-        DeleteObject(bmp_);
-        DeleteDC(mem_);
-    }
-
-    Buffered(const Buffered&) = delete;
-    Buffered& operator=(const Buffered&) = delete;
-
-    HDC dc() const { return mem_ ? mem_ : target_; }
-
-private:
-    HDC     target_;
-    RECT    rect_;
-    HDC     mem_ = nullptr;
-    HBITMAP bmp_ = nullptr;
-    HGDIOBJ old_ = nullptr;
-};
-
-// A 1px accent ring just inside `r`. Owner-drawn controls lose the system's
-// focus rectangle, and keyboard users need to see where they are.
-void FocusRing(HDC dc, const RECT& r, int radius) {
-    const int inset = (std::max)(1, Sc(2));
-    RECT ring = { r.left + inset, r.top + inset,
-                  r.right - inset, r.bottom - inset };
-    if (ring.right <= ring.left || ring.bottom <= ring.top) return;
-    (void)radius;
-    Chamfer(dc, ring, Sc(4), 0, 0, Accent, 200);
+HFONT MakeFont(int tenthsOfPoint, int weight, UINT dpi, const wchar_t* face) {
+    LOGFONTW lf = {};
+    lf.lfHeight  = -MulDiv(tenthsOfPoint, (int)dpi, 720);
+    lf.lfWeight  = weight;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    wcsncpy_s(lf.lfFaceName, face, _TRUNCATE);
+    return CreateFontIndirectW(&lf);
 }
 
-// Push buttons are owner-drawn: custom draw alone still lets the themed button
-// paint its own text underneath, which shows through as a ghost.
-void PaintButton(HWND button, HDC target, const RECT& rc, bool primary,
-                 bool disabled, bool pressed, bool focused) {
-    Buffered buffer(target, rc);
-    HDC dc = buffer.dc();
-    const bool hot = (button == g_hotButton);
+struct FontSet { HFONT f[(int)Font::Count] = {}; };
 
-    // A plate with cut corners. The primary one is the orange bar the game
-    // draws behind whatever is selected, with dark text on it; the others
-    // are dark plates that light up along the top when the pointer is over
-    // them.
-    COLORREF fill = primary ? Accent : PanelAlt;
-    COLORREF edge = primary ? Accent : Border;
-    if (disabled)     { fill = RGB(28, 30, 34); edge = RGB(44, 47, 52); }
-    else if (pressed) { fill = primary ? RGB(214, 122, 20) : RGB(24, 26, 30); }
-    else if (hot)     { fill = primary ? AccentHover : RGB(44, 48, 54); edge = primary ? AccentHover : TextDim; }
-
-    RECT r = rc;
-    FillBackdrop(dc, r, GetParent(button), button);
-    Chamfer(dc, r, Sc(6), fill, 255, edge, 255);
-
-    // A hairline of accent along the top of a hot secondary button, the way
-    // the game's plates catch a light when they are pointed at.
-    if (hot && !primary && !disabled) {
-        RECT lit = { r.left + Sc(7), r.top + 1, r.right - 1, r.top + 1 + (std::max)(1, Sc(2)) };
-        HBRUSH b = CreateSolidBrush(Accent);
-        FillRect(dc, &lit, b);
-        DeleteObject(b);
-    }
-
-    wchar_t text[256] = {};
-    GetWindowTextW(button, text, 256);
-    const std::wstring caps = Caps(text);
-
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, disabled ? TextDim : (primary ? AccentText : Text));
-    HGDIOBJ old = SelectObject(dc, g_heading);
-    DrawTextW(dc, caps.c_str(), -1, &r,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    SelectObject(dc, old);
-
-    if (focused && !disabled && !primary) FocusRing(dc, r, Sc(4));
-}
-
-void DrawCheckBox(HWND check, HDC target) {
-    const bool checked  = SendMessageW(check, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    const bool disabled = IsWindowEnabled(check) == FALSE;
-    const bool hot      = (check == g_hotButton);
-
-    RECT r;
-    GetClientRect(check, &r);
-    Buffered buffer(target, r);
-    HDC dc = buffer.dc();
-    FillBackdrop(dc, r, GetParent(check), check);
-
-    const int side = Sc(15);
-    RECT box = { r.left, r.top + (r.bottom - r.top - side) / 2,
-                 r.left + side, r.top + (r.bottom - r.top - side) / 2 + side };
-
-    COLORREF fill = checked ? Accent : Field;
-    COLORREF edge = checked ? Accent : Border;
-    if (disabled)  { fill = RGB(30, 32, 36); edge = RGB(46, 49, 54); }
-    else if (hot)  { fill = checked ? AccentHover : RGB(40, 44, 50); edge = checked ? AccentHover : TextDim; }
-    Chamfer(dc, box, Sc(4), fill, 255, edge, 255);
-
-    if (checked) {
-        Gdiplus::Graphics g(dc);
-        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        // The tick is described against a 15 px box and then scaled with it,
-        // so it stays centred instead of clinging to the top-left corner as
-        // the box grows.
-        const float k = (float)side / 15.0f;
-        Gdiplus::Pen pen(Argb(AccentText), 2.2f * k);
-        pen.SetStartCap(Gdiplus::LineCapRound);
-        pen.SetEndCap(Gdiplus::LineCapRound);
-        Gdiplus::PointF pts[3] = {
-            { box.left + 3.5f * k, box.top + 7.5f * k },
-            { box.left + 6.2f * k, box.top + 10.5f * k },
-            { box.left + 11.5f * k, box.top + 4.5f * k },
-        };
-        g.DrawLines(&pen, pts, 3);
-    }
-
-    wchar_t text[256] = {};
-    GetWindowTextW(check, text, 256);
-    RECT tr = { r.left + side + Sc(7), r.top, r.right, r.bottom };
-
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, disabled ? TextDim : Text);
-    HGDIOBJ old = SelectObject(dc, g_ui);
-    DrawTextW(dc, text, -1, &tr,
-              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-    SelectObject(dc, old);
-
-    if (!disabled && GetFocus() == check) {
-        RECT ring = { r.left - 1, r.top, r.right, r.bottom };
-        FocusRing(dc, ring, Sc(4));
-    }
-}
-
-// Combo boxes are painted end to end. Owner-draw only covers the item text;
-// the drop-down button beside it stays a light themed control otherwise, which
-// is the one piece of chrome that gives the dark theme away.
-void DrawCombo(HWND combo, HDC target) {
-    RECT r;
-    GetClientRect(combo, &r);
-    Buffered buffer(target, r);
-    HDC dc = buffer.dc();
-
-    const bool disabled = IsWindowEnabled(combo) == FALSE;
-    const bool hot      = (combo == g_hotButton);
-    const bool focused  = (GetFocus() == combo);
-
-    COLORREF fill = Field;
-    COLORREF edge = focused ? Accent : Border;
-    if (disabled) { fill = RGB(22, 24, 27); edge = RGB(44, 47, 52); }
-    else if (hot) { fill = RGB(36, 40, 45); if (!focused) edge = TextDim; }
-
-    FillBackdrop(dc, r, GetParent(combo), combo);
-    Chamfer(dc, r, Sc(5), fill, 255, edge, 255);
-
-    const int chevron = Sc(20);
-    wchar_t text[256] = {};
-    const int sel = (int)SendMessageW(combo, CB_GETCURSEL, 0, 0);
-    if (sel >= 0 && SendMessageW(combo, CB_GETLBTEXTLEN, sel, 0) < 256)
-        SendMessageW(combo, CB_GETLBTEXT, sel, (LPARAM)text);
-
-    RECT tr = { r.left + Sc(8), r.top, r.right - chevron, r.bottom };
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, disabled ? TextDim : Text);
-    HGDIOBJ old = SelectObject(dc, g_ui);
-    DrawTextW(dc, text, -1, &tr,
-              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-    SelectObject(dc, old);
-
-    // A solid triangle in the accent rather than a stroked chevron: the
-    // game's option rows mark their values with small filled arrows.
-    Gdiplus::Graphics g(dc);
-    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    const float k = (float)g_dpi / 96.0f;
-    const float cx = (float)(r.right - chevron / 2 - Sc(4));
-    const float cy = (float)((r.top + r.bottom) / 2);
-    Gdiplus::PointF arrow[3] = {
-        { cx - 4.0f * k, cy - 2.0f * k },
-        { cx + 4.0f * k, cy - 2.0f * k },
-        { cx,            cy + 3.0f * k },
-    };
-    Gdiplus::SolidBrush tri(Argb(disabled ? TextDim : Accent, 255));
-    g.FillPolygon(&tri, arrow, 3);
-}
-
-// Edit fields keep their frame in the non-client area, where WM_CTLCOLOREDIT
-// cannot reach it - so the border is redrawn here instead of being left as the
-// light themed one.
-LRESULT CALLBACK EditSubclass(HWND wnd, UINT msg, WPARAM wp, LPARAM lp,
-                              UINT_PTR, DWORD_PTR) {
-    switch (msg) {
-        case WM_NCPAINT: {
-            HDC dc = GetWindowDC(wnd);
-            if (dc) {
-                RECT r;
-                GetWindowRect(wnd, &r);
-                OffsetRect(&r, -r.left, -r.top);
-
-                RECT client = r;
-                const int edge = GetSystemMetrics(SM_CXEDGE);
-                InflateRect(&client, -edge, -GetSystemMetrics(SM_CYEDGE));
-                // Leave the text alone; only the frame ring is ours.
-                ExcludeClipRect(dc, client.left, client.top,
-                                client.right, client.bottom);
-                Chamfer(dc, r, Sc(4), Field, 255,
-                        GetFocus() == wnd ? Accent : Border, 255);
-                ReleaseDC(wnd, dc);
-            }
-            return 0;
-        }
-
-        case WM_SETFOCUS:
-        case WM_KILLFOCUS: {
-            const LRESULT result = DefSubclassProc(wnd, msg, wp, lp);
-            RedrawWindow(wnd, nullptr, nullptr, RDW_FRAME | RDW_INVALIDATE);
-            return result;
-        }
-    }
-    return DefSubclassProc(wnd, msg, wp, lp);
-}
-
-// A disabled list view paints its own background with the system window
-// colour and ignores ListView_SetBkColor entirely, so switching file search
-// off turned the folder list into a white rectangle in the middle of a dark
-// page. The control still greys its text for us; all it needs is to be told
-// what to erase to.
-LRESULT CALLBACK ListViewSubclass(HWND wnd, UINT msg, WPARAM wp, LPARAM lp,
-                                  UINT_PTR, DWORD_PTR) {
-    if (msg == WM_ERASEBKGND && !IsWindowEnabled(wnd)) {
-        RECT r;
-        GetClientRect(wnd, &r);
-        FillRect((HDC)wp, &r, g_panelBrush ? g_panelBrush : GetSysColorBrush(COLOR_BTNFACE));
-        return 1;
-    }
-    if (msg == WM_ENABLE) {
-        // The whole control has to be repainted either way: coming back it has
-        // to lose our fill, and going out it has to gain it.
-        const LRESULT result = DefSubclassProc(wnd, msg, wp, lp);
-        InvalidateRect(wnd, nullptr, TRUE);
-        return result;
-    }
-    // The column header is a child of the list, so its notifications come
-    // here and never reach the dialog. The dark-mode header Windows draws
-    // is grey-on-grey; this one is the same capitals the cards use.
-    if (msg == WM_NOTIFY) {
-        auto* hdr = reinterpret_cast<NMHDR*>(lp);
-        if (hdr->code == NM_CUSTOMDRAW && hdr->hwndFrom == ListView_GetHeader(wnd)) {
-            auto* cd = reinterpret_cast<NMCUSTOMDRAW*>(lp);
-            if (cd->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
-            if (cd->dwDrawStage == CDDS_ITEMPREPAINT) {
-                RECT r = cd->rc;
-                FillRect(cd->hdc, &r, g_panelBrush);
-                RECT rule = { r.left, r.bottom - 1, r.right, r.bottom };
-                HBRUSH b = CreateSolidBrush(Border);
-                FillRect(cd->hdc, &rule, b);
-                DeleteObject(b);
-
-                wchar_t text[128] = {};
-                HDITEMW item = {};
-                item.mask       = HDI_TEXT;
-                item.pszText    = text;
-                item.cchTextMax = 128;
-                Header_GetItem(hdr->hwndFrom, (int)cd->dwItemSpec, &item);
-                const std::wstring caps = Caps(text);
-                RECT tr = { r.left + Sc(6), r.top, r.right - Sc(4), r.bottom };
-                SetBkMode(cd->hdc, TRANSPARENT);
-                SetTextColor(cd->hdc, TextDim);
-                HGDIOBJ old = SelectObject(cd->hdc, g_heading);
-                DrawTextW(cd->hdc, caps.c_str(), -1, &tr,
-                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-                SelectObject(cd->hdc, old);
-                return CDRF_SKIPDEFAULT;
-            }
-        }
-    }
-    return DefSubclassProc(wnd, msg, wp, lp);
-}
-
-LRESULT CALLBACK ComboSubclass(HWND wnd, UINT msg, WPARAM wp, LPARAM lp,
-                               UINT_PTR, DWORD_PTR) {
-    switch (msg) {
-        case WM_ERASEBKGND:
-            return 1;
-
-        case WM_PAINT: {
-            PAINTSTRUCT ps;
-            HDC dc = BeginPaint(wnd, &ps);
-            DrawCombo(wnd, dc);
-            EndPaint(wnd, &ps);
-            return 0;
-        }
-
-        case WM_MOUSEMOVE:
-            if (g_hotButton != wnd) {
-                HWND previous = g_hotButton;
-                g_hotButton = wnd;
-                if (previous && IsWindow(previous))
-                    InvalidateRect(previous, nullptr, FALSE);
-                InvalidateRect(wnd, nullptr, FALSE);
-                TRACKMOUSEEVENT track = { sizeof(track), TME_LEAVE, wnd, 0 };
-                TrackMouseEvent(&track);
-            }
-            break;
-
-        case WM_MOUSELEAVE:
-            if (g_hotButton == wnd) {
-                g_hotButton = nullptr;
-                InvalidateRect(wnd, nullptr, FALSE);
-            }
-            break;
-
-        case WM_SETFOCUS:
-        case WM_KILLFOCUS:
-        case CB_SETCURSEL:
-            InvalidateRect(wnd, nullptr, FALSE);
-            break;
-    }
-    return DefSubclassProc(wnd, msg, wp, lp);
-}
-
-// Buttons are subclassed for two reasons: a checkbox has to be painted
-// entirely by us (custom draw still lets the themed label through as a
-// ghost), and hover only reaches the control itself, never the dialog.
-LRESULT CALLBACK ButtonSubclass(HWND wnd, UINT msg, WPARAM wp, LPARAM lp,
-                                UINT_PTR, DWORD_PTR) {
-    const LONG type = GetWindowLongW(wnd, GWL_STYLE) & BS_TYPEMASK;
-    const bool isCheck = (type == BS_AUTOCHECKBOX || type == BS_CHECKBOX);
-
-    switch (msg) {
-        case WM_MOUSEMOVE:
-            if (g_hotButton != wnd) {
-                HWND previous = g_hotButton;
-                g_hotButton = wnd;
-                if (previous && IsWindow(previous))
-                    InvalidateRect(previous, nullptr, FALSE);
-                InvalidateRect(wnd, nullptr, FALSE);
-
-                TRACKMOUSEEVENT track = { sizeof(track), TME_LEAVE, wnd, 0 };
-                TrackMouseEvent(&track);
-            }
-            break;
-
-        case WM_MOUSELEAVE:
-            if (g_hotButton == wnd) {
-                g_hotButton = nullptr;
-                InvalidateRect(wnd, nullptr, FALSE);
-            }
-            break;
-
-        case WM_ERASEBKGND:
-            // Every pixel is painted below, so erasing first only flickers.
-            return 1;
-
-        case WM_PAINT:
-            if (isCheck) {
-                PAINTSTRUCT ps;
-                HDC dc = BeginPaint(wnd, &ps);
-                DrawCheckBox(wnd, dc);
-                EndPaint(wnd, &ps);
-                return 0;
-            }
-            break;
-    }
-    return DefSubclassProc(wnd, msg, wp, lp);
-}
-
-// TCS_OWNERDRAWFIXED only hands us the tab labels: the strip behind them and
-// the frame around the page stay themed, which on Windows 11 means white. So
-// the control is painted from scratch here and the items are dispatched by
-// hand, exactly as the control would have done.
-LRESULT CALLBACK TabSubclass(HWND wnd, UINT msg, WPARAM wp, LPARAM lp,
-                             UINT_PTR, DWORD_PTR) {
-    switch (msg) {
-        case WM_ERASEBKGND:
-            return 1;
-
-        case WM_PAINT: {
-            PAINTSTRUCT ps;
-            HDC target = BeginPaint(wnd, &ps);
-
-            RECT client;
-            GetClientRect(wnd, &client);
-            {
-                // Scoped: the buffer blits when it goes out of scope, and that
-                // has to happen while EndPaint has not yet released the DC.
-                Buffered buffer(target, client);
-                HDC dc = buffer.dc();
-                FillGrain(dc, client, wnd);
-
-                // The rule under the row of tabs. The items sit on it; the
-                // selected plate covers its part of it.
-                RECT first = {};
-                if (TabCtrl_GetItemRect(wnd, 0, &first)) {
-                    RECT rule = { client.left, first.bottom - 1, client.right, first.bottom };
-                    HBRUSH b = CreateSolidBrush(Border);
-                    FillRect(dc, &rule, b);
-                    DeleteObject(b);
-                }
-
-                const int count   = TabCtrl_GetItemCount(wnd);
-                const int current = TabCtrl_GetCurSel(wnd);
-                const int id      = GetDlgCtrlID(wnd);
-                for (int i = 0; i < count; ++i) {
-                    DRAWITEMSTRUCT dis = {};
-                    if (!TabCtrl_GetItemRect(wnd, i, &dis.rcItem)) continue;
-                    dis.CtlType    = ODT_TAB;
-                    dis.CtlID      = (UINT)id;
-                    dis.itemID     = (UINT)i;
-                    dis.itemAction = ODA_DRAWENTIRE;
-                    dis.itemState  = (i == current) ? ODS_SELECTED : 0;
-                    dis.hwndItem   = wnd;
-                    dis.hDC        = dc;
-                    SendMessageW(GetParent(wnd), WM_DRAWITEM, (WPARAM)id,
-                                 (LPARAM)&dis);
-                }
-            }
-
-            EndPaint(wnd, &ps);
-            return 0;
-        }
-
-        case WM_MOUSEMOVE: {
-            // Repaint only when the tab under the pointer changes; otherwise
-            // every pixel of movement would redraw the whole strip.
-            TCHITTESTINFO hit = {};
-            hit.pt.x = GET_X_LPARAM(lp);
-            hit.pt.y = GET_Y_LPARAM(lp);
-            const int over = TabCtrl_HitTest(wnd, &hit);
-            if (over != g_hotTab) {
-                g_hotTab = over;
-                InvalidateRect(wnd, nullptr, FALSE);
-            }
-            TRACKMOUSEEVENT track = { sizeof(track), TME_LEAVE, wnd, 0 };
-            TrackMouseEvent(&track);
-            break;
-        }
-
-        case WM_MOUSELEAVE:
-            if (g_hotTab != -1) {
-                g_hotTab = -1;
-                InvalidateRect(wnd, nullptr, FALSE);
-            }
-            break;
-    }
-    return DefSubclassProc(wnd, msg, wp, lp);
-}
-
-void DrawTrackbar(HWND bar, NMCUSTOMDRAW* cd) {
-    RECT client;
-    GetClientRect(bar, &client);
-    FillBackdrop(cd->hdc, client, GetParent(bar), bar);
-
-    RECT channel;
-    SendMessageW(bar, TBM_GETCHANNELRECT, 0, (LPARAM)&channel);
-    RECT thumb;
-    SendMessageW(bar, TBM_GETTHUMBRECT, 0, (LPARAM)&thumb);
-
-    const bool enabled = IsWindowEnabled(bar) != FALSE;
-    const int midY = (thumb.top + thumb.bottom) / 2;
-
-    const int half   = (std::max)(1, Sc(2));
-    const int knobW   = (std::max)(3, Sc(6));
-    const int knobH   = (std::max)(4, Sc(7));
-    const int centreX = (thumb.left + thumb.right) / 2;
-
-    // A thin groove with the filled part in the accent and a narrow upright
-    // marker, which is how the game draws its sliders.
-    RECT track = { channel.left, midY - half, channel.right, midY + half };
-    HBRUSH groove = CreateSolidBrush(RGB(40, 44, 50));
-    FillRect(cd->hdc, &track, groove);
-    DeleteObject(groove);
-
-    RECT done = { channel.left, midY - half, centreX, midY + half };
-    if (done.right > done.left) {
-        HBRUSH fill = CreateSolidBrush(enabled ? Accent : RGB(70, 73, 80));
-        FillRect(cd->hdc, &done, fill);
-        DeleteObject(fill);
-    }
-
-    const int markW = (std::max)(2, knobW / 2);
-    RECT knob = { centreX - markW, midY - knobH, centreX + markW, midY + knobH };
-    Chamfer(cd->hdc, knob, Sc(2), enabled ? Text : RGB(96, 99, 106), 255,
-            enabled ? Text : RGB(96, 99, 106), 255);
-}
-
-} // namespace
-
-// ---------------------------------------------------------------- lifecycle
-namespace {
-
-struct FontSet { HFONT ui, bold, title, tiny, number, heading, display; };
-
-// One set per DPI the process has actually been shown at. Kept rather than
-// swapped because controls hold their HFONT after WM_SETFONT: deleting the old
-// set on a DPI change would hand every dialog a dangling font mid-repaint. In
-// practice this is one or two entries - a machine only has so many scales.
+// One set per DPI the process has been shown at. Kept rather than swapped, so a
+// DC that still has one selected never ends up holding a deleted font.
 std::unordered_map<UINT, FontSet> g_fontSets;
+const FontSet* g_fonts = nullptr;
 
 const FontSet& FontsFor(UINT dpi) {
     auto it = g_fontSets.find(dpi);
     if (it != g_fontSets.end()) return it->second;
 
+    const Face& s = Strong();
+    const Face& p = Plain();
     FontSet set;
-    set.ui     = MakeFont(9,  FW_NORMAL,   dpi);
-    set.bold   = MakeFont(9,  FW_SEMIBOLD, dpi);
-    set.title  = MakeFont(11, FW_SEMIBOLD, dpi);
-    set.tiny   = MakeFont(8,  FW_NORMAL,   dpi);
-    set.number = MakeFont(14, FW_SEMIBOLD, dpi);
-    set.heading = MakeFont(11, FW_SEMIBOLD, dpi, HeadingFace());
-    set.display = MakeFont(19, FW_SEMIBOLD, dpi, HeadingFace());
+    auto put = [&](Font which, int size, int weight, const wchar_t* face) {
+        set.f[(int)which] = MakeFont(size, weight, dpi, face);
+    };
+    put(Font::Body,       95,  FW_NORMAL,   L"Segoe UI");
+    put(Font::BodyBold,   95,  FW_SEMIBOLD, L"Segoe UI");
+    put(Font::Small,      85,  FW_NORMAL,   L"Segoe UI");
+    put(Font::Label,      120, s.weight,    s.name);
+    put(Font::Value,      112, s.weight,    s.name);
+    put(Font::ValueLight, 112, p.weight,    p.name);
+    put(Font::Crumb,      200, p.weight,    p.name);
+    put(Font::CrumbBold,  200, s.weight,    s.name);
+    put(Font::Nav,        112, s.weight,    s.name);
+    put(Font::Section,    85,  s.weight,    s.name);
+    put(Font::Caption,    88,  p.weight,    p.name);
+    put(Font::Title,      150, s.weight,    s.name);
+    put(Font::Button,     105, s.weight,    s.name);
+    put(Font::Key,        80,  s.weight,    s.name);
+    put(Font::Query,      150, FW_NORMAL,   L"Segoe UI Semilight");
     return g_fontSets.emplace(dpi, set).first->second;
+}
+
+// ---------------------------------------------------------------- backdrop
+struct Surface {
+    int       w = 0, h = 0;
+    HBITMAP   bmp = nullptr;
+    ULONGLONG used = 0;
+};
+std::vector<Surface> g_surfaces;
+constexpr size_t kMaxSurfaces = 3;
+
+inline uint32_t Hash(uint32_t x) {
+    x ^= x >> 16; x *= 0x7feb352dU;
+    x ^= x >> 15; x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return x;
+}
+
+inline float Smooth(float e0, float e1, float x) {
+    float t = (x - e0) / (e1 - e0);
+    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+inline uint32_t Pack(float r, float g, float b) {
+    auto c = [](float v) -> uint32_t {
+        return (uint32_t)(v < 0.0f ? 0.0f : (v > 255.0f ? 255.0f : v + 0.5f));
+    };
+    return (c(r) << 16) | (c(g) << 8) | c(b);
+}
+
+HBITMAP MakeDib(int w, int h, uint32_t** bits) {
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth       = w;
+    bi.bmiHeader.biHeight      = -h;              // top-down
+    bi.bmiHeader.biPlanes      = 1;
+    bi.bmiHeader.biBitCount    = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* p = nullptr;
+    HBITMAP bmp = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &p, nullptr, 0);
+    *bits = static_cast<uint32_t*>(p);
+    if (bmp && !p) { DeleteObject(bmp); bmp = nullptr; }
+    return bmp;
+}
+
+// The screen behind everything: black, with the faintest cold light from the
+// top left, a trace of warmth low on the right, and the corners pulled down.
+// A function of the pixel, so it is the same picture every time; the noise is
+// there because a gradient this dark shows each of its few steps as a band.
+void RenderBackdrop(uint32_t* px, int w, int h) {
+    const float W = (float)(std::max)(w, h);
+    for (int y = 0; y < h; ++y) {
+        const float fy = (float)y / (float)h;
+        for (int x = 0; x < w; ++x) {
+            const float fx = (float)x / (float)w;
+            float r = 7.0f, g = 8.0f, b = 10.0f;
+
+            const float nx = ((float)x - 0.10f * (float)w) / (0.95f * W);
+            const float ny = ((float)y + 0.05f * (float)h) / (0.70f * W);
+            const float cool = std::exp(-(nx * nx + ny * ny) * 2.6f);
+            r += 10.0f * cool; g += 12.0f * cool; b += 16.0f * cool;
+
+            const float wx = ((float)x - 0.98f * (float)w) / (0.55f * W);
+            const float wy = ((float)y - 1.02f * (float)h) / (0.40f * W);
+            const float warm = std::exp(-(wx * wx + wy * wy) * 2.2f);
+            r += 9.0f * warm; g += 5.0f * warm; b += 1.0f * warm;
+
+            const float vx = (fx - 0.5f) / 0.64f, vy = (fy - 0.45f) / 0.72f;
+            const float vig = 1.0f - 0.40f * Smooth(0.50f, 1.30f, std::sqrt(vx * vx + vy * vy));
+            const float n = (float)(Hash((uint32_t)x * 73856093U ^ (uint32_t)y * 19349663U) & 255)
+                            / 255.0f - 0.5f;
+            px[(size_t)y * (size_t)w + (size_t)x] = Pack(r * vig + n, g * vig + n, b * vig + n);
+        }
+    }
+}
+
+Surface* SurfaceFor(int w, int h) {
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return nullptr;
+    const ULONGLONG now = GetTickCount64();
+    for (Surface& s : g_surfaces)
+        if (s.w == w && s.h == h) { s.used = now; return &s; }
+
+    if (g_surfaces.size() >= kMaxSurfaces) {
+        auto oldest = std::min_element(g_surfaces.begin(), g_surfaces.end(),
+            [](const Surface& a, const Surface& b) { return a.used < b.used; });
+        if (oldest->bmp) DeleteObject(oldest->bmp);
+        g_surfaces.erase(oldest);
+    }
+    Surface s;
+    s.w = w; s.h = h; s.used = now;
+    uint32_t* bits = nullptr;
+    s.bmp = MakeDib(w, h, &bits);
+    if (!s.bmp) return nullptr;
+    RenderBackdrop(bits, w, h);
+    g_surfaces.push_back(s);
+    return &g_surfaces.back();
+}
+
+// A premultiplied 32-bit layer the size of `r`, filled by `alphaAt`, blended
+// onto `dc`. The glows are all this shape: a colour, and a per-pixel alpha.
+template <typename AlphaAt>
+void BlendLayer(HDC dc, const RECT& r, COLORREF color, AlphaAt alphaAt) {
+    const int w = r.right - r.left, h = r.bottom - r.top;
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return;
+    uint32_t* bits = nullptr;
+    HBITMAP bmp = MakeDib(w, h, &bits);
+    if (!bmp) return;
+    const float cr = (float)GetRValue(color), cg = (float)GetGValue(color),
+                cb = (float)GetBValue(color);
+    bool any = false;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            float a = alphaAt(x, y);
+            if (a <= 0.0f) { bits[(size_t)y * w + x] = 0; continue; }
+            if (a > 255.0f) a = 255.0f;
+            any = true;
+            const float k = a / 255.0f;
+            bits[(size_t)y * w + x] = ((uint32_t)(a + 0.5f) << 24) |
+                                      ((uint32_t)(cr * k + 0.5f) << 16) |
+                                      ((uint32_t)(cg * k + 0.5f) << 8) |
+                                      (uint32_t)(cb * k + 0.5f);
+        }
+    }
+    if (any) {
+        HDC mem = CreateCompatibleDC(dc);
+        if (mem) {
+            HGDIOBJ old = SelectObject(mem, bmp);
+            BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+            AlphaBlend(dc, r.left, r.top, w, h, mem, 0, 0, w, h, bf);
+            SelectObject(mem, old);
+            DeleteDC(mem);
+        }
+    }
+    DeleteObject(bmp);
 }
 
 } // namespace
 
-void SetDpi(UINT dpi) {
-    if (dpi < 48 || dpi > 960) return;        // nothing real is outside this
-    if (dpi == g_dpi && g_ui) return;
-
-    const FontSet& set = FontsFor(dpi);
-    g_dpi    = dpi;
-    g_ui     = set.ui;
-    g_bold   = set.bold;
-    g_title  = set.title;
-    g_small  = set.tiny;
-    g_number = set.number;
-    g_heading = set.heading;
-    g_display = set.display;
+// ================================================================ lifecycle
+COLORREF Mix(COLORREF a, COLORREF b, float t) {
+    if (t <= 0.0f) return a;
+    if (t >= 1.0f) return b;
+    return RGB(Lerp8(GetRValue(a), GetRValue(b), t),
+               Lerp8(GetGValue(a), GetGValue(b), t),
+               Lerp8(GetBValue(a), GetBValue(b), t));
 }
 
-UINT Dpi() { return g_dpi; }
+void SetDpi(UINT dpi) {
+    if (dpi < 48 || dpi > 960) return;        // nothing real is outside this
+    if (dpi == g_dpi && g_fonts) return;
+    g_fonts = &FontsFor(dpi);
+    g_dpi   = dpi;
+}
+
+UINT  Dpi()              { return g_dpi; }
+int   Scale(int px)      { return Sc(px); }
+float ScaleF(float px)   { return ScF(px); }
 
 void Init() {
-    // Before any control exists: "DarkMode_Explorer" only reaches the
-    // scrollbars of a list once the process itself has asked for dark mode, and
-    // asking is not a documented call. Without it the folder list on the Search
-    // page had a bright white scrollbar down one side of a black dialog.
     EnableProcessDarkMode();
-
     Gdiplus::GdiplusStartupInput input;
     Gdiplus::GdiplusStartup(&g_gdiplusToken, &input, nullptr);
 
-    // A starting point only: every dialog and the launcher re-point this at
-    // their own monitor's DPI before they draw anything.
+    // A starting point only: every window re-points this at its own DPI.
     HDC screen = GetDC(nullptr);
     const int systemDpi = screen ? GetDeviceCaps(screen, LOGPIXELSY) : 96;
     if (screen) ReleaseDC(nullptr, screen);
-    g_dpi = 0;                                 // force SetDpi to build the set
+    g_fonts = nullptr;
     SetDpi(systemDpi > 0 ? (UINT)systemDpi : 96u);
-
-    g_bgBrush    = CreateSolidBrush(Bg);
-    g_panelBrush = CreateSolidBrush(Panel);
-    g_fieldBrush = CreateSolidBrush(Field);
-    BuildGrain();
 }
 
 void Shutdown() {
-    for (auto& kv : g_fontSets) {
-        for (HFONT f : { kv.second.ui, kv.second.bold, kv.second.title,
-                         kv.second.tiny, kv.second.number, kv.second.heading,
-                         kv.second.display })
+    TrimSurfaces();
+    for (auto& kv : g_fontSets)
+        for (HFONT f : kv.second.f)
             if (f) DeleteObject(f);
-    }
     g_fontSets.clear();
-    g_ui = g_bold = g_title = g_small = g_number = g_heading = g_display = nullptr;
-
-    for (HBRUSH* b : { &g_bgBrush, &g_panelBrush, &g_fieldBrush, &g_grainBrush })
-        if (*b) { DeleteObject(*b); *b = nullptr; }
-    if (g_grainBmp) { DeleteObject(g_grainBmp); g_grainBmp = nullptr; }
+    g_fonts = nullptr;
     if (g_gdiplusToken) {
         Gdiplus::GdiplusShutdown(g_gdiplusToken);
         g_gdiplusToken = 0;
     }
 }
 
-HFONT FontUI()     { return g_ui; }
-HFONT FontBold()   { return g_bold; }
-HFONT FontTitle()  { return g_title; }
-HFONT FontSmall()  { return g_small; }
-HFONT FontNumber() { return g_number; }
-HFONT FontHeading() { return g_heading; }
-HFONT FontDisplay() { return g_display; }
+HFONT Get(Font f) {
+    if (!g_fonts) SetDpi(g_dpi ? g_dpi : 96);
+    return g_fonts ? g_fonts->f[(int)f] : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+}
 
+// ================================================================ type
 std::wstring Caps(const std::wstring& text) {
     std::wstring out = text;
     for (auto& c : out) c = (wchar_t)towupper(c);
     return out;
 }
 
-HBRUSH BrushBg()    { return g_bgBrush; }
-HBRUSH BrushPanel() { return g_panelBrush; }
-HBRUSH BrushField() { return g_fieldBrush; }
+int SpacedWidth(HDC dc, const std::wstring& text, int tracking) {
+    if (text.empty()) return 0;
+    // Measured unspaced and the spacing added by hand: GetTextExtentPoint32
+    // does not count SetTextCharacterExtra, though DrawText draws with it.
+    const int old = SetTextCharacterExtra(dc, 0);
+    SIZE sz = {};
+    GetTextExtentPoint32W(dc, text.c_str(), (int)text.size(), &sz);
+    SetTextCharacterExtra(dc, old);
+    return sz.cx + tracking * ((int)text.size() - 1);
+}
+
+void DrawSpaced(HDC dc, const std::wstring& text, RECT* r, UINT format, int tracking) {
+    RECT box = *r;
+    if (tracking && (format & (DT_CENTER | DT_RIGHT)) && !(format & DT_WORDBREAK)) {
+        // DrawText centres and right-aligns by the width of the letters
+        // without the space added between them, so spaced text ran past the
+        // right edge and lost its last letter. Placed by hand instead, from
+        // the width it really has - and still clipped on the left, never the
+        // right, when the box is too small for it.
+        const int w = SpacedWidth(dc, text, tracking);
+        const int room = box.right - box.left;
+        if (w <= room) {
+            if (format & DT_CENTER) box.left += (room - w) / 2;
+            else                    box.left = box.right - w;
+            box.right = box.left + w + tracking;
+        }
+        format &= ~(UINT)(DT_CENTER | DT_RIGHT);
+    }
+    const int old = SetTextCharacterExtra(dc, tracking);
+    DrawTextW(dc, text.c_str(), (int)text.size(), &box, format);
+    SetTextCharacterExtra(dc, old);
+}
+
+void Print(HDC dc, Font font, const std::wstring& text, RECT r, COLORREF color,
+           UINT format, int tracking) {
+    if (text.empty()) return;
+    HGDIOBJ old = SelectObject(dc, Get(font));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, color);
+    DrawSpaced(dc, text, &r, format | DT_NOPREFIX, tracking);
+    SelectObject(dc, old);
+}
+
+int Measure(HDC dc, Font font, const std::wstring& text, int tracking) {
+    HGDIOBJ old = SelectObject(dc, Get(font));
+    const int w = SpacedWidth(dc, text, tracking);
+    SelectObject(dc, old);
+    return w;
+}
+
+int PrintWrapped(HDC dc, Font font, const std::wstring& text, RECT r, COLORREF color,
+                 bool measureOnly) {
+    if (text.empty()) return 0;
+    HGDIOBJ old = SelectObject(dc, Get(font));
+    RECT calc = r;
+    DrawTextW(dc, text.c_str(), (int)text.size(), &calc,
+              DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT);
+    if (!measureOnly) {
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, color);
+        DrawTextW(dc, text.c_str(), (int)text.size(), &r,
+                  DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS);
+    }
+    SelectObject(dc, old);
+    return calc.bottom - calc.top;
+}
+
+// ================================================================ the screen
+void PaintBackdrop(HDC dc, const RECT& r, SIZE canvas) {
+    Surface* s = SurfaceFor(canvas.cx, canvas.cy);
+    const int w = r.right - r.left, h = r.bottom - r.top;
+    if (!s) {
+        HBRUSH b = CreateSolidBrush(Bg);
+        FillRect(dc, &r, b);
+        DeleteObject(b);
+        return;
+    }
+    HDC mem = CreateCompatibleDC(dc);
+    if (!mem) return;
+    HGDIOBJ old = SelectObject(mem, s->bmp);
+    BitBlt(dc, r.left, r.top, (std::min)(w, s->w), (std::min)(h, s->h), mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteDC(mem);
+}
+
+void TrimSurfaces() {
+    for (Surface& s : g_surfaces)
+        if (s.bmp) DeleteObject(s.bmp);
+    g_surfaces.clear();
+    g_surfaces.shrink_to_fit();
+}
 
 void DarkTitleBar(HWND wnd) {
     BOOL on = TRUE;
     // 20 on current builds, 19 on 1809-era ones.
     if (FAILED(DwmSetWindowAttribute(wnd, 20, &on, sizeof(on))))
         DwmSetWindowAttribute(wnd, 19, &on, sizeof(on));
+    const COLORREF caption = Bg;
+    DwmSetWindowAttribute(wnd, 35 /* DWMWA_CAPTION_COLOR */, &caption, sizeof(caption));
+    const COLORREF border = RGB(52, 56, 62);
+    DwmSetWindowAttribute(wnd, AWA_DWMWA_BORDER_COLOR, &border, sizeof(border));
 }
 
-// ---------------------------------------------------------------- shapes
-void RoundRect(HDC dc, const RECT& r, int radius, COLORREF fill,
-               COLORREF borderColor, bool drawBorder) {
-    RoundRectAlpha(dc, r, radius, fill, 255, borderColor, drawBorder ? 255 : 0);
-}
-
-void Chamfer(HDC dc, const RECT& r, int cut, COLORREF fill, BYTE alpha,
-             COLORREF borderColor, BYTE borderAlpha) {
-    if (r.right <= r.left || r.bottom <= r.top) return;
-    Gdiplus::Graphics g(dc);
-    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-    Gdiplus::RectF rect((float)r.left, (float)r.top,
-                        (float)(r.right - r.left - 1), (float)(r.bottom - r.top - 1));
-    Gdiplus::GraphicsPath path;
-    AddChamferPath(&path, rect, (float)cut);
-    if (alpha > 0) {
-        Gdiplus::SolidBrush brush(Argb(fill, alpha));
-        g.FillPath(&brush, &path);
-    }
-    if (borderAlpha > 0) {
-        Gdiplus::Pen pen(Argb(borderColor, borderAlpha), 1.0f);
-        g.DrawPath(&pen, &path);
-    }
-}
-
-void Slant(HDC dc, const RECT& r, int slant, COLORREF fill, BYTE alpha,
-           COLORREF borderColor, BYTE borderAlpha) {
-    if (r.right <= r.left || r.bottom <= r.top) return;
-    Gdiplus::Graphics g(dc);
-    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-    Gdiplus::RectF rect((float)r.left, (float)r.top,
-                        (float)(r.right - r.left - 1), (float)(r.bottom - r.top - 1));
-    Gdiplus::GraphicsPath path;
-    AddSlantPath(&path, rect, (float)slant);
-    if (alpha > 0) {
-        Gdiplus::SolidBrush brush(Argb(fill, alpha));
-        g.FillPath(&brush, &path);
-    }
-    if (borderAlpha > 0) {
-        Gdiplus::Pen pen(Argb(borderColor, borderAlpha), 1.0f);
-        g.DrawPath(&pen, &path);
-    }
-}
-
-void RoundRectAlpha(HDC dc, const RECT& r, int radius, COLORREF fill, BYTE alpha,
-                    COLORREF borderColor, BYTE borderAlpha) {
-    if (r.right <= r.left || r.bottom <= r.top) return;
-
-    Gdiplus::Graphics g(dc);
-    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-
-    Gdiplus::Rect rect(r.left, r.top, r.right - r.left - 1, r.bottom - r.top - 1);
-    Gdiplus::GraphicsPath path;
-    AddRoundedPath(&path, rect, radius);
-
-    if (alpha > 0) {
-        Gdiplus::SolidBrush brush(Argb(fill, alpha));
-        g.FillPath(&brush, &path);
-    }
-    if (borderAlpha > 0) {
-        Gdiplus::Pen pen(Argb(borderColor, borderAlpha), 1.0f);
-        g.DrawPath(&pen, &path);
-    }
-}
-
-void FillRoundBar(HDC dc, const RECT& r, int radius, COLORREF color, BYTE alpha) {
-    if (r.right <= r.left) return;
-    Gdiplus::Graphics g(dc);
-    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    Gdiplus::Rect rect(r.left, r.top, r.right - r.left, r.bottom - r.top);
-    Gdiplus::GraphicsPath path;
-    AddRoundedPath(&path, rect, radius);
-    Gdiplus::SolidBrush brush(Argb(color, alpha));
-    g.FillPath(&brush, &path);
-}
-
-void DrawCard(HDC dc, const RECT& r, const wchar_t* title) {
-    Chamfer(dc, r, Sc(10), Panel, 255, Border, 255);
-
-    // A hairline of light along the top edge lifts the card off the window;
-    // without it a Panel-on-Bg card is only a few steps of value apart.
-    RECT gloss = { r.left + Sc(12), r.top + Sc(1),
-                   r.right - Sc(2), r.top + Sc(2) };
-    if (gloss.bottom <= gloss.top) gloss.bottom = gloss.top + 1;
-    FillRoundBar(dc, gloss, 0, RGB(255, 255, 255), 12);
-
-    if (!title || !*title) return;
-
-    // The title bar: an accent rail down the left, then the card's name in
-    // condensed capitals. The rail is what the eye finds on a long page.
-    RECT rail = { r.left + Sc(11), r.top + Sc(9),
-                  r.left + Sc(14), r.top + Sc(23) };
-    HBRUSH accent = CreateSolidBrush(Accent);
-    FillRect(dc, &rail, accent);
-    DeleteObject(accent);
-
-    const std::wstring caps = Caps(title);
-    RECT tr = { r.left + Sc(20), r.top + Sc(7),
-                r.right - Sc(12), r.top + Sc(25) };
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, Text);
-    HGDIOBJ old = SelectObject(dc, g_heading);
-    DrawTextW(dc, caps.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-    // A rule from the end of the title to the card's edge, a step lighter
-    // than the panel: the game underlines its section headings this way.
-    SIZE sz = {};
-    GetTextExtentPoint32W(dc, caps.c_str(), (int)caps.size(), &sz);
-    SelectObject(dc, old);
-    RECT rule = { tr.left + sz.cx + Sc(8), r.top + Sc(16), r.right - Sc(12), r.top + Sc(17) };
-    if (rule.right > rule.left) {
-        HBRUSH b = CreateSolidBrush(Border);
-        FillRect(dc, &rule, b);
+// ================================================================ shapes
+void Wash(HDC dc, const RECT& r, COLORREF color, BYTE alpha) {
+    if (r.right <= r.left || r.bottom <= r.top || alpha == 0) return;
+    if (alpha == 255) {
+        HBRUSH b = CreateSolidBrush(color);
+        FillRect(dc, &r, b);
         DeleteObject(b);
+        return;
     }
+    Gdiplus::Graphics g(dc);
+    Gdiplus::SolidBrush brush(Argb(color, alpha));
+    g.FillRectangle(&brush, (INT)r.left, (INT)r.top, (INT)(r.right - r.left),
+                    (INT)(r.bottom - r.top));
 }
 
-// ---------------------------------------------------------------- dialogs
-// Cards are the hidden groupboxes' rectangles, remembered per dialog.
-struct CardInfo { RECT rect; std::wstring title; };
-static std::unordered_map<HWND, std::vector<CardInfo>> g_cards;
-static std::unordered_map<HWND, int> g_headers;
-
-void SetHeaderHeight(HWND dlg, int height) { g_headers[dlg] = height; }
-
-void ForgetDialog(HWND dlg) {
-    g_cards.erase(dlg);
-    g_headers.erase(dlg);
-    for (auto it = g_primaryButtons.begin(); it != g_primaryButtons.end(); ) {
-        if (!IsWindow(*it) || GetParent(*it) == dlg) it = g_primaryButtons.erase(it);
-        else ++it;
-    }
+void Sweep(HDC dc, const RECT& r, COLORREF color, BYTE alphaLeft, BYTE alphaRight) {
+    if (r.right <= r.left || r.bottom <= r.top) return;
+    Gdiplus::Graphics g(dc);
+    // One pixel wider than the rectangle, so the gradient's own wrap-around
+    // does not put a sliver of the far colour down the first column.
+    Gdiplus::LinearGradientBrush brush(
+        Gdiplus::Point(r.left - 1, 0), Gdiplus::Point(r.right + 1, 0),
+        Argb(color, alphaLeft), Argb(color, alphaRight));
+    g.FillRectangle(&brush, (INT)r.left, (INT)r.top, (INT)(r.right - r.left),
+                    (INT)(r.bottom - r.top));
 }
 
-// True when a control sits in the dialog's header strip, which is Panel rather
-// than Bg - so its text needs the matching brush behind it.
-static bool InHeader(HWND dlg, HWND control) {
-    auto it = g_headers.find(dlg);
-    if (it == g_headers.end() || it->second <= 0) return false;
-
-    RECT r;
-    GetWindowRect(control, &r);
-    MapWindowPoints(nullptr, dlg, (LPPOINT)&r, 2);
-    return ((r.top + r.bottom) / 2) < it->second;
-}
-
-// True when a control sits inside one of the dialog's cards, which decides
-// whether its background should be the card colour or the window colour.
-static bool OnCard(HWND dlg, HWND control, RECT* cardRect) {
-    auto it = g_cards.find(dlg);
-    if (it == g_cards.end()) return false;
-
-    RECT r;
-    GetWindowRect(control, &r);
-    MapWindowPoints(nullptr, dlg, (LPPOINT)&r, 2);
-    const POINT centre = { (r.left + r.right) / 2, (r.top + r.bottom) / 2 };
-
-    for (const auto& card : it->second) {
-        if (PtInRect(&card.rect, centre)) {
-            if (cardRect) *cardRect = card.rect;
-            return true;
-        }
-    }
-    return false;
-}
-
-static HBRUSH Backdrop(HWND dlg, HWND control) {
-    if (OnCard(dlg, control, nullptr) || InHeader(dlg, control)) return g_panelBrush;
-    return g_grainBrush ? g_grainBrush : g_bgBrush;
-}
-
-static void FillBackdrop(HDC dc, const RECT& r, HWND dlg, HWND control) {
-    HBRUSH b = Backdrop(dlg, control);
-    if (b == g_grainBrush) FillGrain(dc, r, control);
-    else                   FillRect(dc, &r, b);
-}
-
-void PrepareDialog(HWND dlg) {
-    // Everything below - the fonts handed to the children, the card rectangles
-    // measured from the hidden groupboxes - is in this window's units, so the
-    // theme has to be pointed at this window's DPI first.
-    SetDpi(DpiForWindow(dlg));
-
-    std::vector<CardInfo> cards;
-
-    struct Walker {
-        static BOOL CALLBACK Proc(HWND child, LPARAM param) {
-            auto* found = reinterpret_cast<std::vector<CardInfo>*>(param);
-            SendMessageW(child, WM_SETFONT, (WPARAM)g_ui, TRUE);
-
-            if (IsClass(child, L"Button") &&
-                (GetWindowLongW(child, GWL_STYLE) & BS_TYPEMASK) == BS_GROUPBOX) {
-                CardInfo card;
-                GetWindowRect(child, &card.rect);
-                MapWindowPoints(nullptr, GetParent(child), (LPPOINT)&card.rect, 2);
-
-                wchar_t text[128] = {};
-                GetWindowTextW(child, text, 128);
-                card.title = text;
-
-                found->push_back(card);
-                ShowWindow(child, SW_HIDE);       // the card is painted instead
-                return TRUE;
-            }
-
-            if (IsClass(child, L"Button")) {
-                const LONG style = GetWindowLongW(child, GWL_STYLE);
-                const LONG type  = style & BS_TYPEMASK;
-                if (type == BS_PUSHBUTTON || type == BS_DEFPUSHBUTTON) {
-                    if (type == BS_DEFPUSHBUTTON) g_primaryButtons.insert(child);
-                    SetWindowLongW(child, GWL_STYLE,
-                                   (style & ~BS_TYPEMASK) | BS_OWNERDRAW);
-                }
-                SetWindowSubclass(child, ButtonSubclass, 1, 0);
-                return TRUE;
-            }
-
-            if (IsClass(child, L"ComboBox")) {
-                // Owner-draw is the only way to get a dark list; the style has
-                // to be there before the first paint. The closed control is
-                // painted by ComboSubclass, drop-down button included.
-                SetWindowLongW(child, GWL_STYLE,
-                               GetWindowLongW(child, GWL_STYLE) | CBS_OWNERDRAWFIXED);
-                SendMessageW(child, CB_SETITEMHEIGHT, 0, Sc(18));
-                SetWindowTheme(child, L"DarkMode_CFD", nullptr);
-                SetWindowSubclass(child, ComboSubclass, 1, 0);
-            } else if (IsClass(child, L"Edit")) {
-                SetWindowSubclass(child, EditSubclass, 1, 0);
-            } else if (IsClass(child, L"SysListView32")) {
-                ListView_SetBkColor(child, Panel);
-                ListView_SetTextBkColor(child, Panel);
-                ListView_SetTextColor(child, Text);
-                AllowDarkModeForWindow(child);
-                SetWindowTheme(child, L"DarkMode_Explorer", nullptr);
-                SetWindowSubclass(child, ListViewSubclass, 1, 0);
-                // The column header is a control of its own and does not
-                // inherit any of that. Left alone it stays pure white, which
-                // on the Window keys page was a bright band across the top of
-                // an otherwise black list.
-                if (HWND header = ListView_GetHeader(child)) {
-                    AllowDarkModeForWindow(header);
-                    SetWindowTheme(header, L"DarkMode_ItemsView", nullptr);
-                }
-            } else if (IsClass(child, L"SysTabControl32")) {
-                SetWindowLongW(child, GWL_STYLE,
-                               GetWindowLongW(child, GWL_STYLE) |
-                               TCS_OWNERDRAWFIXED);
-                SetWindowTheme(child, L"", L"");     // no themed frame to fight
-                // The strip measures its items with its own font, and the
-                // items are drawn in condensed capitals - so it is given
-                // that font, and room for the slant on either side.
-                SendMessageW(child, WM_SETFONT, (WPARAM)g_heading, TRUE);
-                TabCtrl_SetPadding(child, Sc(13), Sc(5));
-                SetWindowSubclass(child, TabSubclass, 1, 0);
-            } else if (IsClass(child, L"ListBox")) {
-                AllowDarkModeForWindow(child);
-                SetWindowTheme(child, L"DarkMode_Explorer", nullptr);
-            }
-            return TRUE;
-        }
+void Gradient(HDC dc, const RECT& r, COLORREF top, COLORREF bottom) {
+    if (r.right <= r.left || r.bottom <= r.top) return;
+    TRIVERTEX v[2] = {
+        { r.left,  r.top,    (COLOR16)(GetRValue(top) << 8), (COLOR16)(GetGValue(top) << 8),
+          (COLOR16)(GetBValue(top) << 8), 0xFF00 },
+        { r.right, r.bottom, (COLOR16)(GetRValue(bottom) << 8), (COLOR16)(GetGValue(bottom) << 8),
+          (COLOR16)(GetBValue(bottom) << 8), 0xFF00 },
     };
-    EnumChildWindows(dlg, Walker::Proc, reinterpret_cast<LPARAM>(&cards));
-    g_cards[dlg] = std::move(cards);
+    GRADIENT_RECT gr = { 0, 1 };
+    GradientFill(dc, v, 2, &gr, 1, GRADIENT_FILL_RECT_V);
 }
 
-// Buttons have no hover state of their own once we draw them, so track it.
-static void TrackHover(HWND dlg) {
-    POINT pt;
-    GetCursorPos(&pt);
-    HWND under = WindowFromPoint(pt);
-    const bool hoverable = under && GetParent(under) == dlg &&
-                           (IsClass(under, L"Button") || IsClass(under, L"ComboBox"));
-    HWND hot = hoverable ? under : nullptr;
-    if (hot != g_hotButton) {
-        HWND previous = g_hotButton;
-        g_hotButton = hot;
-        if (previous && IsWindow(previous)) InvalidateRect(previous, nullptr, TRUE);
-        if (hot) InvalidateRect(hot, nullptr, TRUE);
+void FadeV(HDC dc, const RECT& r, COLORREF color, BYTE alphaTop, BYTE alphaBottom) {
+    if (r.right <= r.left || r.bottom <= r.top) return;
+    Gdiplus::Graphics g(dc);
+    Gdiplus::LinearGradientBrush brush(
+        Gdiplus::Point(0, r.top - 1), Gdiplus::Point(0, r.bottom + 1),
+        Argb(color, alphaTop), Argb(color, alphaBottom));
+    g.FillRectangle(&brush, (INT)r.left, (INT)r.top, (INT)(r.right - r.left),
+                    (INT)(r.bottom - r.top));
+}
+
+void Frame(HDC dc, const RECT& r, COLORREF color, BYTE alpha, int width) {
+    const int w = r.right - r.left, h = r.bottom - r.top;
+    if (w < 2 || h < 2 || alpha == 0 || width <= 0) return;
+    const int t = (std::min)(width, (std::min)(w, h) / 2);
+    // Four axis-aligned fills, no antialiasing: a hairline that is exactly one
+    // device pixel, never two half-lit ones.
+    const RECT parts[4] = {
+        { r.left, r.top, r.right, r.top + t },
+        { r.left, r.bottom - t, r.right, r.bottom },
+        { r.left, r.top + t, r.left + t, r.bottom - t },
+        { r.right - t, r.top + t, r.right, r.bottom - t },
+    };
+    if (alpha == 255) {
+        HBRUSH b = CreateSolidBrush(color);
+        for (const RECT& p : parts) FillRect(dc, &p, b);
+        DeleteObject(b);
+        return;
+    }
+    Gdiplus::Graphics g(dc);
+    Gdiplus::SolidBrush brush(Argb(color, alpha));
+    for (const RECT& p : parts)
+        g.FillRectangle(&brush, (INT)p.left, (INT)p.top, (INT)(p.right - p.left),
+                        (INT)(p.bottom - p.top));
+}
+
+void Glow(HDC dc, const RECT& r, COLORREF color, int spread, BYTE peak) {
+    if (spread <= 0 || peak == 0) return;
+    RECT o = r;
+    InflateRect(&o, spread, spread);
+    const float fs = (float)spread;
+    const float inner = (std::max)(2.0f, fs * 0.45f);
+    const float left = (float)(r.left - o.left), top = (float)(r.top - o.top);
+    const float right = left + (float)(r.right - r.left) - 1.0f;
+    const float bottom = top + (float)(r.bottom - r.top) - 1.0f;
+    const float p = (float)peak;
+    BlendLayer(dc, o, color, [&](int x, int y) -> float {
+        const float fx = (float)x, fy = (float)y;
+        const float dx = fx < left ? left - fx : (fx > right ? fx - right : 0.0f);
+        const float dy = fy < top ? top - fy : (fy > bottom ? fy - bottom : 0.0f);
+        if (dx > 0.0f || dy > 0.0f) {
+            const float d = std::sqrt(dx * dx + dy * dy) / fs;
+            if (d >= 1.0f) return 0.0f;
+            const float k = 1.0f - d;
+            return p * k * k;
+        }
+        // Inside: a little light carried in from the edge.
+        const float d = (std::min)((std::min)(fx - left, right - fx),
+                                   (std::min)(fy - top, bottom - fy)) / inner;
+        if (d >= 1.0f) return 0.0f;
+        const float k = 1.0f - d;
+        return p * 0.55f * k * k;
+    });
+}
+
+void Haze(HDC dc, const RECT& r, COLORREF color, BYTE peak) {
+    const float cx = (float)(r.right - r.left) / 2.0f, cy = (float)(r.bottom - r.top) / 2.0f;
+    if (cx < 1.0f || cy < 1.0f) return;
+    const float p = (float)peak;
+    BlendLayer(dc, r, color, [&](int x, int y) -> float {
+        const float nx = ((float)x + 0.5f - cx) / cx, ny = ((float)y + 0.5f - cy) / cy;
+        const float d = 1.0f - (nx * nx + ny * ny);
+        if (d <= 0.0f) return 0.0f;
+        return p * d * d;
+    });
+}
+
+void Arrowhead(HDC dc, float cx, float cy, float size, int dir, COLORREF color, BYTE alpha) {
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::SolidBrush brush(Argb(color, alpha));
+    const float s = size, w = size * 0.80f;
+    Gdiplus::PointF pts[3];
+    switch (dir) {
+        case -1: pts[0] = { cx - w, cy }; pts[1] = { cx + w, cy - s }; pts[2] = { cx + w, cy + s }; break;
+        case +1: pts[0] = { cx + w, cy }; pts[1] = { cx - w, cy - s }; pts[2] = { cx - w, cy + s }; break;
+        case -2: pts[0] = { cx, cy - w }; pts[1] = { cx + s, cy + w }; pts[2] = { cx - s, cy + w }; break;
+        default: pts[0] = { cx, cy + w }; pts[1] = { cx - s, cy - w }; pts[2] = { cx + s, cy - w }; break;
+    }
+    g.FillPolygon(&brush, pts, 3);
+}
+
+void Chevron(HDC dc, float cx, float cy, float size, int dir, COLORREF color, float width) {
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::Pen pen(Argb(color), width);
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    pen.SetLineJoin(Gdiplus::LineJoinRound);
+    const float s = size, h = size * 0.5f;
+    Gdiplus::PointF pts[3];
+    switch (dir) {
+        case -1: pts[0] = { cx + h, cy - s }; pts[1] = { cx - h, cy }; pts[2] = { cx + h, cy + s }; break;
+        case +1: pts[0] = { cx - h, cy - s }; pts[1] = { cx + h, cy }; pts[2] = { cx - h, cy + s }; break;
+        case -2: pts[0] = { cx - s, cy + h }; pts[1] = { cx, cy - h }; pts[2] = { cx + s, cy + h }; break;
+        default: pts[0] = { cx - s, cy - h }; pts[1] = { cx, cy + h }; pts[2] = { cx + s, cy - h }; break;
+    }
+    g.DrawLines(&pen, pts, 3);
+}
+
+void Diamond(HDC dc, float cx, float cy, float r, COLORREF color) {
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::SolidBrush halo(Argb(color, 60));
+    Gdiplus::PointF outer[4] = { { cx, cy - r * 2.0f }, { cx + r * 2.0f, cy },
+                                 { cx, cy + r * 2.0f }, { cx - r * 2.0f, cy } };
+    g.FillPolygon(&halo, outer, 4);
+    Gdiplus::SolidBrush fill(Argb(color));
+    Gdiplus::PointF d[4] = { { cx, cy - r }, { cx + r, cy }, { cx, cy + r }, { cx - r, cy } };
+    g.FillPolygon(&fill, d, 4);
+}
+
+int PanelNotch() { return Sc(9); }
+
+void PanelFrame(HDC dc, const RECT& r, COLORREF color, BYTE alpha, float width, int inset) {
+    const float half = width / 2.0f;
+    const float x0 = (float)r.left + half, x1 = (float)r.right - half;
+    const float y0 = (float)r.top + half,  y1 = (float)r.bottom - half;
+    const float W = x1 - x0;
+    const float d = (float)inset;
+    // The run of each slope, and a curve through it rather than a straight
+    // cut: the game's frame bends into its notches.
+    const float s = d * 2.6f;
+    if (W < s * 6.0f) {
+        Gdiplus::Graphics g(dc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::Pen pen(Argb(color, alpha), width);
+        g.DrawRectangle(&pen, x0, y0, W, y1 - y0);
+        return;
+    }
+    const float tA = x0 + W * 0.57f, tB = x0 + W * 0.89f;   // top notch, dipping in
+    const float bA = x0 + W * 0.18f, bB = x0 + W * 0.79f;   // bottom notch, rising in
+
+    Gdiplus::GraphicsPath path;
+    path.StartFigure();
+    path.AddLine(x0, y1, x0, y0);
+    path.AddLine(x0, y0, tA, y0);
+    path.AddBezier(tA, y0, tA + s * 0.5f, y0, tA + s * 0.5f, y0 + d, tA + s, y0 + d);
+    path.AddLine(tA + s, y0 + d, tB - s, y0 + d);
+    path.AddBezier(tB - s, y0 + d, tB - s * 0.5f, y0 + d, tB - s * 0.5f, y0, tB, y0);
+    path.AddLine(tB, y0, x1, y0);
+    path.AddLine(x1, y0, x1, y1);
+    path.AddLine(x1, y1, bB, y1);
+    path.AddBezier(bB, y1, bB - s * 0.5f, y1, bB - s * 0.5f, y1 - d, bB - s, y1 - d);
+    path.AddLine(bB - s, y1 - d, bA + s, y1 - d);
+    path.AddBezier(bA + s, y1 - d, bA + s * 0.5f, y1 - d, bA + s * 0.5f, y1, bA, y1);
+    path.AddLine(bA, y1, x0, y1);
+    path.CloseFigure();
+
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::Pen pen(Argb(color, alpha), width);
+    pen.SetLineJoin(Gdiplus::LineJoinMiter);
+    g.DrawPath(&pen, &path);
+}
+
+void CutBox(HDC dc, const RECT& r, int cut, COLORREF fill, BYTE fillAlpha,
+            COLORREF edge, BYTE edgeAlpha, float width) {
+    if (r.right - r.left < 4 || r.bottom - r.top < 4) return;
+    const float half = width / 2.0f;
+    const float x0 = (float)r.left + half, x1 = (float)r.right - half;
+    const float y0 = (float)r.top + half,  y1 = (float)r.bottom - half;
+    const float c = (std::min)((float)cut, (y1 - y0) * 0.6f);
+    Gdiplus::PointF pts[5] = { { x0, y0 }, { x1 - c, y0 }, { x1, y0 + c }, { x1, y1 }, { x0, y1 } };
+
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    if (fillAlpha) {
+        // The fill covers the stroke's own footprint too, so the edge sits on it.
+        Gdiplus::PointF f[5] = { { x0 - half, y0 - half }, { x1 - c + half * 0.4f, y0 - half },
+                                 { x1 + half, y0 + c - half * 0.4f }, { x1 + half, y1 + half },
+                                 { x0 - half, y1 + half } };
+        Gdiplus::SolidBrush brush(Argb(fill, fillAlpha));
+        g.FillPolygon(&brush, f, 5);
+    }
+    if (edgeAlpha) {
+        Gdiplus::Pen pen(Argb(edge, edgeAlpha), width);
+        pen.SetLineJoin(Gdiplus::LineJoinMiter);
+        g.DrawPolygon(&pen, pts, 5);
     }
 }
 
-#ifndef WM_DPICHANGED_AFTERPARENT
-#define WM_DPICHANGED_AFTERPARENT 0x02E3
-#endif
-#ifndef WM_DPICHANGED
-#define WM_DPICHANGED 0x02E0
-#endif
+// ================================================================ widgets
+void RowFocus(HDC dc, const RECT& row, float t) {
+    if (t <= 0.01f) return;
+    // Warm light filling the row from the right, where the control is.
+    Sweep(dc, row, AmberGlow, (BYTE)(10.0f * t), (BYTE)(46.0f * t));
+    Glow(dc, row, AmberGlow, Sc(16), (BYTE)(118.0f * t));
+    Frame(dc, row, Mix(RGB(90, 60, 10), Amber, t), (BYTE)(255.0f * (std::min)(1.0f, t * 1.4f)),
+          (std::max)(2, Sc(2)));
+}
 
-bool DialogMessage(HWND dlg, UINT msg, WPARAM wp, LPARAM lp, INT_PTR* result) {
-    switch (msg) {
-        // Per-monitor-v2 resizes the dialog and its children for us, but it
-        // knows nothing about the fonts we forced on them or the card
-        // rectangles we measured off the hidden groupboxes. Both have to be
-        // taken again at the new scale, or the window arrives on the second
-        // monitor the right size with the wrong-sized text in it.
-        case WM_DPICHANGED:
-        case WM_DPICHANGED_AFTERPARENT:
-            PrepareDialog(dlg);
-            RedrawWindow(dlg, nullptr, nullptr,
-                         RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
-            return false;      // the dialog manager still has to do its part
+namespace {
 
-        case WM_ERASEBKGND: {
-            HDC dc = (HDC)wp;
-            // Pages of the settings window are separate dialogs; whichever one
-            // painted last left its own scale behind.
-            SetDpi(DpiForWindow(dlg));
-            RECT client;
-            GetClientRect(dlg, &client);
-            FillGrain(dc, client, dlg);
+// The colour of a word that is not on a bar.
+COLORREF LooseInk(const Look& look) {
+    if (!look.enabled) return TextMute;
+    return Mix(Text, Amber, look.lit);
+}
 
-            auto header = g_headers.find(dlg);
-            if (header != g_headers.end() && header->second > 0) {
-                RECT strip = { client.left, client.top, client.right, header->second };
-                FillRect(dc, &strip, g_panelBrush);
+void Bar(HDC dc, const RECT& r, const Look& look) {
+    if (!look.enabled) { Wash(dc, r, Slate, 255); return; }
+    Gradient(dc, r, Mix(Fill, AmberHot, look.lit), Mix(FillLow, Amber, look.lit));
+}
 
-                // A solid accent rule under the header, and at its right end
-                // a short run of hazard stripes - the one ornament, and the
-                // one that says where the look comes from.
-                const int rule = (std::max)(2, Sc(2));
-                RECT line = { client.left, header->second - rule, client.right,
-                              header->second };
-                HBRUSH b = CreateSolidBrush(Accent);
-                FillRect(dc, &line, b);
-                DeleteObject(b);
+COLORREF BarInk(const Look& look) {
+    if (!look.enabled) return SlateText;
+    return Mix(FillText, AmberText, look.lit);
+}
 
-                Gdiplus::Graphics g(dc);
-                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-                const float w = (float)Sc(64), h = (float)Sc(7);
-                const float x0 = (float)client.right - w - (float)Sc(14);
-                const float y0 = (float)(header->second - rule) - h;
-                Gdiplus::Region keep(Gdiplus::RectF(x0, y0, w, h));
-                g.SetClip(&keep);
-                Gdiplus::SolidBrush dark(Argb(Bg, 255));
-                g.FillRectangle(&dark, x0, y0, w, h);
-                Gdiplus::SolidBrush orange(Argb(Accent, 255));
-                const float step = (float)Sc(10);
-                for (float x = x0 - h; x < x0 + w + h; x += step) {
-                    const Gdiplus::PointF pts[4] = {
-                        { x, y0 + h }, { x + h, y0 }, { x + h + step / 2, y0 },
-                        { x + step / 2, y0 + h },
-                    };
-                    g.FillPolygon(&orange, pts, 4);
-                }
-                g.ResetClip();
+} // namespace
+
+void DrawPair(HDC dc, const RECT& r, const std::wstring& first, const std::wstring& second,
+              int chosen, const Look& look) {
+    const int mid = (r.left + r.right) / 2;
+    const RECT half[2] = { { r.left, r.top, mid, r.bottom }, { mid, r.top, r.right, r.bottom } };
+    const std::wstring* words[2] = { &first, &second };
+
+    // The glow of a lit row pools behind the chosen word, as the game's does.
+    if (look.enabled && look.lit > 0.01f && (chosen == 0 || chosen == 1)) {
+        RECT pool = half[chosen];
+        InflateRect(&pool, Sc(34), Sc(18));
+        Haze(dc, pool, AmberGlow, (BYTE)(70.0f * look.lit));
+    }
+    for (int i = 0; i < 2; ++i) {
+        const bool on = (i == chosen);
+        if (on) {
+            Bar(dc, half[i], look);
+            Print(dc, Font::ValueLight, Caps(*words[i]), half[i], BarInk(look),
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        } else {
+            if (look.enabled && look.hot == i) {
+                RECT box = half[i];
+                InflateRect(&box, -Sc(1), -Sc(1));
+                Frame(dc, box, LooseInk(look), 90, 1);
             }
-
-            auto cards = g_cards.find(dlg);
-            if (cards != g_cards.end())
-                for (const auto& card : cards->second)
-                    DrawCard(dc, card.rect, card.title.c_str());
-
-            *result = TRUE;
-            return true;
-        }
-
-        case WM_NCDESTROY:
-            // Page dialogs never called ForgetDialog, so their card lists piled
-            // up every time the settings window was rebuilt.
-            ForgetDialog(dlg);
-            return false;      // the dialog still wants to see this
-
-        case WM_CTLCOLORDLG:
-            *result = (INT_PTR)g_bgBrush;
-            return true;
-
-        case WM_CTLCOLORSTATIC: {
-            HDC dc = (HDC)wp;
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, Text);
-            // Match whatever the control is sitting on, or the text gets a
-            // mismatched rectangle behind it - and if that is the grain,
-            // phase it so the lines run through the control unbroken.
-            HBRUSH b = Backdrop(dlg, (HWND)lp);
-            if (b == g_grainBrush) {
-                const POINT ph = GrainPhase((HWND)lp);
-                SetBrushOrgEx(dc, ph.x, ph.y, nullptr);
-            }
-            *result = (INT_PTR)b;
-            return true;
-        }
-
-        case WM_CTLCOLORBTN: {
-            HBRUSH b = Backdrop(dlg, (HWND)lp);
-            if (b == g_grainBrush) {
-                const POINT ph = GrainPhase((HWND)lp);
-                SetBrushOrgEx((HDC)wp, ph.x, ph.y, nullptr);
-            }
-            *result = (INT_PTR)b;
-            return true;
-        }
-
-        case WM_CTLCOLOREDIT:
-        case WM_CTLCOLORLISTBOX: {
-            HDC dc = (HDC)wp;
-            SetBkMode(dc, OPAQUE);
-            SetBkColor(dc, Field);
-            SetTextColor(dc, Text);
-            *result = (INT_PTR)g_fieldBrush;
-            return true;
-        }
-
-        case WM_MOUSEMOVE:
-            TrackHover(dlg);
-            return false;      // let the dialog see it too
-
-        case WM_DRAWITEM: {
-            auto* dis = (DRAWITEMSTRUCT*)lp;
-
-            if (dis->CtlType == ODT_BUTTON) {
-                PaintButton(dis->hwndItem, dis->hDC, dis->rcItem,
-                            g_primaryButtons.count(dis->hwndItem) != 0,
-                            (dis->itemState & ODS_DISABLED) != 0,
-                            (dis->itemState & ODS_SELECTED) != 0,
-                            (dis->itemState & ODS_FOCUS) != 0);
-                *result = TRUE;
-                return true;
-            }
-
-            if (dis->CtlType == ODT_COMBOBOX) {
-                const bool inEdit = (dis->itemState & ODS_COMBOBOXEDIT) != 0;
-                const bool sel = !inEdit && (dis->itemState & ODS_SELECTED) != 0;
-
-                RECT r = dis->rcItem;
-                HBRUSH back = CreateSolidBrush(sel ? Accent : (inEdit ? Field : PanelAlt));
-                FillRect(dis->hDC, &r, back);
-                DeleteObject(back);
-
-                if ((int)dis->itemID >= 0) {
-                    wchar_t text[256] = {};
-                    SendMessageW(dis->hwndItem, CB_GETLBTEXT, dis->itemID, (LPARAM)text);
-                    RECT tr = { r.left + 5, r.top, r.right - 4, r.bottom };
-                    SetBkMode(dis->hDC, TRANSPARENT);
-                    SetTextColor(dis->hDC, sel ? AccentText : Text);
-                    HGDIOBJ old = SelectObject(dis->hDC, g_ui);
-                    DrawTextW(dis->hDC, text, -1, &tr,
-                              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                    SelectObject(dis->hDC, old);
-                }
-                *result = TRUE;
-                return true;
-            }
-
-            if (dis->CtlType == ODT_TAB) {
-                const bool selected = (dis->itemState & ODS_SELECTED) != 0;
-                const bool hot = !selected && (int)dis->itemID == g_hotTab;
-                RECT r = dis->rcItem;
-
-                RECT back = r;
-                FillGrain(dis->hDC, back, dis->hwndItem);
-
-                // Slanted plates in a row, like the category headers across
-                // the top of the game's settings: the selected one is a solid
-                // orange plate with dark text, a hot one a dark plate, and
-                // the rest are just words. A rule runs under the whole row.
-                const int slant = Sc(6);
-                RECT plate = { r.left, r.top + Sc(3), r.right, r.bottom - Sc(1) };
-                if (selected)  Slant(dis->hDC, plate, slant, Accent, 255, Accent, 255);
-                else if (hot)  Slant(dis->hDC, plate, slant, PanelAlt, 255, Border, 255);
-
-                wchar_t text[64] = {};
-                TCITEMW item = {};
-                item.mask = TCIF_TEXT;
-                item.pszText = text;
-                item.cchTextMax = 64;
-                TabCtrl_GetItem(dis->hwndItem, dis->itemID, &item);
-                const std::wstring caps = Caps(text);
-
-                RECT tr = plate;
-                SetBkMode(dis->hDC, TRANSPARENT);
-                SetTextColor(dis->hDC, selected ? AccentText : (hot ? Text : TextDim));
-                HGDIOBJ old = SelectObject(dis->hDC, g_heading);
-                DrawTextW(dis->hDC, caps.c_str(), -1, &tr,
-                          DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                SelectObject(dis->hDC, old);
-                *result = TRUE;
-                return true;
-            }
-            return false;
-        }
-
-        case WM_NOTIFY: {
-            auto* hdr = (NMHDR*)lp;
-            if (hdr->code != NM_CUSTOMDRAW) return false;
-
-            if (IsClass(hdr->hwndFrom, L"msctls_trackbar32")) {
-                auto* cd = (NMCUSTOMDRAW*)lp;
-                if (cd->dwDrawStage == CDDS_PREPAINT) {
-                    DrawTrackbar(hdr->hwndFrom, cd);
-                    *result = CDRF_SKIPDEFAULT;
-                    return true;
-                }
-                *result = CDRF_DODEFAULT;
-                return true;
-            }
-
-            if (IsClass(hdr->hwndFrom, L"SysListView32")) {
-                auto* cd = (NMLVCUSTOMDRAW*)lp;
-                switch (cd->nmcd.dwDrawStage) {
-                    case CDDS_PREPAINT:
-                        *result = CDRF_NOTIFYITEMDRAW;
-                        return true;
-                    case CDDS_ITEMPREPAINT: {
-                        const bool selected =
-                            ListView_GetItemState(hdr->hwndFrom, (int)cd->nmcd.dwItemSpec,
-                                                  LVIS_SELECTED) != 0;
-                        cd->clrTextBk = selected ? RowSel
-                                       : ((cd->nmcd.dwItemSpec % 2) ? RowAlt : Panel);
-                        cd->clrText = Text;
-                        *result = CDRF_DODEFAULT;
-                        return true;
-                    }
-                }
-                *result = CDRF_DODEFAULT;
-                return true;
-            }
-            return false;
+            Print(dc, Font::Value, Caps(*words[i]), half[i], LooseInk(look),
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
     }
-    return false;
+}
+
+void DrawSelector(HDC dc, const RECT& r, const std::wstring& text, const Look& look,
+                  bool canBack, bool canForward, COLORREF swatch) {
+    const int h = r.bottom - r.top;
+    const float cy = (float)(r.top + r.bottom) / 2.0f;
+    const float size = (float)h * 0.30f;
+    const float lx = (float)r.left + size + (float)Sc(4);
+    const float rx = (float)r.right - size - (float)Sc(4);
+
+    if (look.enabled && look.lit > 0.01f) {
+        RECT pool = r;
+        InflateRect(&pool, Sc(10), Sc(14));
+        Haze(dc, pool, AmberGlow, (BYTE)(46.0f * look.lit));
+    }
+    const COLORREF ink = LooseInk(look);
+    auto arrow = [&](float x, int dir, bool can, bool hot) {
+        COLORREF c = ink;
+        BYTE a = 255;
+        if (!can) a = 70;
+        else if (hot && look.enabled) c = look.lit > 0.5f ? AmberHot : RGB(255, 255, 255);
+        Arrowhead(dc, x, cy, size * (hot && can ? 1.12f : 1.0f), dir, c, a);
+    };
+    arrow(lx, -1, canBack, look.hot == 0);
+    arrow(rx, +1, canForward, look.hot == 2);
+
+    RECT tr = { (int)(lx + size * 1.4f), r.top, (int)(rx - size * 1.4f), r.bottom };
+    std::wstring caps = Caps(text);
+    if (swatch != CLR_INVALID) {
+        // A chip of the colour, then its name.
+        const int chip = (int)((float)h * 0.46f);
+        const int tw = Measure(dc, Font::Value, caps);
+        const int total = chip + Sc(9) + tw;
+        int x = (int)tr.left + (std::max)(0, (int)((tr.right - tr.left) - total) / 2);
+        RECT sw = { x, (int)cy - chip / 2, x + chip, (int)cy - chip / 2 + chip };
+        Wash(dc, sw, swatch, 255);
+        Frame(dc, sw, look.enabled ? Mix(Text, Amber, look.lit) : TextMute, 200, 1);
+        tr.left = sw.right + Sc(9);
+        Print(dc, Font::Value, caps, tr, ink, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
+    Print(dc, Font::Value, caps, tr, ink, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+void DrawSlider(HDC dc, const RECT& r, float fraction, const std::wstring& text,
+                const Look& look) {
+    fraction = fraction < 0.0f ? 0.0f : (fraction > 1.0f ? 1.0f : fraction);
+    const COLORREF groove = !look.enabled ? RGB(34, 38, 44) : Mix(Track, AmberTrack, look.lit);
+    Wash(dc, r, groove, 255);
+
+    const int split = r.left + (int)((float)(r.right - r.left) * fraction + 0.5f);
+    RECT done = { r.left, r.top, split, r.bottom };
+    if (done.right > done.left) Bar(dc, done, look);
+
+    // The number sits across the edge of the fill, so it is printed twice and
+    // each copy clipped to its own side: dark on the bar, light on the groove.
+    const std::wstring caps = Caps(text);
+    const COLORREF light = !look.enabled ? SlateText : RGB(250, 251, 252);
+    int saved = SaveDC(dc);
+    IntersectClipRect(dc, split, r.top, r.right, r.bottom);
+    Print(dc, Font::Value, caps, r, light, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    RestoreDC(dc, saved);
+    saved = SaveDC(dc);
+    IntersectClipRect(dc, r.left, r.top, split, r.bottom);
+    Print(dc, Font::Value, caps, r, BarInk(look), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    RestoreDC(dc, saved);
+
+    if (look.enabled && (look.hot >= 0 || look.pressed)) {
+        // Where a click would put it.
+        RECT tick = { split - (std::max)(1, Sc(1)), r.top - Sc(3), split + (std::max)(1, Sc(1)),
+                      r.bottom + Sc(3) };
+        Wash(dc, tick, look.lit > 0.5f ? AmberHot : Text, 255);
+    }
+}
+
+void DrawAction(HDC dc, const RECT& r, const std::wstring& text, const Look& look, bool danger) {
+    const int cut = Sc(9);
+    const float w = ScF(1.5f);
+    COLORREF ink = danger ? RGB(255, 120, 104) : Text;
+    if (!look.enabled) {
+        CutBox(dc, r, cut, 0, 0, TextMute, 150, w);
+        Print(dc, Font::Value, Caps(text), r, TextMute, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
+    if (look.pressed) {
+        CutBox(dc, r, cut, AmberHot, 255, AmberHot, 255, w);
+        Print(dc, Font::Value, Caps(text), r, AmberText, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
+    const float lit = (std::max)(look.lit, look.hot >= 0 ? 0.6f : 0.0f);
+    CutBox(dc, r, cut, AmberGlow, (BYTE)(40.0f * lit), Mix(ink, Amber, lit),
+           (BYTE)(150.0f + 105.0f * lit), w);
+    Print(dc, Font::Value, Caps(text), r, Mix(ink, Amber, lit),
+          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+std::wstring KeyName(UINT vk) {
+    switch (vk) {
+        case VK_LEFT:  return L"\x2190";
+        case VK_UP:    return L"\x2191";
+        case VK_RIGHT: return L"\x2192";
+        case VK_DOWN:  return L"\x2193";
+        case VK_RETURN: return L"Enter";
+        case VK_ESCAPE: return L"Esc";
+        case VK_BACK:  return L"Bksp";
+        case VK_DELETE: return L"Del";
+        case VK_PRIOR: return L"PgUp";
+        case VK_NEXT:  return L"PgDn";
+        case VK_OEM_3: return L"`";
+        default: break;
+    }
+    return DescribeChord(0, vk);
+}
+
+int Keycap(HDC dc, int x, int centreY, const std::wstring& key, COLORREF ink,
+           bool measureOnly, bool solid, bool large) {
+    if (key.empty()) return 0;
+    const std::wstring caps = Caps(key);
+    const Font font = large ? Font::Button : Font::Key;
+    const int track = large ? 0 : (std::max)(1, Sc(1)) - 1;
+    const int tw = Measure(dc, font, caps, track);
+    const int h  = large ? Sc(26) : Sc(18);
+    const int w  = (std::max)(h, tw + (large ? Sc(18) : Sc(12)));
+    if (!measureOnly) {
+        RECT box = { x, centreY - h / 2, x + w, centreY - h / 2 + h };
+        if (solid) {
+            Wash(dc, box, ink, 255);
+        } else {
+            Wash(dc, box, ink, 20);
+            Frame(dc, box, ink, 200, 1);
+        }
+        Print(dc, font, caps, box, solid ? RGB(18, 18, 20) : ink,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE, track);
+    }
+    return w;
+}
+
+int Chord(HDC dc, int x, int centreY, UINT mods, UINT vk, COLORREF ink,
+          bool alignRight, bool measureOnly, bool large) {
+    std::vector<std::wstring> keys;
+    if (mods & MOD_WIN)     keys.push_back(L"Win");
+    if (mods & MOD_CONTROL) keys.push_back(L"Ctrl");
+    if (mods & MOD_ALT)     keys.push_back(L"Alt");
+    if (mods & MOD_SHIFT)   keys.push_back(L"Shift");
+    if (vk) keys.push_back(KeyName(vk));
+    if (keys.empty()) return 0;
+
+    const int gap = large ? Sc(6) : Sc(4);
+    int total = 0;
+    for (size_t i = 0; i < keys.size(); ++i)
+        total += Keycap(dc, 0, 0, keys[i], ink, true, false, large) + (i ? gap : 0);
+    if (measureOnly) return total;
+
+    int cx = alignRight ? x - total : x;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (i) cx += gap;
+        cx += Keycap(dc, cx, centreY, keys[i], ink, false, false, large);
+    }
+    return total;
+}
+
+int ButtonWidth(HDC dc, const std::wstring& label, const wchar_t* key) {
+    int w = Measure(dc, Font::Button, Caps(label), Sc(1)) + Sc(40);
+    if (key && *key) w += Keycap(dc, 0, 0, key, Text, true) + Sc(9);
+    return w;
+}
+
+void DrawButton(HDC dc, const RECT& r, const std::wstring& label, const wchar_t* key,
+                const ButtonLook& look) {
+    const int cut = (r.bottom - r.top) * 2 / 5;
+    const float w = (float)(std::max)(2, Sc(2));
+    const bool lit = look.enabled && (look.hot || look.focused);
+    COLORREF ink;
+    if (!look.enabled) {
+        ink = TextMute;
+        CutBox(dc, r, cut, 0, 0, TextMute, 140, w);
+    } else if (look.pressed) {
+        ink = AmberText;
+        CutBox(dc, r, cut, AmberHot, 255, AmberHot, 255, w);
+    } else if (lit) {
+        ink = Amber;
+        Glow(dc, r, AmberGlow, Sc(12), 90);
+        CutBox(dc, r, cut, AmberGlow, 34, Amber, 255, w);
+    } else if (look.primary) {
+        ink = Amber;
+        CutBox(dc, r, cut, AmberGlow, 16, Amber, 210, w);
+    } else {
+        ink = Text;
+        CutBox(dc, r, cut, 0, 0, RGB(196, 200, 206), 190, w);
+    }
+
+    const std::wstring caps = Caps(label);
+    const int track = Sc(1);
+    const int tw = Measure(dc, Font::Button, caps, track);
+    const int kw = (key && *key) ? Keycap(dc, 0, 0, key, ink, true) + Sc(9) : 0;
+    int x = r.left + ((r.right - r.left) - (tw + kw)) / 2;
+    const int cy = (r.top + r.bottom) / 2;
+    if (kw) {
+        Keycap(dc, x, cy, key, ink, false, look.pressed);
+        x += kw;
+    }
+    RECT tr = { x, r.top, x + tw + track, r.bottom };
+    Print(dc, Font::Button, caps, tr, ink, DT_LEFT | DT_VCENTER | DT_SINGLELINE, track);
+}
+
+int Prompt(HDC dc, int x, int centreY, const std::wstring& key, const std::wstring& word,
+           COLORREF ink, bool measureOnly) {
+    const std::wstring caps = Caps(word);
+    const int track = Sc(1);
+    const int kw = Keycap(dc, 0, 0, key, ink, true);
+    const int ww = Measure(dc, Font::Caption, caps, track);
+    const int total = kw + Sc(7) + ww;
+    if (measureOnly) return total;
+    Keycap(dc, x, centreY, key, ink);
+    RECT tr = { x + kw + Sc(7), centreY - Sc(12), x + total + track, centreY + Sc(12) };
+    Print(dc, Font::Caption, caps, tr, ink, DT_LEFT | DT_VCENTER | DT_SINGLELINE, track);
+    return total;
+}
+
+void Mark(HDC dc, const RECT& r, COLORREF ink, COLORREF master) {
+    const int w = r.right - r.left, h = r.bottom - r.top;
+    const int gap = (std::max)(1, w / 12);
+    const int split = r.left + w * 11 / 20;
+    const int mid = r.top + h / 2;
+    RECT a = { r.left, r.top, split - gap / 2, r.bottom };
+    RECT b = { split + (gap + 1) / 2, r.top, r.right, mid - gap / 2 };
+    RECT c = { split + (gap + 1) / 2, mid + (gap + 1) / 2, r.right, r.bottom };
+    Wash(dc, a, master, 255);
+    Wash(dc, b, ink, 255);
+    Wash(dc, c, Mix(ink, Bg, 0.45f), 255);
 }
 
 } // namespace theme

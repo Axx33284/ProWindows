@@ -21,14 +21,22 @@ std::wstring PipeName() {
 }
 
 // The command as it travels, and the answer coming back. Allocated by the pipe
-// thread and handed to the UI thread by pointer; see Abandon() below for who
-// frees it, which is the only subtle thing in this file.
+// thread and handed to the UI thread by pointer. Both threads own it, and
+// whichever lets go last frees it (Release) - the only subtle thing in this
+// file.
 struct Request {
     std::wstring command;
     std::wstring reply;
     HANDLE       done      = nullptr;
     LONG         abandoned = 0;   // the pipe thread gave up waiting
+    LONG         owners    = 2;   // the pipe thread and the UI thread
 };
+
+void Release(Request* req) {
+    if (InterlockedDecrement(&req->owners) != 0) return;
+    CloseHandle(req->done);
+    delete req;
+}
 
 HWND       g_msgWnd  = nullptr;
 IpcHandler g_handler = nullptr;
@@ -67,8 +75,9 @@ constexpr DWORD kReplyTimeoutMs = 5000;
 // On timeout the request is NOT freed here. The UI thread may still be about to
 // write into it, and freeing memory another thread is holding is the exact
 // failure this project has spent its time removing. The request is marked
-// abandoned instead and the UI thread frees it when it finally gets there - so
-// a timeout costs a few hundred bytes until then, and never a crash.
+// abandoned and let go of; the UI thread frees it when it lets go too. That
+// used to depend on the UI thread seeing the mark before it started, so a
+// command that was already running when the wait gave up was never freed.
 std::wstring RunOnUiThread(const std::wstring& command) {
     if (!g_msgWnd || !IsWindow(g_msgWnd)) return L"error: not running";
 
@@ -88,12 +97,12 @@ std::wstring RunOnUiThread(const std::wstring& command) {
     if (hit != WAIT_OBJECT_0) {
         InterlockedExchange(&req->abandoned, 1);
         AWA_LOG(L"ipc: '%s' timed out waiting for the UI thread", command.c_str());
+        Release(req);
         return L"error: timed out";
     }
 
     std::wstring reply = req->reply;
-    CloseHandle(req->done);
-    delete req;
+    Release(req);
     return reply;
 }
 
@@ -199,15 +208,16 @@ void IpcExecute(WPARAM token) {
     // The pipe thread stopped waiting. It deliberately left the request behind
     // rather than freeing something this thread was about to write to, so
     // clearing it up is this thread's job.
+    // Nobody is waiting for the answer any more; do not run the command.
     if (InterlockedCompareExchange(&req->abandoned, 0, 0) != 0) {
-        CloseHandle(req->done);
-        delete req;
+        Release(req);
         return;
     }
 
     req->reply = g_handler ? g_handler(req->command)
                            : std::wstring(L"error: no handler");
     SetEvent(req->done);
+    Release(req);
 }
 
 // ---------------------------------------------------------------- client

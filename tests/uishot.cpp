@@ -1,15 +1,20 @@
 // ProWindows - screenshots of the settings window, without the tiler.
 //
-// The settings window only ever asks the shell for two things (a layout push
-// and a tiling toggle, both from a button), so it can be stood up on its own
-// with the rest of `app.h` stubbed out. Nothing here starts the window manager,
-// installs a hook or registers a hotkey - the point is to be able to look at
-// the UI on a live desktop without every window on it being rearranged.
+// The settings window only ever asks the shell for a handful of things, so it
+// can be stood up on its own with the rest of `app.h` stubbed out. Nothing
+// here starts the window manager, installs a hook or registers a hotkey - the
+// point is to look at the UI on a live desktop without every window on it
+// being rearranged.
+//
+// Everything is driven by messages sent to the window - keys, characters,
+// clicks - never by the real keyboard or mouse, so the harness can run while
+// somebody is using the machine.
 //
 //   uishot.exe <output folder>
 //
 // Build it with tests\uishot.bat.
 #include "../src/settings.h"
+#include "../src/settings_internal.h"
 #include "../src/app.h"
 #include "../src/theme.h"
 #include "../src/monitor.h"
@@ -36,17 +41,16 @@ using std::max;
 using namespace awa;
 
 // ---------------------------------------------------------------- app.h stubs
-// Everything the settings window expects the shell to provide. None of it does
-// anything: the harness exists to draw the window, not to apply what it says.
 namespace awa {
 
 static Config        g_cfg;
 static WindowManager g_wm;
+static int           g_applied = 0;
 
 Config&        AppConfig() { return g_cfg; }
 WindowManager& AppWm()     { return g_wm; }
 
-void AppApplySettings()   {}
+void AppApplySettings()   { ++g_applied; SettingsRefresh(); }
 void AppShowShortcuts()   {}
 void AppOpenConfigFile()  {}
 void AppRetileNow()       {}
@@ -65,11 +69,11 @@ void AppOpenConfigFolder()    {}
 void AppWriteDiagnostics()    {}
 void AppReloadFromDisk()      {}
 void AppRestoreHiddenWindows() {}
-void AppRestoreDefaults(HWND) {}
-// Fixed text rather than the real thing: the About block would otherwise put
+void AppRestoreDefaults()     {}
+// Fixed text rather than the real thing: the About rows would otherwise put
 // this machine's user name and install path into every capture.
 std::wstring AppAboutText() {
-    return L"ProWindows 1.3.0  -  running as a normal user\r\n"
+    return L"ProWindows 1.5.0  -  running as a normal user\r\n"
            L"C:\\Tools\\ProWindows\\ProWindows.exe\r\n"
            L"C:\\Users\\you\\AppData\\Roaming\\ProWindows\\config.ini";
 }
@@ -77,6 +81,10 @@ std::wstring AppAboutText() {
 } // namespace awa
 
 namespace {
+
+CLSID g_png = {};
+std::wstring g_out;
+int g_failures = 0;
 
 CLSID PngEncoder() {
     UINT count = 0, bytes = 0;
@@ -97,8 +105,6 @@ void Pump(DWORD ms) {
     MSG msg;
     for (;;) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            HWND dlg = SettingsWindow();
-            if (dlg && IsWindow(dlg) && IsDialogMessageW(dlg, &msg)) continue;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -107,58 +113,110 @@ void Pump(DWORD ms) {
     }
 }
 
-void Capture(HWND wnd, const std::wstring& path, const CLSID& png) {
-    RECT r{};
-    if (!GetWindowRect(wnd, &r)) return;
-    const int w = r.right - r.left, h = r.bottom - r.top;
+// The window's own surface, which is what DWM composites.
+void Capture(HWND wnd, const std::wstring& name) {
+    RECT c{};
+    GetClientRect(wnd, &c);
+    const int w = c.right, h = c.bottom;
     if (w <= 0 || h <= 0) return;
-
-    HDC screen = GetDC(nullptr);
-    HDC mem = CreateCompatibleDC(screen);
-    HBITMAP bmp = CreateCompatibleBitmap(screen, w, h);
+    HDC own = GetDC(wnd);
+    HDC mem = CreateCompatibleDC(own);
+    HBITMAP bmp = CreateCompatibleBitmap(own, w, h);
     HGDIOBJ old = SelectObject(mem, bmp);
-
     if (!PrintWindow(wnd, mem, 0x00000002 /* PW_RENDERFULLCONTENT */))
-        BitBlt(mem, 0, 0, w, h, screen, r.left, r.top, SRCCOPY);
-
+        BitBlt(mem, 0, 0, w, h, own, 0, 0, SRCCOPY);
+    ReleaseDC(wnd, own);
     Gdiplus::Bitmap image(bmp, nullptr);
-    image.Save(path.c_str(), &png, nullptr);
-
+    const std::wstring path = g_out + L"\\" + name;
+    image.Save(path.c_str(), &g_png, nullptr);
     SelectObject(mem, old);
     DeleteObject(bmp);
     DeleteDC(mem);
-    ReleaseDC(nullptr, screen);
-    wprintf(L"  %s  (%dx%d)\n", path.c_str(), w, h);
+    wprintf(L"  %s  (%dx%d)\n", name.c_str(), w, h);
+}
+
+// Holds (or lets go of) a key as far as GetKeyState on this thread is
+// concerned, so a message-driven Ctrl+Tab reads as one.
+void Hold(int vk, bool down) {
+    BYTE keys[256] = {};
+    GetKeyboardState(keys);
+    keys[vk] = down ? 0x80 : 0;
+    SetKeyboardState(keys);
+}
+
+void Key(HWND wnd, UINT vk, int times = 1) {
+    for (int i = 0; i < times; ++i) {
+        SendMessageW(wnd, WM_KEYDOWN, vk, 1);
+        SendMessageW(wnd, WM_KEYUP, vk, 0xC0000001);
+        Pump(40);
+    }
+}
+
+void Type(HWND wnd, const wchar_t* text) {
+    for (const wchar_t* p = text; *p; ++p) { SendMessageW(wnd, WM_CHAR, *p, 1); Pump(20); }
+}
+
+void Check(bool ok, const wchar_t* what) {
+    wprintf(L"  %-60s %s\n", what, ok ? L"ok" : L"FAILED");
+    if (!ok) ++g_failures;
+}
+
+// How much of a region is lit amber: the share of its pixels that are
+// strongly orange.
+double AmberShare(HWND wnd, RECT r) {
+    HDC dc = GetDC(wnd);
+    int amber = 0, all = 0;
+    for (int y = r.top; y < r.bottom; y += 2)
+        for (int x = r.left; x < r.right; x += 2) {
+            const COLORREF c = GetPixel(dc, x, y);
+            ++all;
+            if (GetRValue(c) > 200 && GetGValue(c) > 110 && GetGValue(c) < 220 && GetBValue(c) < 90) ++amber;
+        }
+    ReleaseDC(wnd, dc);
+    return all ? (double)amber / all : 0.0;
+}
+
+// A modal screen takes over the message loop; this timer photographs it and
+// then answers it with Esc.
+std::wstring g_modalShot;
+void CALLBACK ShootModal(HWND, UINT, UINT_PTR id, DWORD) {
+    KillTimer(nullptr, id);
+    HWND modal = FindWindowW(L"ProWindowsModal", nullptr);
+    if (!modal) { wprintf(L"  (no modal screen appeared)\n"); ++g_failures; return; }
+    SetLayeredWindowAttributes(modal, 0, 255, LWA_ALPHA);
+    RedrawWindow(modal, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    if (!g_modalShot.empty()) Capture(modal, g_modalShot);
+    if (HWND owner = GetWindow(modal, GW_OWNER)) Capture(owner, L"ui-behind-modal.png");
+    PostMessageW(modal, WM_KEYDOWN, VK_ESCAPE, 1);
 }
 
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    const std::wstring out = (argc > 1) ? argv[1] : L".";
+    g_out = (argc > 1) ? argv[1] : L".";
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     Gdiplus::GdiplusStartupInput gsi;
     ULONG_PTR token = 0;
     Gdiplus::GdiplusStartup(&token, &gsi, nullptr);
-    const CLSID png = PngEncoder();
-
-    INITCOMMONCONTROLSEX icc = { sizeof(icc),
-                                 ICC_STANDARD_CLASSES | ICC_BAR_CLASSES |
-                                 ICC_UPDOWN_CLASS | ICC_TAB_CLASSES |
-                                 ICC_LISTVIEW_CLASSES };
-    InitCommonControlsEx(&icc);
+    g_png = PngEncoder();
     theme::Init();
 
     g_cfg.LoadDefaults();
     g_cfg.searchFiles = false;      // no index walk; not what is being looked at
+    // Named folders rather than the defaults, which expand to this machine's
+    // profile - the same reason AppAboutText above is fixed text.
+    g_cfg.searchFolders = { L"C:\\Users\\you\\Desktop", L"C:\\Users\\you\\Documents",
+                            L"C:\\Users\\you\\Downloads", L"D:\\Projects" };
+    g_cfg.ignoreProcess = { L"Steam.exe", L"obs64.exe" };
+    g_cfg.monitorEnabled = true;
+    g_cfg.clockEnabled = true;
     SearchInit(&g_cfg);
 
-    HINSTANCE inst = GetModuleHandleW(nullptr);
-    SettingsOpen(inst);
-    Pump(700);
-
-    HWND dlg = SettingsWindow();
-    if (!dlg) { wprintf(L"the settings window never appeared\n"); return 1; }
+    SettingsOpen(GetModuleHandleW(nullptr));
+    Pump(600);
+    HWND wnd = SettingsWindow();
+    if (!wnd) { wprintf(L"the settings window never appeared\n"); return 1; }
 
     struct Tab { PageIndex page; const wchar_t* name; };
     const Tab tabs[] = {
@@ -171,25 +229,129 @@ int wmain(int argc, wchar_t** argv) {
         { PAGE_CLOCK,     L"ui-clock.png"     },
         { PAGE_GENERAL,   L"ui-general.png"   },
     };
-    static_assert(ARRAYSIZE(tabs) == PAGE_COUNT,
-                  "a tab was added and this harness stopped covering it");
-
+    static_assert(ARRAYSIZE(tabs) == PAGE_COUNT, "a category was added and this harness stopped covering it");
     for (const Tab& tab : tabs) {
         SettingsOpenTab(tab.page);
-        Pump(350);
-        // The shell header and the footer buttons belong to the parent dialog,
-        // and switching tabs does not invalidate them - so without this the
-        // capture caught whatever they happened to be showing.
-        RedrawWindow(dlg, nullptr, nullptr,
-                     RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-        Pump(250);
-        Capture(dlg, out + L"\\" + tab.name, png);
+        Pump(420);
+        Capture(wnd, tab.name);
     }
+
+    RECT client{};
+    GetClientRect(wnd, &client);
+
+    // ---- the categories, from the keyboard
+    SettingsOpenTab(PAGE_LAYOUT);
+    Pump(300);
+    Key(wnd, VK_ESCAPE);                      // back to the column
+    Key(wnd, VK_DOWN);                        // Layout -> Behaviour
+    Pump(300);
+    Capture(wnd, L"ui-nav-focus.png");
+    Hold(VK_CONTROL, true);
+    Key(wnd, VK_TAB);                         // Behaviour -> Shortcuts
+    Hold(VK_CONTROL, false);
+    Pump(300);
+    Capture(wnd, L"ui-ctrl-tab.png");
+
+    // ---- a lit row, and a change that is not applied yet
+    SettingsOpenTab(PAGE_BEHAVIOUR);
+    Pump(300);
+    Key(wnd, VK_ESCAPE);                      // the keyboard back on the categories
+    Pump(300);
+    const RECT middle = { client.right / 4, 150, client.right * 3 / 4, client.bottom - 120 };
+    const double idle = AmberShare(wnd, middle);
+    Key(wnd, VK_RIGHT);                       // into the list: its first row lights
+    Key(wnd, VK_DOWN, 1);                     // the second row
+    Pump(300);
+    const double lit = AmberShare(wnd, middle);
+    Check(idle < 0.002 && lit > 0.01, L"only the row with the keyboard is lit amber");
+    Key(wnd, VK_RIGHT);                       // Pointer follows the focus -> Off (it is off) ...
+    Key(wnd, VK_LEFT);                        // ... -> On
+    Pump(300);
+    Capture(wnd, L"ui-changed.png");
+    Check(!EditedFieldsEqual(Edit(), Saved()), L"a changed toggle is an unapplied edit");
+
+    // ---- Ctrl+S applies it
+    Hold(VK_CONTROL, true);
+    Key(wnd, 'S');
+    Hold(VK_CONTROL, false);
+    Pump(300);
+    Check(g_applied == 1 && g_cfg.cursorWarp, L"Ctrl+S applies, and the live config has the change");
+    Check(EditedFieldsEqual(Edit(), Saved()), L"after Apply nothing is left unapplied");
+    Capture(wnd, L"ui-applied.png");
+
+    // ---- the live config changes underneath an unapplied edit, as it does when
+    // the monitor is re-skinned from its own right-click menu
+    Edit().smartGaps = !Edit().smartGaps;          // the user's change, not applied
+    g_cfg.monitorTheme = 3;                         // somebody else's, already live
+    SettingsRefresh();
+    Check(Edit().smartGaps != g_cfg.smartGaps && Edit().monitorTheme == 3 &&
+          !EditedFieldsEqual(Edit(), Saved()),
+          L"an outside change arrives without losing an unapplied edit");
+    Edit().smartGaps = g_cfg.smartGaps;
+    SettingsRefresh();
+    Check(EditedFieldsEqual(Edit(), Saved()), L"undoing the edit by hand leaves nothing to apply");
+
+    // ---- a slider, from the keyboard
+    SettingsOpenTab(PAGE_LAYOUT);
+    Pump(250);
+    const int gap = Edit().gapInner;
+    Key(wnd, VK_DOWN, 1);                     // Arrangement -> (two Master-only rows skipped) -> gap between
+    Key(wnd, VK_RIGHT, 4);
+    Pump(300);
+    Check(Edit().gapInner == gap + 4, L"Right on a slider moves it one step");
+    Capture(wnd, L"ui-slider.png");
+
+    // ---- recording a shortcut
+    SettingsOpenTab(PAGE_SHORTCUTS);
+    Pump(250);
+    Key(wnd, VK_DOWN, 2);                     // modifier, takeover, the first shortcut
+    Key(wnd, VK_RETURN);
+    Pump(400);
+    // What the keyboard hook would post while Win and Shift are held...
+    constexpr UINT kCaptureKey = WM_APP + 120;
+    SendMessageW(wnd, kCaptureKey, 0, MOD_WIN | MOD_SHIFT);
+    Pump(300);
+    Capture(wnd, L"ui-capture.png");
+    // ... and a chord nobody uses, which is taken at once.
+    SendMessageW(wnd, kCaptureKey, VK_F11, MOD_CONTROL | MOD_ALT);
+    Pump(300);
+    bool bound = false;
+    for (const auto& kb : Edit().binds) bound |= (kb.vk == VK_F11 && kb.mods == (MOD_CONTROL | MOD_ALT));
+    Check(bound, L"a recorded chord lands on the shortcut");
+    Capture(wnd, L"ui-recorded.png");
+    // Esc on its own gives up without changing anything.
+    Key(wnd, VK_RETURN);
+    SendMessageW(wnd, kCaptureKey, VK_ESCAPE, 0);
+    Pump(200);
+
+    // ---- search across every category
+    Type(wnd, L"gap");
+    Pump(350);
+    Capture(wnd, L"ui-search-results.png");
+    Key(wnd, VK_ESCAPE);
+    Pump(200);
+
+    // ---- a modal screen: Reset to defaults asks first
+    SettingsOpenTab(PAGE_CLOCK);
+    Pump(250);
+    g_modalShot = L"ui-modal.png";
+    SetTimer(nullptr, 0, 700, ShootModal);
+    Key(wnd, VK_TAB);                         // the list -> the footer
+    Key(wnd, VK_RIGHT);                       // Apply -> Reset to defaults
+    Key(wnd, VK_RETURN);                      // runs the modal loop until the timer answers it
+    Pump(300);
+
+    // ---- the smallest the window goes
+    SetWindowPos(wnd, nullptr, 0, 0, 100, 100, SWP_NOMOVE | SWP_NOZORDER);
+    SettingsOpenTab(PAGE_MONITOR);
+    Pump(450);
+    Capture(wnd, L"ui-small.png");
 
     SettingsDestroy();
     SearchShutdown();
     theme::Shutdown();
     Gdiplus::GdiplusShutdown(token);
     CoUninitialize();
-    return 0;
+    wprintf(g_failures ? L"%d check(s) FAILED\n" : L"all checks passed\n", g_failures);
+    return g_failures == 0 ? 0 : 1;
 }

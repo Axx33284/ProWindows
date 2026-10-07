@@ -10,8 +10,42 @@ namespace {
 // gpu temp, disk, net.
 const MonitorSkin kSkins[] = {
 {
+    L"frontline", L"Frontline",
+    L"The default, in the settings window's own look: black glass inside a hairline, "
+    L"white readings, amber for the processor.",
+    RGB(12, 13, 15), RGB(6, 7, 9), RGB(150, 156, 164), 150, 0,
+    RGB(236, 238, 240), RGB(148, 154, 162), RGB(244, 246, 248),
+    RGB(82, 88, 96), 110, 34, 225, 0,
+    true,   // load tint
+    { RGB(255, 176, 0), RGB(236, 238, 240), RGB(255, 206, 52),
+      RGB(200, 205, 210), RGB(255, 122, 40), RGB(255, 150, 70),
+      RGB(160, 166, 174), RGB(228, 231, 234) }
+},
+{
+    L"holonet", L"Holonet",
+    L"Square dark glass, white readings, and a restrained colour per metric.",
+    RGB(14, 18, 26), RGB(5, 7, 11), RGB(220, 228, 238), 70, 10,
+    RGB(150, 160, 176), RGB(112, 122, 138), RGB(240, 244, 248),
+    RGB(255, 255, 255), 40, 40, 225, 0,
+    true,   // load tint
+    { RGB(236, 240, 245), RGB(110, 190, 255), RGB(232, 190, 96),
+      RGB(196, 160, 96), RGB(255, 128, 96), RGB(255, 168, 112),
+      RGB(150, 214, 232), RGB(150, 224, 160) }
+},
+{
+    L"hologram", L"Hologram",
+    L"A blue projection: every readout in the same cyan, like a holotable.",
+    RGB(6, 18, 32), RGB(2, 8, 16), RGB(110, 190, 255), 140, 0,
+    RGB(96, 164, 220), RGB(72, 132, 184), RGB(170, 226, 255),
+    RGB(110, 190, 255), 50, 54, 235, 0,
+    false,  // load tint
+    { RGB(130, 206, 255), RGB(120, 198, 250), RGB(140, 212, 255),
+      RGB(112, 190, 244), RGB(150, 216, 255), RGB(126, 202, 252),
+      RGB(136, 208, 255), RGB(118, 196, 248) }
+},
+{
     L"midnight", L"Midnight",
-    L"The default. Near-black glass with a colour per metric.",
+    L"Near-black glass with a colour per metric.",
     RGB(26, 27, 33), RGB(18, 19, 23), RGB(70, 74, 84), 180, 26,
     RGB(150, 155, 165), RGB(132, 137, 148), kUseMetricColour,
     RGB(255, 255, 255), 70, 52, 225, 12,

@@ -47,8 +47,10 @@ enum ClockFace : int {
     CLOCK_FACE_REGULAR,     // Segoe UI
     CLOCK_FACE_SEMIBOLD,    // Segoe UI Semibold
     CLOCK_FACE_MONO,        // Consolas
-    CLOCK_FACE_CONDENSED,   // Bahnschrift SemiBold Condensed: the game-menu look
+    CLOCK_FACE_CONDENSED,   // Bahnschrift SemiBold Condensed: a narrow, heavy look
     CLOCK_FACE_SERIF,       // Georgia
+    CLOCK_FACE_WIDE,        // Bahnschrift Light: thin and wide, the Battlefront menus
+    CLOCK_FACE_COUNT
 };
 
 struct ClockSkin {

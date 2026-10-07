@@ -52,7 +52,7 @@ void AppOpenConfigFolder()    {}
 void AppWriteDiagnostics()    {}
 void AppReloadFromDisk()      {}
 void AppRestoreHiddenWindows() {}
-void AppRestoreDefaults(HWND) {}
+void AppRestoreDefaults()     {}
 std::wstring AppAboutText()   { return L""; }
 } // namespace awa
 

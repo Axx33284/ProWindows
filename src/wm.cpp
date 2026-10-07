@@ -67,6 +67,7 @@ bool WindowManager::Init(HWND msgWnd, Config* cfg) {
     msgWnd_ = msgWnd;
     cfg_    = cfg;
     tilingEnabled_ = cfg->tilingEnabled;
+    cfgTiling_     = cfg->tilingEnabled;
     gapsEnabled_   = true;
 
     ReloadMonitors();
@@ -235,7 +236,10 @@ void WindowManager::ScanExistingWindows() {
 
 void WindowManager::ApplyConfigChanged() {
     Busy guard(this);
-    tilingEnabled_ = cfg_->tilingEnabled;
+    if (cfg_->tilingEnabled != cfgTiling_) {
+        cfgTiling_     = cfg_->tilingEnabled;
+        tilingEnabled_ = cfg_->tilingEnabled;
+    }
 
     for (int mi = 0; mi < (int)monitors_.size(); ++mi) {
         Monitor& m = monitors_[mi];
@@ -281,8 +285,40 @@ void WindowManager::ApplyConfigChanged() {
         lastBordered_ = nullptr;
     }
 
+    // The exclusion rules apply to windows already open, not only to the next
+    // one. Adding an app to "never arrange" used to leave its open windows
+    // tiled until they closed, and taking one off the list left them alone
+    // until they happened to take the focus. A released window that is
+    // hidden - on another workspace, in the scratchpad - is shown first, or
+    // nothing would ever show it again (invariant 2).
+    std::vector<HWND> released;
+    for (const auto& kv : managed_)
+        if (ExcludedByUser(kv.first, *cfg_)) released.push_back(kv.first);
+    for (HWND h : released) {
+        if (ManagedWindow* mw = Find(h)) SetHidden(mw, false);
+        if (cfg_->accentBorder) SetBorderColor(h, 0, false);
+        RemoveWindow(h);
+        AWA_LOG(L"released %p: excluded by the settings", (void*)h);
+    }
+    ScanExistingWindows();
+
     RetileNow();
     UpdateBorders();
+}
+
+void WindowManager::ForgetLearnedLimits() {
+    Busy guard(this);
+    for (auto& kv : managed_) {
+        ManagedWindow& mw = kv.second;
+        mw.limits      = SizeLimits();
+        mw.limitsAsked = false;
+        mw.tooLarge    = false;
+        mw.tooSmall    = false;
+        mw.wastes      = 0;
+        mw.haveSeen    = false;
+    }
+    attempts_.clear();
+    limitsDirty_ = false;
 }
 
 // ================================================================ lookups
@@ -354,13 +390,15 @@ bool WindowManager::AddWindow(HWND h, bool focusIt) {
     if (!h || Find(h) || monitors_.empty()) return false;
 
     IgnoreReason why = IgnoreReason::None;
-    ManageVerdict verdict = Classify(h, *cfg_, &why);
+    const wchar_t* rule = L"";
+    ManageVerdict verdict = Classify(h, *cfg_, &why, &rule);
 
     // A window we are not allowed to move. It takes no part in the layout -
     // reserving a tile for one leaves a rectangle of bare desktop - but it is
     // remembered so the count can be shown and explained.
     if (verdict == ManageVerdict::Blocked) {
         ForgetPending(h);
+        ExplainSkip(h, L"higher integrity level");
         if (blocked_.insert(h).second && !blockedAnnounced_ && !SelfIsElevated()) {
             blockedAnnounced_ = true;
             AppTrayBalloon(kAppName,
@@ -376,18 +414,19 @@ bool WindowManager::AddWindow(HWND h, bool focusIt) {
         // styles and lets DWM un-cloak it, and every one of those states makes
         // Classify say no. Come back and ask again rather than writing the
         // window off on the strength of its first millisecond.
-        if (why == IgnoreReason::Transient) WatchForLater(h);
-        else                                ForgetPending(h);
+        if (why == IgnoreReason::Transient) WatchForLater(h, rule);
+        else { ForgetPending(h); ExplainSkip(h, rule); }
         return false;
     }
     if (!IsOnCurrentVirtualDesktop(h)) {
         // The desktop association is assigned asynchronously as a window
         // opens, so this too is worth asking about again.
-        WatchForLater(h);
+        WatchForLater(h, L"not on the current virtual desktop");
         return false;
     }
 
     ForgetPending(h);
+    explained_.erase(h);
 
     ManagedWindow mw;
     mw.hwnd      = h;
@@ -474,16 +513,30 @@ bool WindowManager::AdoptWindow(HWND h) {
 }
 
 // ================================================================ second looks
-void WindowManager::WatchForLater(HWND h) {
+void WindowManager::ExplainSkip(HWND h, const wchar_t* rule) {
+    // Only for what the user could mistake for a window we should arrange;
+    // every scan walks hundreds of hidden and helper windows as well.
+    if (!IsWindowVisible(h) || GetAncestor(h, GA_ROOT) != h) return;
+    if (GetWindowLongW(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) return;
+    const std::wstring title = WindowTitle(h);
+    if (title.empty()) return;
+    if (explained_.size() >= 512) explained_.clear();   // handles are reused
+    if (!explained_.insert(h).second) return;
+    AWA_LOG(L"skip %p [%s] %s \"%.60s\": %s", (void*)h, WindowClass(h).c_str(),
+            ProcessName(h).c_str(), title.c_str(), rule && *rule ? rule : L"?");
+}
+
+void WindowManager::WatchForLater(HWND h, const wchar_t* rule) {
     if (!h || !msgWnd_ || gameMode_) return;
-    if (pending_.find(h) != pending_.end()) return;   // already being watched
+    auto known = pending_.find(h);
+    if (known != pending_.end()) { known->second.rule = rule; return; }   // already watched
     // A ceiling, because this list is fed by window events and a desktop can
     // produce a great many of those. Losing the sixty-fifth candidate in a
     // burst is better than growing without bound.
     if (pending_.size() >= kMaxPending) return;
 
     const bool wasEmpty = pending_.empty();
-    pending_.emplace(h, Pending{ 0, GetTickCount64() });
+    pending_.emplace(h, Pending{ 0, GetTickCount64(), rule });
     // The timer runs exactly while the list is occupied, which is what keeps
     // an idle desktop genuinely idle.
     if (wasEmpty) SetTimer(msgWnd_, TIMER_PENDING, kPendingIntervalMs, nullptr);
@@ -516,6 +569,7 @@ void WindowManager::RetryPending() {
         if (++it->second.tries > kPendingTries) {
             // Two seconds of asking. Whatever this window is, it is not one
             // that was merely half-built when we first saw it.
+            ExplainSkip(it->first, it->second.rule);
             it = pending_.erase(it);
             continue;
         }
@@ -2197,6 +2251,30 @@ HWND WindowManager::FocusedManaged() {
     return nullptr;
 }
 
+// focused_ only ever names a managed window, and OnForeground leaves it alone
+// when something unmanaged comes to the front. So with the settings window or
+// an excluded app in front, FocusedManaged() still answered with whatever was
+// focused before it, and Alt+Q closed that window - one the user was not even
+// looking at - while the one in front could be neither closed nor minimised
+// from the keyboard.
+HWND WindowManager::ForeignForeground() const {
+    HWND fg = GetForegroundWindow();
+    if (!fg || managed_.count(fg)) return nullptr;
+    if (GetAncestor(fg, GA_ROOT) != fg || !IsWindowVisible(fg)) return nullptr;
+    // Our own search bar and overlays are tool windows; the desktop, the
+    // taskbar and the shell's surfaces are on the built-in list. None of
+    // those is "the window" in any sense a shortcut means.
+    if (GetWindowLongW(fg, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) return nullptr;
+    const std::wstring cls = WindowClass(fg);
+    for (const auto& c : BuiltinIgnoreClass())
+        if (IEquals(c, cls)) return nullptr;
+    return fg;
+}
+
+HWND WindowManager::ActionTarget() {
+    return ForeignForeground() ? nullptr : FocusedManaged();
+}
+
 void WindowManager::FocusAndRemember(HWND h) {
     if (!h) return;
     // Only a real change counts as "the last window". Re-focusing what is
@@ -2275,7 +2353,7 @@ void WindowManager::ActFocusCycle(int delta) {
 }
 
 void WindowManager::ActSwapDir(Dir d) {
-    HWND cur = FocusedManaged();
+    HWND cur = ActionTarget();
     if (!cur) return;
     ManagedWindow* mw = Find(cur);
     if (!mw || mw->floating) return;
@@ -2301,7 +2379,7 @@ void WindowManager::ActSwapDir(Dir d) {
 }
 
 void WindowManager::ActResizeDir(Dir d) {
-    HWND cur = FocusedManaged();
+    HWND cur = ActionTarget();
     if (!cur) return;
     ManagedWindow* mw = Find(cur);
     if (!mw) return;
@@ -2403,7 +2481,7 @@ void WindowManager::ActSwitchWorkspace(int index) {
 }
 
 void WindowManager::ActMoveToWorkspace(int index) {
-    HWND cur = FocusedManaged();
+    HWND cur = ActionTarget();
     if (!cur) return;
     Monitor* mon = ActiveMonitor();
     if (!mon || index < 0 || index >= (int)mon->workspaces.size()) return;
@@ -2450,7 +2528,7 @@ void WindowManager::ActSetLayout(LayoutKind k) {
 }
 
 void WindowManager::ActToggleFloat() {
-    HWND cur = FocusedManaged();
+    HWND cur = ActionTarget();
     if (!cur) return;
     ManagedWindow* mw = Find(cur);
     if (!mw) return;
@@ -2489,7 +2567,7 @@ void WindowManager::ActToggleFloat() {
 }
 
 void WindowManager::ActToggleFullscreen() {
-    HWND cur = FocusedManaged();
+    HWND cur = ActionTarget();
     if (!cur) return;
     ManagedWindow* mw = Find(cur);
     if (!mw) return;
@@ -2508,21 +2586,30 @@ void WindowManager::ActToggleFullscreen() {
     RetileNow();
 }
 
+// Close and minimise mean the window in front, arranged or not: the settings
+// window and an excluded app answer them exactly as a tiled window does.
 void WindowManager::ActCloseFocused() {
-    HWND cur = FocusedManaged();
+    HWND cur = ForeignForeground();
+    if (!cur) cur = FocusedManaged();
     if (cur) awa::CloseWindow(cur);
 }
 
 void WindowManager::ActMinimizeFocused() {
-    HWND cur = FocusedManaged();
-    if (cur) ShowWindow(cur, SW_MINIMIZE);
+    HWND cur = ForeignForeground();
+    // A window with no minimise button is a dialog that did not ask to be
+    // put away; leave it where it is.
+    if (cur && !(GetWindowLongW(cur, GWL_STYLE) & WS_MINIMIZEBOX)) return;
+    if (!cur) cur = FocusedManaged();
+    // Asynchronous: ShowWindow waits on the other process, and a hung one
+    // held the tiler with it (invariant 59).
+    if (cur) ShowWindowAsync(cur, SW_MINIMIZE);
 }
 
 // The two split actions share everything except the tree call, and both have
 // the same three reasons to decline: nothing focused, the window is floating,
 // or this workspace is not on a layout that has a tree.
 void WindowManager::ActToggleSplit() {
-    HWND cur = FocusedManaged();
+    HWND cur = ActionTarget();
     if (!cur) return;
     ManagedWindow* mw = Find(cur);
     if (!mw || mw->floating) return;
@@ -2532,7 +2619,7 @@ void WindowManager::ActToggleSplit() {
 }
 
 void WindowManager::ActSwapSplit() {
-    HWND cur = FocusedManaged();
+    HWND cur = ActionTarget();
     if (!cur) return;
     ManagedWindow* mw = Find(cur);
     if (!mw || mw->floating) return;
@@ -2668,7 +2755,7 @@ bool WindowManager::Manages(HWND h) const {
 }
 
 void WindowManager::ActPromote() {
-    HWND cur = FocusedManaged();
+    HWND cur = ActionTarget();
     if (!cur) return;
     ManagedWindow* mw = Find(cur);
     if (!mw || mw->floating) return;
@@ -2698,7 +2785,7 @@ void WindowManager::ActFocusMonitor(int delta) {
 
 void WindowManager::ActMoveToMonitor(int delta) {
     if (monitors_.size() < 2) return;
-    HWND cur = FocusedManaged();
+    HWND cur = ActionTarget();
     if (!cur) return;
     const int n = (int)monitors_.size();
     const int dst = ((activeMonitor_ + delta) % n + n) % n;
@@ -2757,7 +2844,7 @@ bool WindowManager::ActFocusWindowById(HWND h) {
 
 void WindowManager::ActToggleSticky() {
     Busy guard(this);
-    HWND cur = FocusedManaged();
+    HWND cur = ActionTarget();
     if (!cur) return;
     ManagedWindow* mw = Find(cur);
     if (!mw || mw->scratch) return;         // the scratchpad is its own thing
@@ -2771,7 +2858,7 @@ void WindowManager::ActToggleSticky() {
 
 void WindowManager::ActScratchpadMove() {
     Busy guard(this);
-    HWND cur = FocusedManaged();
+    HWND cur = ActionTarget();
     if (!cur) return;
     ManagedWindow* mw = Find(cur);
     if (!mw || mw->scratch) return;

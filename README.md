@@ -4,9 +4,10 @@ A dynamic tiling window manager for Windows 11, in the spirit of Hyprland on
 Arch. Windows you open arrange themselves automatically — no dragging, no
 snapping, no overlap. Everything is driven from the keyboard.
 
-Native C++ / Win32. One 850 KB executable, no runtime to install, no services,
-no background polling. Everything is configurable from a tabbed settings window
-that opens when you launch it.
+Native C++ / Win32. One 1 MB executable, no runtime to install, no services,
+no background polling. Everything is configurable from a settings window laid
+out like the options screens of *Star Wars Battlefront II*, which opens when you
+launch it.
 
 ```
 ┌─────────────────┬───────────────┐
@@ -26,7 +27,7 @@ that opens when you launch it.
 
 | | |
 |---|---|
-| Executable | **850 KB**, statically linked — nothing else to install |
+| Executable | **1.0 MB**, statically linked — nothing else to install |
 | Memory, tray only | **4.9 MB** private, with the file index off |
 | CPU, tray only | **0 ms over 30 seconds**, three samples running — with animations *and* the keyboard hook active |
 | Memory with the monitor and a 5,300-entry file index | **10.5 MB** private |
@@ -166,70 +167,115 @@ application — copy it anywhere you like.
 Launch the exe. The settings window opens and tiling starts immediately.
 
 ```
-┌─ ProWindows ─────────────────────────────────┐
-│  ▣  ProWindows                [ Pause tiling ]│
-│     Tiling active - 7 windows arranged                  │
-│ ╭────────┬───────────┬───────────┬─────────╮            │
-│ │ Layout │ Behaviour │ Window keys │ Open apps │ Monitor │ General │ │
-│ ┢━━━━━━━━┷━━━━━━━━━━━┷━━━━━━━━━━━┷━━━━━━━━━┷━━━━━━━━━━┓ │
-│ ┃ How should windows be arranged?                     ┃ │
-│ ┃ [Dwindle ▾]                                         ┃ │
-│ ┃ ┌───────────────┐  Every new window splits the one  ┃ │
-│ ┃ │███████│▒▒▒▒▒▒▒│  you are focused on, always       ┃ │
-│ ┃ │███████├───┬───┤  cutting along its longer side.   ┃ │
-│ ┃ │███████│▒▒▒│▒▒▒│  The result spirals outwards...   ┃ │
-│ ┃ └───────────────┘                                   ┃ │
-│ ┃ ┌ Main area size ─────────────────────────────────┐ ┃ │
-│ ┃ │ ───────●────────────  55%                       │ ┃ │
-│ ┃ └─────────────────────────────────────────────────┘ ┃ │
-│ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ │
-│ [Advanced...] [Re-arrange now]   [ Apply ] [Hide to tray]│
-└─────────────────────────────────────────────────────────┘
+ ▣ │◆ TILING · 7 WINDOWS│                                         V1.5.0   —   ✕
+│ PROWINDOWS / LAYOUT │                           ⟨ RE-ARRANGE ⟩⟨ PAUSE TILING ⟩
+
+ ⌕ SEARCH SETTINGS      ┌───────────────────────╮_____╭───┐   ┌──────────────┐
+                        │ ARRANGEMENT                     │   │██████│░░░░░░░│
+ ▓ LAYOUT ▓▓▓▓▓▓▓▓▓▓    ║ ARRANGEMENT        ◀ DWINDLE ▶  ║   │██████│░░░│░░░│
+   BEHAVIOUR            │ MAIN AREA SIZE     [████ 55%   ]│   └──────────────┘
+   SHORTCUTS            │ SPACING                         │   ARRANGEMENT
+   APPS                 │ GAP BETWEEN WINDOWS [█  8 PX   ]│   ▔▔▔▔
+   SEARCH               │ NO GAPS FOR A LONE WINDOW [ON]OFF   Every new window
+   MONITOR              │ WORKSPACES         ◀    9    ▶  │   splits the one you
+   CLOCK                └────╮_____________________╭──────┘   are focused on...
+   GENERAL
+ ─────────────────────────────────────────────────────────────────────────────
+ ⟨ APPLY ⟩⟨ RESET TO DEFAULTS ⟩⟨ CLOSE ⟩                  [←→] CHANGE [ESC] BACK
 ```
 
-Each layout comes with a painted preview and a plain-English explanation of
-what it does and when it suits you, so you can tell Dwindle from Master without
-having to try them all.
+The window is laid out like an options screen in **Star Wars Battlefront II**:
+the screen's name as a breadcrumb at the top left - **PROWINDOWS / LAYOUT** -
+the categories down the left, and every setting as one full-width row in a
+single panel whose frame dips into two shallow notches. Each row is its name in
+condensed capitals on the left and its control on the right, and there are only
+three kinds of control, which always look the same:
 
-The window is drawn after DOOM Eternal's menus: near-black surfaces with a
-faint diagonal grain, one hot orange for whatever is selected or important,
-headings in condensed capitals, panels and buttons with their corners cut
-rather than rounded, and the tabs as a row of slanted plates with the active
-one filled. The overlays - the monitor and the clock - have themes of their
-own and are not touched by any of it.
+- two words side by side, the chosen one on a pale bar - **ON | OFF**,
+  **STACKED | IN A ROW**;
+- a value between two arrowheads - **◀ DWINDLE ▶**;
+- a bar filled from the left with the number in the middle.
 
-The title bar carries the version. Several copies of this program can live
-side by side on one machine, and they all share the single-instance lock, so
-starting a newer copy while an older one is running used to silently open the
-*older* copy's settings - which made every version look like the same one.
-Starting a different executable now offers to stop the running copy and take
-over, moving the start-with-Windows entry across with it.
+The row you are on is the only colour on the screen: an amber frame with the
+light bleeding out of it, its name turned amber, its chosen word on an amber
+bar. A row that does not apply right now - *Main area size* when the
+arrangement is not Master - is greyed, its chosen word on slate. Beside the
+panel, whatever has focus is explained in plain English, and the Layout,
+Monitor and Clock categories show a live preview there, drawn by the same code
+that draws the real thing. Buttons are frames with their top-right corner cut
+off, and the foot of the window carries the game's button prompts - a keycap
+and a word - for whatever you are on right now.
 
-Nothing takes effect until you press **Apply**, which also writes your choices
-to the config file. **Hide to tray** (or the X button) closes the window while
-the tiler keeps running; click the tray icon to bring it back.
+It is driven the way the game is:
 
-The status line under the title tells you whether tiling is active, how many
-windows are currently being arranged, and — importantly — how many keyboard
-shortcuts another program has already claimed.
+| | |
+| --- | --- |
+| `↑` `↓` | move between rows - or between categories, in the column on the left |
+| `←` `→` | change the value; on a row with nothing to change, `←` goes back to the categories |
+| `Enter` / `Space` | select: flip a switch, press a button, record a new shortcut |
+| `Delete` | clear a shortcut, remove an entry from a list |
+| `Ctrl`+`Tab` / `Ctrl`+`Shift`+`Tab` | next / previous category from anywhere (`Ctrl`+`PgDn` / `PgUp` too) |
+| `Tab` | between the categories, the settings and the buttons |
+| `Ctrl`+`S` | apply |
+| `Esc` | back: from the settings to the categories, then close |
+| *just type* | search every setting in every category |
+
+With the mouse, the row under the pointer lights up; click either word of a
+pair, an arrowhead, or anywhere along a bar (and drag it); the wheel scrolls;
+the prompts along the foot can be clicked too.
+
+**Search.** Start typing anywhere in the window and every category is searched
+at once - *gap* finds both gap sliders, *No gaps for a lone window* and the
+shortcut that hides the gaps. The results are the real rows, changed in place;
+`Esc` clears the search.
+
+**Nothing takes effect until you apply it.** A changed setting is marked as you
+make it - a small amber diamond after its name, *CHANGED · NOT APPLIED YET* in
+its description, and a count along the foot - and **Apply** (or `Ctrl`+`S`)
+makes it real and writes the config file. **Reset to defaults** puts the
+category you are looking at back the way it shipped (still to be applied).
+Closing with changes you have not applied asks whether to apply them or throw
+them away. Apply only writes what *you* changed, so moving or pinning the
+monitor from its own menu while the window is open is never undone by it.
+
+At the top left, beside the badge, **TILING · 7 WINDOWS** says whether tiling is
+active and how many windows are being arranged. The diamond before it is green
+while arranging, amber while paused, and red when a shortcut is blocked or a
+window needs administrator rights - and then a line beside it says which.
+**Re-arrange** and **Pause tiling** are at the top right. The window draws its
+own frame: drag it by the header, resize it from any edge.
+
+The search bar is drawn the same way, and the monitor and the clock start in
+**Frontline**, a theme that matches: black glass inside a hairline, white type,
+amber for the one thing that matters. They have many other themes, and are
+otherwise not touched by any of this.
+
+The version is in the window's top right corner. Several copies of this program
+can live side by side on one machine, and they all share the single-instance
+lock, so starting a newer copy while an older one is running used to silently
+open the *older* copy's settings - which made every version look like the same
+one. Starting a different executable now offers to stop the running copy and
+take over, moving the start-with-Windows entry across with it.
+
+**Close** (or the ✕, or `Esc` from the categories) puts the window away while the
+tiler keeps running; click the tray icon to bring it back.
 
 Everything about setting the application *up*, as opposed to setting up how
-windows behave, is on the **General** tab: how it starts with Windows, where it
-keeps its settings and how to open them, the diagnostics report, the safety net
-that brings back every hidden window, and one button that puts every setting
-back to how it shipped.
+windows behave, is in the **General** category: how it starts with Windows,
+where it keeps its settings and how to open them, the diagnostics report, the
+safety net that brings back every hidden window, and one button that puts every
+setting back to how it shipped.
 
-To start it with Windows, tick **Start automatically when Windows starts** on
-that tab, and usually **Start hidden in the notification area** with it. That
-writes a single
+To start it with Windows, turn on **Start with Windows** there, and usually
+**Start in the tray** with it. That writes a single
 `HKCU\...\CurrentVersion\Run` entry — no scheduled task, no service, no admin
 rights. The entry records where the executable is, so if you move the folder,
 copy it to another machine or unpack a new release somewhere else, ProWindows
 notices and corrects the path the next time it starts.
 
-There is a third box, **Start as administrator**, which is a different mechanism
-and only worth using if you actually run applications as administrator — see
-[Notes and limitations](#notes-and-limitations).
+There is a third switch, **Start as administrator**, which is a different
+mechanism and only worth using if you actually run applications as
+administrator — see [Notes and limitations](#notes-and-limitations).
 
 ## Does it need a setup or installer?
 
@@ -240,7 +286,7 @@ The first launch creates `%APPDATA%\ProWindows\config.ini` from built-in
 defaults, so there is nothing you have to write by hand either. Everything else
 it keeps — the file index cache, the log if you turn it on — lives in that same
 folder. Deleting the folder resets it completely; deleting the executable
-removes it, apart from the `Run` entry if you ticked the autostart box.
+removes it, apart from the `Run` entry if you turned on *Start with Windows*.
 
 If it behaves differently on one machine than another, the tray menu has, under **Tools**,
 **Diagnostics report...**, which writes `%APPDATA%\ProWindows\diagnostics.txt`
@@ -315,22 +361,29 @@ aim at a title bar. `Alt` + right-drag resizes it from the nearest corner.
 
 ## Changing the shortcuts
 
-These live on two separate tabs, because they are two different things.
+These live in two categories, because they are two different things.
 
-**Window keys** is for controlling windows — focus, move, resize, workspaces,
-layouts. Each row says what it does in plain English, which keys it uses, and
-whether it is actually working. Select one and press **Change key…** (or
-double-click it), then press the combination you want; it warns you if another
-binding already has it. **Reset all keys** restores the defaults without
-touching your app shortcuts.
+**Shortcuts** lists every window action - focus, move, resize, workspaces,
+layout, windows, ProWindows itself - under those headings, each with its keys
+drawn as keycaps. Select one and press `Enter`, the way the game rebinds a
+control: the row says *PRESS A SHORTCUT* and shows the modifiers as you hold
+them down; press the key and it is taken. `Win` chords work too, because while a
+row is listening a keyboard hook holds every keystroke back from the shell and
+from ProWindows' own shortcuts. If another shortcut already has that key you
+are asked whether to move it here. `Esc` cancels, `Delete` clears. A key that
+another program owns is tagged **BLOCKED**, and one that only works with the
+Windows-shortcut takeover says so. An action whose key you cleared keeps its
+row, *NOT SET*, so it can be given one again. **Put every key back** restores
+the defaults without touching your app shortcuts.
 
 Changing **Modifier key** moves every `$mod` shortcut at once, keeping any
 custom keys you set.
 
-**Open apps** is for launchers — press a key, an app opens. **Add an app…**
-gives you a searchable list of everything installed on the PC (read from the
-Start menu), or **Add a file or program…** browses for anything else. Add as
-many as you like.
+**Apps** is for launchers — press a key, an app opens. **Add an installed app**
+gives you a searchable list of everything in the Start menu, and **Add a
+program or file** browses for anything else; either way the new row asks for
+its key straight away. `F2` on a launcher changes what it opens. Add as many as
+you like.
 
 ### Shortcuts Windows reserves
 
@@ -343,8 +396,8 @@ sees it, exactly as AutoHotkey and PowerToys do.
 That hook is only installed when a binding actually needs one, and it only ever
 intercepts those specific chords — everything else you type passes straight
 through untouched, and it costs nothing measurable when idle. Turn it off with
-**Take over shortcuts Windows reserves** on the Open apps tab; those bindings
-are then listed as blocked rather than silently doing nothing.
+**Take over Windows shortcuts** (in the Shortcuts and Apps categories); those
+bindings are then marked rather than silently doing nothing.
 
 Keystrokes the app synthesises are tagged so it ignores its own, which means
 macro keyboards, on-screen keyboards and remote sessions still trigger your
@@ -418,23 +471,23 @@ the moment it finishes, which is why idle cost stays at zero. Frame padding for
 each window is measured once when the transition starts, so no frame pays for a
 DWM round-trip.
 
-Turn `animations` off (or untick the box) if you would rather have windows snap
+Turn `animations` off (**Animations** in the Behaviour category) if you would rather have windows snap
 into place instantly.
 
 ### Excluding applications
 
-Use the **Never arrange these apps** list on the settings window. Two ways to
-add something, no typing required:
+Use **Never arrange these apps** in the Behaviour category. Two ways to add
+something, no typing required:
 
-- **Add running app…** — a searchable list of everything currently open, shown
+- **Add a running app** — a searchable list of everything currently open, shown
   as program name plus window title so you can tell two Chromium apps apart.
-  Type to filter, double-click to add.
-- **Browse for .exe…** — a normal file dialog, for apps that aren't running
+  Type to filter, `Enter` to add.
+- **Add a program by file** — a normal file dialog, for apps that aren't running
   right now. Only the file name is stored, so it keeps matching wherever the
   program is installed.
 
-Select an entry and press **Remove** (or double-click it) to take it off again.
-Nothing takes effect until you press **Apply**.
+Each excluded app is a row of its own; `Delete` (or its **Remove** button) takes
+it off again. Nothing takes effect until you apply.
 
 Behind the scenes this is the `ignore_process` line. The file adds two more
 kinds of rule that the window doesn't expose:
@@ -546,12 +599,12 @@ Measured on the same machine: **20.9 seconds**, against 20.5 for the old
 Program-Files-only walk. Three drives, one cache, no extra cost.
 
 If your programs live somewhere the walk does not reach, add that folder on the
-**Search** tab and it is indexed with everything else. `tests\searchprobe.bat`
+**Search** category and it is indexed with everything else. `tests\searchprobe.bat`
 runs the index on its own and prints what it found per drive, without starting
 the tiler.
 
-**And the helper executables inside apps, if you want them.** *Include an app's
-own helper .exe files* on the Search tab drops the rules that hide `unins000`,
+**And the helper executables inside apps, if you want them.** *Helper programs
+too* in the Search category drops the rules that hide `unins000`,
 `crashpad_handler`, `vcredist` and a toolchain's POSIX userland. Off by default,
 because those are numerous and almost never what anybody meant — on when the
 one you need is a helper.
@@ -565,7 +618,7 @@ administrator, close. Every one of them worked before; none of them was
 discoverable.
 
 **And four more things besides apps**, each of which can be switched off on the
-**Search** tab:
+**Search** category:
 
 | | |
 | --- | --- |
@@ -575,7 +628,7 @@ discoverable.
 | Run what you typed | Anything that looks like a path, a URL or a command line offers to run as typed — and if nothing else matched at all, that offer is the whole list. |
 
 The file index is the only part with a running cost: it is held in memory, at
-roughly 300 bytes an entry, so 20,000 files is about 6 MB. The **Search** tab
+roughly 300 bytes an entry, so 20,000 files is about 6 MB. The **Search** category
 shows the live figure and lets you change which folders are walked, how deep,
 and where the ceiling sits — or turn file search off, which frees it entirely.
 
@@ -603,8 +656,8 @@ DLLs, no GPU work, and no runtime to load. `SetWinEventHook` is subscribed to
 exactly the six events the tiler acts on, so the OS is not marshalling menu,
 scrolling and capture events across a process boundary for us to discard. If
 your machine is genuinely old, the two things worth turning off are the
-**monitor** overlay (the only continuous cost) and **animations** on the
-Behaviour tab (which briefly raises the system timer resolution while they run).
+**monitor** overlay (the only continuous cost) and **animations** in the
+Behaviour category (which briefly raises the system timer resolution while they run).
 
 **Matching is fuzzy but not silly.** A name that *starts* with what you typed
 beats one that merely contains it, which beats one that only has the letters
@@ -638,7 +691,7 @@ The two greyed-out entries are for Store and other packaged apps: they are
 reached through a shell moniker rather than a file, so there is nothing on disk
 to elevate or to show you.
 
-Rebind it like anything else on the **Window keys** tab, or in the config file:
+Rebind it like anything else in the **Shortcuts** category, or in the config file:
 `bind = win+s, launcher`.
 
 ---
@@ -720,14 +773,13 @@ straight away still drags the whole panel, exactly as before, so the two never
 get in each other's way. In the HUD style, where a device's readouts share one
 line, the line is what you pick up.
 
-The **Monitor** tab's eight rows drag too — press on a row's name and pull it
-to where it should go; the list re-sorts under the pointer as you cross each
-row. The **Move up** and **Move down** buttons are still there, and the
-right-click menu still opens each readout onto its own tick and four moves.
-Which readouts are *shown* is a separate thing from where they sit, so hiding
-one and bringing it back puts it where it was rather than at the end. The order
-is stored by name (`monitor_order = cpu, gpu, ram`), so it survives anything
-being added to the panel later.
+The **Monitor** category's readout rows reorder too — drag a row by the grip at
+its left edge, or hold `Ctrl` and press `Up` or `Down` — and the right-click menu
+still opens each readout onto its own switch and four moves. Which readouts are
+*shown* is a separate thing from where they sit, so hiding one and bringing it
+back puts it where it was rather than at the end. The order is stored by name
+(`monitor_order = cpu, gpu, ram`), so it survives anything being added to the
+panel later.
 
 **Drag it anywhere.** Its position is saved the moment you let go, so it survives a restart — or a
 crash. Or don't drag it: **Move to** in the right-click menu has the nine
@@ -737,7 +789,7 @@ middle of whichever screen it is already on.
 **Pin it** and two things happen: it can no longer be dragged, and clicks pass straight through to
 whatever is behind it. That is the setting to use once it is where you want it, so you never nudge
 it by accident while reaching for something underneath. Unpin from the tray menu or the Monitor
-tab (a pinned monitor can't be right-clicked, by definition).
+category (a pinned monitor can't be right-clicked, by definition).
 
 **Or send it to the desktop.** *Sit on the desktop, behind every window* drops the panel to the
 bottom of the z-order, one step above the wallpaper: it is there when the desktop is clear and
@@ -797,10 +849,10 @@ same once the spike has scrolled into the middle distance.
 about to paint — sizes, colours, eased percentages, and the text of every reading — against the
 last frame, and skips the repaint when they match. On an idle machine that is most of them.
 
-**Any colour you like, per metric.** The theme sets a colour for each readout, and the swatch
-beside each metric on the **Monitor** tab overrides it — click it for the standard colour picker.
-An overridden swatch gets a bright rim so you can see at a glance which ones you have changed, and
-*Use theme colours* puts them all back. Metrics you have not touched keep following the theme, so
+**Any colour you like, per metric.** The theme sets a colour for each readout, and the
+**Colours** rows in the **Monitor** category override it — step through a palette with `←` `→`,
+or press `Enter` for any colour at all. *Theme* is the first choice on each row, and *Every colour
+from the theme* puts them all back. Metrics you have not touched keep following the theme, so
 switching from Midnight to Nord still recolours everything except your own choices. The config
 file stores them one per line (`monitor_color_gpu = #FF3B30`, or `theme`).
 
@@ -812,12 +864,15 @@ window animation uses. *Glide between readings* in the right-click menu turns it
 order, where on the screen it sits, the style, the theme, graphs on or off, the busiest app, the
 glide, vertical or horizontal, pin, desktop, hide.
 
-**Eighteen themes.** The panel, the border, the text, the bars and the graphs all come from the
+**Twenty-one themes.** The panel, the border, the text, the bars and the graphs all come from the
 theme, so each one is a genuinely different readout rather than a recoloured accent:
 
 | | |
 | --- | --- |
-| **Midnight** | the default — near-black glass, one colour per metric |
+| **Frontline** | the default, and the settings window's look: black glass inside a hairline, white readings, amber for the processor |
+| **Holonet** | square dark glass, white readings, a restrained colour per metric |
+| **Hologram** | a blue projection: every readout in one cyan, like a holotable |
+| **Midnight** | near-black glass, one colour per metric |
 | **Graphite** | no colour at all; the readouts are told apart by weight |
 | **Nord** · **Dracula** · **Solarized** · **Gruvbox** | the familiar editor palettes |
 | **Tokyo Night** · **Catppuccin** · **Rosé Pine** | the newer ones — indigo, pastel, and muted rose |
@@ -827,12 +882,12 @@ theme, so each one is a genuinely different readout rather than a recoloured acc
 | **Frost** · **Paper** | light panels with dark text, for a light wallpaper |
 | **Overlay** · **Benchmark** | *no panel*: text straight on the screen. Orange, or green GPU / blue CPU / white numbers |
 
-Pick a theme and a style from the overlay's right-click menu, or from the **Monitor** tab, which
+Pick a theme and a style from the overlay's right-click menu, or from the **Monitor** category, which
 previews the pair live — at the current opacity, with the style and the busiest-app lines you have
 selected — before you Apply. The config file stores names (`monitor_theme = nord`,
 `monitor_style = rings`), not numbers.
 
-The **Monitor** tab also has opacity, size, and how often it samples. It only samples while it is
+The **Monitor** category also has opacity, size, and how often it samples. It only samples while it is
 on screen — hide it and the cost returns to zero.
 
 Where the numbers come from: CPU from `GetSystemTimes`, memory from `GlobalMemoryStatusEx`,
@@ -848,7 +903,7 @@ A counter your machine does not expose shows `n/a` rather than a made-up zero.
 
 The monitor's sibling: the same layered window with the same glass, dragged,
 pinned and sent to the desktop the same way, showing the time instead of the
-load. Turn it on from the **Clock** tab or the tray menu. It repaints once a
+load. Turn it on from the **Clock** category or the tray menu. It repaints once a
 minute - once a second with the seconds on - and costs nothing while it is
 hidden.
 
@@ -882,14 +937,17 @@ The Flip style animates: when a digit changes, the top half of the old digit
 folds down about the hinge and the bottom half of the new one unfolds beneath
 it, over 420 ms at 40 frames a second, then the board is still again.
 
-**Twenty-one themes**, and the theme chooses the typeface as well as the colours,
+**Twenty-four themes**, and the theme chooses the typeface as well as the colours,
 because a phosphor terminal wants a monospace and a paper calendar wants a serif:
 
 | | |
 | --- | --- |
-| **Midnight** | the default: near-black glass, white digits, a blue second hand |
+| **Frontline** | the default, matching the settings window: thin wide digits on black glass inside a hairline, an amber second hand |
+| **Holonet** | thin wide digits on square dark glass, a gold second hand |
+| **Hologram** | glowing cyan digits on deep blue, square |
+| **Midnight** | near-black glass, white digits, a blue second hand |
 | **Glass** · **Ink** | *no panel*: white or black digits with a soft shadow, straight on the wallpaper |
-| **Slayer** | gunmetal and hazard orange in condensed capitals - the DOOM one |
+| **Slayer** | gunmetal and hazard orange in condensed capitals |
 | **Nixie** · **Neon** | glowing amber in a dark tube; cyan tube light with a magenta second hand |
 | **Terminal** · **Amber** · **LCD** | green or amber on black, or dark segments on a grey-green LCD |
 | **Paper** · **Frost** | a white card with a red second hand; light glass for a light wallpaper |
@@ -897,7 +955,7 @@ because a phosphor terminal wants a monospace and a paper calendar wants a serif
 
 The digits and the date come from the locale, so a machine set to German
 writes `Freitag, 18. September`. **24-hour**, **seconds**, **the date** and
-**the day of the week** are each their own switch, on the tab or in the
+**the day of the week** are each their own switch, in the settings or in the
 clock's right-click menu, which also has the nine snap positions, the styles
 and the themes. The panel follows the text - `9:59` is narrower than `10:00` -
 and a clock in a corner grows towards the middle of the screen rather than
@@ -915,7 +973,7 @@ Windows 11 only supports its taskbar along the bottom edge — Microsoft removed
 it, and the old registry tricks are ignored (verified on build 26200). Only a tool that patches
 Explorer, such as ExplorerPatcher, can move it, and this app deliberately will not do that.
 
-What it does offer is on the **Layout** tab: reserve pixels on any edge, and tiled windows keep
+What it does offer is on the **Layout** category: reserve pixels on any edge, and tiled windows keep
 clear of them. If you run a bar of your own, anywhere on screen, the tiling fits around it.
 
 ---
@@ -940,8 +998,7 @@ clear of them. If you run a bar of your own, anywhere on screen, the tiling fits
   it lands there, placed the same way. Dragging a window's *border* resizes it
   as usual and never rearranges anything.
 
-  Turn the whole gesture off with **Drag a window onto one side of another to
-  move it there** on the Behaviour tab (`drag_to_rearrange` in the config), and
+  Turn the whole gesture off with **Drag to rearrange** on the Behaviour category (`drag_to_rearrange` in the config), and
   a dragged window just snaps back where it was.
 
 - **Or hold `Alt` and drag anywhere on the window.** Windows gives a window
@@ -956,8 +1013,8 @@ clear of them. If you run a bar of your own, anywhere on screen, the tiling fits
 
   It only ever picks up windows ProWindows is arranging, which means an app on
   the **Never arrange these apps** list keeps its own `Alt`+drag - that is
-  rather the point of having excluded it. Turn it off entirely with **Hold the
-  modifier and drag anywhere on a window to move it** on the Behaviour tab
+  rather the point of having excluded it. Turn it off entirely with **Alt + drag to
+  move** on the Behaviour category
   (`mod_drag` in the config).
 
 - **Games and fullscreen apps stop it completely.** While anything is running
@@ -967,8 +1024,8 @@ clear of them. If you run a bar of your own, anywhere on screen, the tiling fits
   game frames, and on some drivers a window-attribute change is enough to drop it
   out of exclusive fullscreen. It notices borderless-windowed games as well as
   true fullscreen ones, and picks up again within a second or two of you leaving.
-  Turn it off with **Stop completely while a game or other fullscreen app is
-  running** on the Behaviour tab if you ever need to.
+  Turn it off with **Pause for fullscreen apps** on the Behaviour category if you
+  ever need to.
 
 - **Windows that run as administrator need ProWindows to as well.** Windows will
   not let a normal program move a window belonging to an elevated one, and it
@@ -982,8 +1039,8 @@ clear of them. If you run a bar of your own, anywhere on screen, the tiling fits
   and **Always start as administrator** to make it stick. The second one
   registers a logon task with Windows Task Scheduler, which is the only way to
   start elevated without a UAC prompt every single time; creating it asks for
-  administrator rights once and never again. The same switch is on the Behaviour
-  tab under Startup.
+  administrator rights once and never again. The same switch is in the General
+  category, under Startup.
 
 - **Windows that won't fit are given room, not squeezed.** Some applications
   refuse to go below a minimum size — Steam is the usual example. Instead of
@@ -1038,6 +1095,8 @@ src/winutil.*    Win32 helpers: classification, DWM frame-accurate placement
 src/layout.*     BSP tree and the four layout algorithms
 src/wm.*         monitors, workspaces, event handling, all the actions
 src/hotkeys.*    RegisterHotKey, plus the keyboard-hook fallback
+src/ipc.*        the control channel: named pipe, command grammar, replies
+src/ctl_main.cpp prowindowsctl.exe, the console front end to the control channel
 src/sysinfo.*    CPU / RAM / GPU / disk / network sampling
 src/launcher.*   the search bar: its window, the app catalogue, the row menu
 src/search.*     what the search bar finds: file index, settings pages, calculator
@@ -1045,19 +1104,23 @@ src/montheme.*   the overlay's colour schemes and styles, as tables of data
 src/monpaint.*   the overlay's geometry and painting, one function per style
 src/monitor.*    the floating system-load overlay: window, z-order, menu
 src/clocktheme.* the clock's colour schemes, typefaces and styles, as tables of data
-src/clockpaint.* the clock's eight layouts, one function each, measured and drawn together
+src/clockpaint.* the clock's twelve layouts, one function each, measured and drawn together
 src/clock.*      the clock window: the same drag, pin, desktop and snap as the monitor
 src/dragguide.*  the drop indicator shown while a tiled window is dragged
-src/theme.*      the DOOM Eternal look: the palette, the condensed capitals, the cut-corner plates
+src/theme.*      the Battlefront II look: palette, type, backdrop, glow, the notched frame, the row controls
 src/moddrag.*    hold the modifier and drag anywhere on a window
-src/settings.*   settings shell, Layout, Behaviour and General pages
-src/settings_keys.cpp  Window keys, Open apps and Monitor pages, plus key capture
-src/settings_search.cpp  the Search page: sources, indexed folders, the ceiling
-src/settings_clock.cpp   the Clock page: style, theme, what to show, the live preview
+src/rowlist.*    a list of settings rows: layout, painting, focus, keys, mouse, scrolling
+src/modal.*      the question, notice and pick-one screens, in the same look
+src/settings.*   the settings window: header, categories, panel, description, footer, Apply
+src/settings_pages.cpp   the Layout, Behaviour and General categories
+src/settings_keys.cpp    the Shortcuts and Apps categories
+src/settings_search.cpp  the Search category
+src/settings_monitor.cpp the Monitor category
+src/settings_clock.cpp   the Clock category
 src/app.h        the few services the settings pages need from the shell
 src/main.cpp     entry point, tray UI, event hooks
-res/app.rc       icon, manifest, and every dialog template
-res/gen_icon.py  regenerates res/app.ico from code, in the settings window's palette
+res/app.rc       icon, manifest and version (the settings window has no dialog templates)
+res/gen_icon.py  regenerates res/app.ico from code: the tile mark on a cut plate, in the settings window's palette
 docs/            the review notes, one per pass: what was reported, what was found, what changed
 build.bat        one-step MSVC build
 ```
@@ -1065,11 +1128,11 @@ build.bat        one-step MSVC build
 See [MAP.md](MAP.md) for how it all fits together, the invariants worth knowing, and the
 things that surprised us along the way.
 
-The settings window keeps no state of its own. It reads the live `Config` when
-it opens and writes it back on Apply, which then saves and reloads through the
-ordinary config path — so changing the modifier key re-registers every hotkey,
-and changing a rule re-classifies every window, with no separate code path to
-fall out of sync.
+The settings window keeps no state of its own. It edits a copy of the live
+`Config`, and Apply copies back only the settings that were changed, then saves
+and reloads through the ordinary config path — so changing the modifier key
+re-registers every hotkey, and changing a rule re-classifies every window, with
+no separate code path to fall out of sync.
 
 The one Win32 subtlety worth knowing about is in `PlaceWindow()`: Windows 11
 windows have an invisible resize border, so `GetWindowRect` is several pixels

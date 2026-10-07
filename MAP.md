@@ -1,95 +1,127 @@
 # MAP.md — orientation for anyone (human or model) picking this project up
 
-ProWindows is a tiling window manager for Windows 11: open windows and they arrange
-themselves, Hyprland-style, driven from the keyboard. See [README.md](README.md) for the
-user-facing description. This file covers how it is put together and what will bite you.
+ProWindows is a tiling window manager for Windows 11: open windows and they arrange themselves,
+Hyprland-style, driven from the keyboard. Around the tiler sit a search bar, a floating system
+monitor, a desktop clock and a settings window laid out like the options screens of *Star Wars
+Battlefront II*.
+[README.md](README.md) is the user-facing description; this file is how it is put together and
+what will bite you.
 
-## The shape of it in one paragraph
+**Version 1.5.0.** Review notes for each pass live in [`docs/`](docs) — the latest is
+[`docs/REVIEW-1.5.md`](docs/REVIEW-1.5.md).
 
-A native C++ / Win32 app with no dependencies beyond what ships with Windows. It never polls: it
-subscribes to `SetWinEventHook` and only recomputes a layout when the OS says something changed.
+## Contents
+
+1. [The shape of it](#the-shape-of-it)
+2. [Build](#build)
+3. [Where things live](#where-things-live)
+4. [How things flow](#how-things-flow)
+5. [Threads](#threads)
+6. [Invariants](#invariants) — grouped by subsystem; the numbers are stable IDs quoted in code and in `docs/`
+7. [Things that surprised us](#things-that-surprised-us)
+8. [Testing](#testing)
+
+## The shape of it
+
+A native C++17 / Win32 program with no dependencies beyond what ships with Windows. It never polls:
+it subscribes to `SetWinEventHook` and only recomputes a layout when the OS says something changed.
 Each monitor owns a set of workspaces; each workspace owns an ordered window list plus a binary
 space partition tree. Keyboard shortcuts go through `RegisterHotKey`, falling back to a low-level
 keyboard hook for the chords the shell refuses to give up. Everything is stored as a commented text
-file at `%APPDATA%\ProWindows\config.ini`, which the settings window reads and rewrites.
+file at `%APPDATA%\ProWindows\config.ini`, which the settings window reads and rewrites. A named
+pipe (`ProWindows.exe --msg "workspace 3"`, or `prowindowsctl.exe`) makes every action scriptable
+and testable from outside the process.
+
+The one rule that shapes everything else: **the UI thread never waits.** Anything that can block —
+sampling hardware, walking the disk, asking the shell for an icon, talking to WMI — is on a thread
+of its own, and anything cross-process on the UI thread has a timeout.
 
 ## Build
 
 There is **no .vcxproj, no NuGet, no CMake**. `build.bat` locates `vcvars64.bat`, compiles every
-source in one shot and writes `build\ProWindows.exe`.
+source in one shot and writes `build\ProWindows.exe` and `build\prowindowsctl.exe`.
 
 ```bash
 build.bat
 ```
 
-- Adding a source file **does** need registering — the file list in `build.bat` is explicit.
-  The screenshot harnesses in `tests\` have their own file lists for the same reason.
-- Statically linked (`/MT`) so the exe runs anywhere with nothing installed.
-- `/utf-8` is not optional. The sources are UTF-8 without a BOM and a few literals are not ASCII —
-  the degree sign on the temperature rows, the arrows on the network row. Without the flag MSVC
-  reads them in the machine's ANSI code page and those characters reach the screen as mojibake.
-- The exe must not be running when you build; the linker cannot overwrite a locked file. Either
-  exit it from the tray first, or pass an output name — `build.bat PW_dev.exe` — and build a
-  second copy beside the running one. Prefer exiting from the tray to `Stop-Process`: killing it
-  skips `RestoreAllWindows`, so anything hidden for a workspace switch stays hidden and the user
-  has no way to get it back.
-- `res\gen_icon.py` regenerates `res\app.ico` from code; it is only needed if the icon changes. The
-  icon is the app mark on a cut-corner plate in `theme.h`'s palette, so the tray, the taskbar and
-  the settings header show the same object.
-- `docs\` holds the review notes, one file per pass. Nothing in it is read by the build.
+- **Adding a source file needs registering** — the file list in `build.bat` is explicit, and so
+  are the lists in the `tests\*.bat` harnesses that compile the UI.
+- Statically linked (`/MT`), so the exe runs anywhere with nothing installed.
+- **`/utf-8` is not optional.** The sources are UTF-8 *without a BOM*, LF line endings
+  (`.gitattributes` says `-text`: git leaves them exactly as they are), and a few literals are not
+  ASCII — the degree sign, the arrows on the network row and the search bar's prompt bar.
+- **The exe must not be running when you build**; the linker cannot overwrite a locked file. Exit
+  it from the tray, or build a second copy beside it: `build.bat PW_dev.exe`. Prefer exiting from
+  the tray to `Stop-Process`: killing it skips `RestoreAllWindows`, so anything hidden for a
+  workspace switch stays hidden (invariant 2).
+- `res\gen_icon.py` regenerates `res\app.ico` from code (and drops `icon-32.png` / `icon-256.png`
+  into `tests\shots` to look at). The mark is a tiled-window arrangement - master pane amber - on a
+  near-black plate with its top-right corner cut off like the settings window's buttons, in
+  `theme.h`'s palette; the settings header draws the same plate, so the tray, the taskbar and the
+  window show the same object.
 
 ## Where things live
 
 | File | Responsibility |
 | --- | --- |
-| `src\common.*` | Paths, logging, `Rect`, `Dir`, shared string helpers. |
-| `src\config.*` | The `Config` struct, INI parsing, and the keybinding/action grammar. |
+| `src\common.*` | Paths, logging, `Rect`, `Dir`, string helpers, private messages and timer ids, `kVersion`. |
+| `src\config.*` | The `Config` struct, INI parsing, and the keybinding / action grammar. |
 | `src\defaults.cpp` | Writes `config.ini` back out. The only place that serialises settings. |
-| `src\winutil.*` | Win32 helpers: window classification, DWM-accurate placement, app discovery. |
-| `src\layout.*` | The BSP tree and the four layout algorithms, and the size-constraint solver. Pure geometry, no Win32 state - which is what makes `tests\` possible. |
-| `src\wm.*` | Monitors, workspaces, event handling, animation, and every user action. |
-| `src\hotkeys.*` | `RegisterHotKey` plus the `WH_KEYBOARD_LL` fallback. |
-| `src\moddrag.*` | Hold the modifier and drag anywhere on a window. A `WH_MOUSE_LL` hook on a thread of its own; it starts the *system's* move loop rather than running one. |
+| `src\winutil.*` | Win32 helpers: window classification (`Classify`, and *why* it said no), DWM-accurate placement, focus, process facts, app discovery. |
+| `src\layout.*` | The BSP tree, the layout algorithms and the size-constraint solver. Pure geometry, no Win32 state — which is what makes `tests\run.bat` possible. |
+| `src\wm.*` | Monitors, workspaces, event handling, animation, drag-to-rearrange, and every user action. |
+| `src\hotkeys.*` | `RegisterHotKey` plus the `WH_KEYBOARD_LL` fallback, on a thread of its own. |
+| `src\moddrag.*` | Hold the modifier and drag anywhere on a window. A `WH_MOUSE_LL` hook on a thread of its own, installed only while the modifier is held; it starts the *system's* move loop rather than running one. |
+| `src\dragguide.*` | The translucent rectangle shown while a tiled window is dragged, marking where it would land. |
+| `src\ipc.*` | The control channel: a named pipe, the command grammar and the replies. Commands are *posted* to the UI thread, never run on the pipe thread. |
+| `src\ctl_main.cpp` | `prowindowsctl.exe`: the console front end to `ipc.*`, because a `/SUBSYSTEM:WINDOWS` program has no stdout to pipe. |
 | `src\sysinfo.*` | CPU / RAM / GPU / disk / network sampling for the overlay. Called only from the sampling thread in `monitor.cpp`. |
 | `src\thermal.*` | CPU and GPU temperature: the queue of sources Windows makes you try, on a thread of its own. |
-| `src\launcher.*` | The search bar's window: query, ranking, painting and the row menu. |
-| `src\appicon.*` | The shell icons the search bar draws, fetched on a thread of their own. |
-| `src\search.*` | What it finds. The file index and its walk thread, the ms-settings table, the calculator, and the fuzzy scorer every source shares. No Win32 UI. |
-| `src\montheme.*` | The overlay's colour schemes and layout styles. Tables of plain data. |
-| `src\monpaint.*` | The overlay's geometry and painting. Knows nothing about the config. |
-| `src\monitor.*` | The overlay's window: creation, drag, pin, z-order, context menu - and the thread that takes its readings. |
-| `src\clocktheme.*` | The clock's colour schemes and layouts. Tables of plain data, like `montheme`; a skin names its typeface too. |
-| `src\clockpaint.*` | The clock's eight layouts. Each is one function that lays itself out and, when asked, paints - so the measure and the drawing cannot disagree. The panel behind it is `PaintPanel` from `monpaint.h`. |
-| `src\clock.*` | The clock window. The monitor's drag, pin, desktop mode, snap points and context menu, with a timer that wakes on the next second or minute boundary and a frame signature that skips repaints nothing would change. |
-| `src\settings_clock.cpp` | The Clock page: style, theme, the four what-to-show switches, and a preview through the real painter. |
-| `src\dragguide.*` | The translucent rectangle shown while a tiled window is dragged, marking where it would land. |
-| `src\theme.*` | The settings window's look, after DOOM Eternal's menus: the palette, the condensed capitals, the cut-corner plates and slanted tabs, and the grain. Overlays are not themed by it. |
-| `src\settings.*` | Settings shell (header, tabs, Apply) plus the Layout, Behaviour and General pages. |
-| `src\settings_keys.cpp` | Window keys, Open apps and Monitor pages, and the key-capture editor. |
-| `src\settings_search.cpp` | The Search page: which sources are on, and how the file index is built. |
-| `src\settings_internal.h` | The contract every tab page follows: `Load()` in, `Save()` out. |
-| `src\app.h` | The handful of services the settings pages need from the shell. |
-| `src\main.cpp` | Entry point, tray UI, event hooks, and the `app.h` implementations. |
-| `res\app.rc` | Icon, manifest, and every dialog template. The layout lives here, not in code. |
-| `docs\` | The review notes: what was reported, what was found, what changed, per pass. |
-| `tests\` | `run.bat` asserts on layout geometry; `probe.bat` prints how each live window would be classified without moving any of it; `tempprobe.bat` prints which temperature source this machine can answer from, and self-tests the two shared-memory readers; `monshot.bat`, `clockshot.bat`, `launchshot.bat`, `uishot.bat`, `bindshot.bat` and `rowdragshot.bat` render the pieces of UI to PNG without starting the tiler (`clocklive.bat` runs the real clock window for a few seconds and captures it off the screen) (`bindshot` presses real keys into the shortcut recorder, `rowdragshot` drags a Monitor-tab row with the real mouse, and `monshot` also renders a readout mid-drag); `searchprobe.bat` runs the file and program index alone and prints what it found, per drive, which is the only way to see whether the walk reaches this machine's other disks; `iconcache.bat` checks that a shell icon comes back from `icons.cache` the right way up, through a save, a release and a reload, twice; `analyze.bat` runs MSVC `/analyze` over whichever sources you name. None is part of the product build. |
+| `src\montheme.*` | The overlay's colour schemes and layout styles. Tables of plain data, stored by name. |
+| `src\monpaint.*` | The overlay's geometry and painting, one function per style. Knows nothing about the config. Also `PaintPanel`, which the clock borrows. |
+| `src\monitor.*` | The overlay's window: creation, drag, pin, row reordering, z-order, context menu — and the thread that takes its readings. |
+| `src\clocktheme.*` | The clock's colour schemes, typefaces and layouts. Tables of plain data; a skin names its face too. |
+| `src\clockpaint.*` | The clock's twelve layouts. Each is one function that lays itself out and, when asked, paints — so the measure and the drawing cannot disagree. |
+| `src\clock.*` | The clock window: the monitor's drag, pin, desktop mode, snap points and menu, with a timer that wakes on the next second or minute boundary. |
+| `src\launcher.*` | The search bar's window: query, ranking, painting, the row menu and the app catalogue scan. |
+| `src\search.*` | What the search bar finds: the file and program index and its walk thread, the ms-settings table, the calculator, and the fuzzy scorer every source shares. No Win32 UI. |
+| `src\appicon.*` | The shell icons the search bar draws, fetched on a thread of their own and cached in `icons.cache`. |
+| `src\theme.*` | **The look**, after Battlefront II's options screens: the palette, the fonts (Bahnschrift, per DPI), spaced capitals, the backdrop, the amber glow, the notched panel frame, cut-corner boxes, and the painters every settings-style control is drawn with (`DrawPair`, `DrawSelector`, `DrawSlider`, `DrawAction`, `Keycap`/`Chord`, `DrawButton`, `Prompt`, `RowFocus`). No window, no state. The overlays are not themed by it. |
+| `src\rowlist.*` | A list of settings rows (`ui::Row`: a kind, a label, a description, get/set onto the edit copy) and `ui::RowList`, which lays them out, paints them, owns the focus and its fade, scrolling, reordering, and every key and click on a row. Not a window: its host paints it and feeds it input. |
+| `src\modal.*` | `ui::Confirm`, `ui::Ask`, `ui::Notice` and `ui::Pick`: modal screens in the same look, each a window of its own with its own message loop, the owner disabled and dimmed. |
+| `src\settings.*` | The settings window: one custom-drawn window with its own frame - header, category column, the panel, the description and preview, footer buttons and prompts - plus the edit copy, Apply, Reset, search across every category, and shortcut capture. |
+| `src\settings_pages.cpp` | The Layout, Behaviour and General categories, the colour row, and the layout preview. |
+| `src\settings_keys.cpp` | The Shortcuts and Apps categories: every action's row, chords assigned in place, launchers. |
+| `src\settings_search.cpp` | The Search category: which sources are on, and how the file index is built. |
+| `src\settings_monitor.cpp` | The Monitor category: switches, look, readouts in order, colours, and the preview through the real painter. |
+| `src\settings_clock.cpp` | The Clock category, and its preview through the real painter. |
+| `src\settings_internal.h` | The contract every category follows: rows over `Edit()`, compared with `Saved()`; a `reset`; optionally a preview. |
+| `src\app.h` | The handful of services the settings pages need from the shell — stubbed by the UI harnesses. |
+| `src\main.cpp` | Entry point, tray menu, event hooks, idle trim, diagnostics, game mode and display-off plumbing, and the `app.h` implementations. |
+| `res\app.rc` | Icon, manifest and version. There are no dialog templates: the settings window and its modal screens are laid out in code (invariant 80). |
+| `res\gen_icon.py` | Regenerates `res\app.ico`. |
+| `docs\` | The review notes: what was reported, what was found, what changed, one file per pass. Nothing in it is read by the build. |
+| `tests\` | Harnesses; see [Testing](#testing). None is part of the product build. |
 
-## Data flow
+## How things flow
+
+**A window opens, closes or moves:**
 
 ```
-a window opens / closes / moves
-   → SetWinEventHook callback (main thread, out-of-context)
+SetWinEventHook callback (main thread, out-of-context)
    → WindowManager::OnWinEvent      classifies, adds or drops the window
-   → RequestRetile()                35 ms debounce timer, so a burst collapses into one pass
+   → RequestRetile()                posts WM_AWA_RETILE on an idle desktop, else a 35 ms debounce
    → RetileNow()
         AnimBegin()                 clears the animation queue
         for each monitor: ComputeLayout() → ApplyPlacements()
-        AnimCommit()                wakes the ticker thread
+        AnimCommit()                wakes the parked ticker thread
    → AnimStep() per WM_AWA_ANIMTICK - one per refresh of the fastest display - until
      t reaches 1, then lands exactly on the target rects
+   → 320 ms later, a verification pass sees what each window did with its tile (21, 34)
 ```
 
-The overlay's readings take their own path, and none of it is on the UI thread until the end:
+**The overlay's readings** take their own path, and none of it is on the UI thread until the end:
 
 ```
 monitor.cpp SampleThread (below normal priority, parked while the panel is hidden)
@@ -98,983 +130,647 @@ monitor.cpp SampleThread (below normal priority, parked while the panel is hidde
    → MonitorProc (UI thread)        moves it into g_load; PushHistory, BeginEase, Redraw
 ```
 
-Threads, for the record - every one of them is a thread because the UI thread must not
-wait on what it does: the keyboard hook, the mouse hook (both highest priority; every
-keystroke and pointer movement on the machine passes through them), the animation ticker,
-the overlay's sampler, the thermal probe, the launcher's app scan, the icon loader, the
-file indexer, and the control channel's pipe server.
-
-Settings take a different path, and deliberately only one:
+**Settings** take one path, and deliberately only one:
 
 ```
-Apply → each page's Save() writes into the live Config
-      → Config::SaveToFile()        the file now matches the UI exactly
-      → ReloadConfig()              re-reads it, re-registers hotkeys, re-applies rules
-      → each page's Load()          controls re-read the canonical values
+open     → LoadEdit()                     Edit() and Saved() are both the live Config
+a row    → set() writes into Edit()       every row is rebuilt from Edit() (79); Dirty()
+                                          compares Edit() with Saved()
+Apply    → MergeEdits(edit, saved, live)  only fields that differ from Saved() (78)
+         → AppApplySettings()             SaveToFile, then ReloadConfig: hotkeys, rules,
+                                          overlays, and SettingsRefresh
+         → LoadEdit(), rows rebuilt       the window starts again from what came back
 ```
 
-## Invariants — break these and things get ugly
+**A settings paint** — one bitmap, one blit, nothing that can come out in the system's colours:
 
-1. **Never react to our own window moves — and never do it with a global flag.** There used to be
-   a `WindowManager::Suppressor` that set `suppress_` around every call that moved a window, on the
-   theory that `OnWinEvent` would then ignore the echo. It could not work: the hook is installed
-   `WINEVENT_OUTOFCONTEXT`, so the callback is delivered asynchronously, long after any scope guard
-   has gone. It never suppressed what it was aimed at, and it *did* suppress real events —
-   `EndDeferWindowPos` pumps messages, and it runs on every animation frame, so a window that
-   opened during an animation had its `EVENT_OBJECT_SHOW` thrown away.
+```
+WM_PAINT → a memory bitmap the size of the client
+         → PaintBackdrop       rendered once at the monitor's size, so resizing shows more
+                               or less of one picture instead of rendering one per frame
+         → header, categories, the panel's fill and notched frame
+         → RowList::Paint      rows, the lit row's glow, edge fades, the scrollbar - blended
+                               in over 200 ms after a category change
+         → description and preview, footer buttons, prompts, the unapplied-changes count
+         → a veil over all of it while a modal screen is up
+         → BitBlt
+```
 
-   The protection is per-window instead, and each case carries its own: `SetHidden` sets
-   `ManagedWindow::hidden` **before** calling `ShowWindow`, so the echo of our own hide is
-   recognised by that flag; a show for a window already in `managed_` is a no-op however it was
-   caused. Placement raises no subscribed event at all — `EVENT_OBJECT_LOCATIONCHANGE` is not
-   hooked, and `MOVESIZESTART`/`END` come only from a user dragging. Anything new that moves a
-   window must say, in the event handler, how its own echo is recognised.
+**A command from outside** (`prowindowsctl workspace 3`): the pipe thread parses it and posts
+`WM_AWA_IPC` with a token; the UI thread runs it between passes and hands the reply back.
 
-2. **Hidden windows must always be reachable again.** Workspace switching hides windows with
-   `SW_HIDE`. If the app dies with windows hidden, they are gone from the user's point of view.
-   Hence: `RestoreAllWindows()` runs on exit, on `WM_ENDSESSION`, from the crash handler, and from
-   the tray's Tools → "Show all hidden windows". Anything that reduces the workspace count must first
-   migrate windows off the workspaces being removed.
+## Threads
 
-3. **The low-level keyboard hook must return fast.** It runs on the UI thread and Windows silently
-   drops a hook that exceeds `LowLevelHooksTimeout`. It does a lookup and a `PostMessage`, nothing
-   else. The actual work happens later on `WM_AWA_HOOKKEY`.
+Every one of these is a thread because the UI thread must not wait on what it does.
 
-4. **Only ignore our own synthetic keystrokes.** `MaskWinKey` stamps `dwExtraInfo` with
-   `kSelfInjected` and the hook skips exactly those. It deliberately does *not* ignore all
-   `LLKHF_INJECTED` input, so macro keyboards, on-screen keyboards and test harnesses still work.
+| Thread | Where | Priority | Notes |
+| --- | --- | --- | --- |
+| UI | `main.cpp` | normal | Message loop, every window, every retile. `SettingsTranslateMessage` then `IsDialogMessage` for the settings window. |
+| Keyboard hook | `hotkeys.cpp` | highest | `WH_KEYBOARD_LL`; lookup and `PostMessage` only (3). Re-hooks once a minute (61). |
+| Mouse hook | `moddrag.cpp` | highest | `WH_MOUSE_LL`, hook present only while the modifier is held (69). |
+| Animation ticker | `wm.cpp` | normal | High-resolution waitable timer; parks between animations (19). |
+| Overlay sampler | `monitor.cpp` | below normal | Parked while the panel is hidden (51). |
+| Thermal probe | `thermal.cpp` | normal | Mostly asleep on its stop event; restartable and generation-checked (12, 41). |
+| App catalogue scan | `launcher.cpp` | background mode | CPU *and* I/O priority lowered; abandonable at shutdown (12). |
+| Icon loader | `appicon.cpp` | background mode while sweeping | Drops out of background mode to serve an urgent request (42). |
+| File indexer | `search.cpp` | normal, then background mode | Reads `index.cache` at normal priority first; walks, if it must, in background mode (17, 55). |
+| Pipe server | `ipc.cpp` | normal | Posts commands; never runs them. |
+
+## Invariants
+
+Break these and things get ugly. **The numbers are stable IDs**: code comments and older review
+notes cite them ("MAP.md invariant 12"), so they are grouped here by subsystem rather than
+renumbered, and a merged or retired rule keeps its number and says where it went. New rules are
+appended at the end of the numbering.
+
+### Window events and placement
+
+1. **Never react to our own window moves — and never with a global flag.** A scope-guard
+   `Suppressor` cannot work: the hook is `WINEVENT_OUTOFCONTEXT`, so the callback arrives long
+   after any guard is gone, and `EndDeferWindowPos` pumps messages, so the flag swallowed real
+   `EVENT_OBJECT_SHOW`s instead. Protection is per-window: `SetHidden` sets
+   `ManagedWindow::hidden` **before** hiding, so the echo is recognised; a show for a window
+   already in `managed_` is a no-op; placement raises no subscribed event
+   (`EVENT_OBJECT_LOCATIONCHANGE` is not hooked, `MOVESIZESTART`/`END` come only from a user).
+   Anything new that moves a window must say, in the event handler, how its echo is recognised.
 
 5. **Place windows by their visible frame, not `GetWindowRect`.** Windows 11 windows carry an
    invisible resize border several pixels wide. `PlaceWindow` corrects for the difference between
-   `GetWindowRect` and `DWMWA_EXTENDED_FRAME_BOUNDS`; skip that and every gap is subtly wrong.
+   `GetWindowRect` and `DWMWA_EXTENDED_FRAME_BOUNDS`; skip it and every gap is subtly wrong.
 
-6. **The config file is the whole truth about bindings.** `SaveToFile` writes `clear_binds = true`
-   followed by every binding. There is no "defaults plus overrides" merge to get out of step.
+13. **`ManagedWindow::monitor` is an index into a list that gets re-sorted.** `EnumMonitors`
+    orders displays left to right, so rearranging them in Settings renumbers every monitor.
+    `ReloadMonitors` builds an old → new index map by `HMONITOR` *before* replacing `monitors_`
+    and remaps every window and `activeMonitor_` through it. Only windows whose display really
+    vanished fall through to the salvage path.
 
-   The one deliberate exception is `config_version`. Because the file is authoritative, a binding
-   added in a new release would otherwise never reach anybody who already had a config — the
-   launcher shipped unreachable until this was noticed. `LoadFromFile` therefore adds newly
-   introduced default bindings once, only when the file predates them, and only if the chord is
-   still free. The next save writes the result out explicitly like everything else. Add to
-   `kAdded` and bump `kConfigVersion` together.
-
-   `kAdded` entries carry an `onlyIfUnbound` flag. `true` is the normal case: do not impose a
-   second key on an action that already has one. `false` is for a chord that is worth having
-   *as well* — `win+s` for the search bar, which most existing configs already reach on `$mod+r`.
-   Either way a chord already spoken for is never stolen.
-
-7. **`res\app.rc` owns the layout.** Pages read control positions from the template; the theme even
-   turns each `GROUPBOX` into a painted card using that control's rectangle. Move things in the
-   `.rc`, not in code.
-
-8. **The monitor is painted once, from `MonDraw`.** The settings page's preview calls the same
-   function through `MonitorDrawPreview`, with a `MonPaintCtx` built from the page's controls
-   instead of from the live config. Never draw a second, simplified version of the panel: it
-   will drift from the real one within a release.
-
-9. **`monitor_theme` and `monitor_style` are stored by name, not by index.** Adding or reordering
-   entries in `kSkins` or `kStyles` must not silently change somebody's look, so the file holds
-   `nord` and `rings`, not `2` and `2`.
-
-10. **An overlay frame is only drawn when it would look different, and its background is drawn
-    once.** Three guards, at three different levels, and they are cumulative:
-
-    - `BeginEase` refuses to start a glide unless something moved by `kEaseWorthStarting`, and
-      `StepEase` returns false for any frame within `kEaseWorthDrawing` of what is on screen.
-    - `Redraw` compares a signature of everything the frame would contain — the size, the skin,
-      the eased percentages, and the *text* of every reading — against the last frame, and returns
-      without touching `UpdateLayeredWindow` when they match. The text matters: a reading can go
-      from "9.7 GB" to "9.8 GB" without moving a bar by a pixel, and that still has to be drawn.
-    - `MonDraw` keeps the panel's chrome — shadow, gradient, gloss, border — in a bitmap keyed by
-      size, skin, opacity and radius, and blits it. It is identical every frame, and painting it
-      inline made the shadow alone two thirds of the cost of a frame: nine stacked antialiased
-      rounded rectangles the size of the whole panel, thirty times a second.
-
-    Measured with `tests\monshot.bat --bench`, eight metrics with the busiest-app line on: Rows
-    2.27 ms/frame before the cache, 0.66 ms after — and the *after* number includes a drop shadow
-    the *before* number did not have. Keep all three if you touch that code.
-
-    Note what the chrome cache implies: anything that varies per frame must not be drawn inside
-    `PaintPanelChrome`, and anything added to `MonPaintCtx` that changes the chrome must be added
-    to the cache key as well.
-
-11. **The overlay stays a top-level window, even on the desktop.** Desktop mode works by making the
-    shell window its *owner* and dropping it to `HWND_BOTTOM`; an owned window is always above its
-    owner, so it lands exactly one step above the wallpaper. The obvious alternative — reparenting
-    into the `WorkerW` behind the desktop icons — breaks `UpdateLayeredWindow`, which only accepts
-    top-level windows, and the panel would lose the per-pixel alpha that makes it look like glass.
-    Note that Explorer restarting destroys the shell window and every window it owns, which is why
-    `MonitorReattach()` hangs off the `TaskbarCreated` message.
-
-12. **A worker thread that misses its deadline is abandoned, never freed out from under — and it
-    is asked to stop first.** The thermal probe (`thermal.cpp`), the launcher's app scan
-    (`launcher.cpp`) and the file indexer (`search.cpp`) are all waited on with a timeout, and all
-    three can genuinely exceed it — WMI parks inside `Next()`, enumerating `shell:AppsFolder` on a
-    machine full of Store apps is slow, and a deep tree on a cold disk is slower still. Critical
-    sections are never `DeleteCriticalSection`'d; that costs three sections for the life of the
-    process and removes the whole class of bug.
-
-    The wait is a fallback, not the plan. Each of the long walks checks a cancellation flag it can
-    read without taking a lock — `AbandonRequested()` in the indexer, `LongScansCancelled()` in
-    `winutil.cpp` for the app scan — so shutdown normally completes well inside the timeout rather
-    than leaving a live thread to be terminated by `ExitProcess`, possibly holding the CRT heap
-    lock. Results are still discarded under the lock (`g_abandon`, `g_abandonLoad`) so a late
-    finisher never writes to globals the process is tearing down.
-
-    The thermal probe goes one step further, because it can be restarted. Each run owns its own
-    stop event and closes it on the way out, and publishes only under the generation it started
-    with, so an abandoned probe can be **forgotten immediately**. Leaving its handles in place made
-    the next `Start()` decide a probe was already running and return without starting one — which
-    is how switching a temperature off and on again could leave the readings dead for the session.
-
-13. **`ManagedWindow::monitor` is an index into a list that gets re-sorted.** `EnumMonitors` orders
-    displays left-to-right, so rearranging them in Settings renumbers every monitor. `ReloadMonitors`
-    therefore builds an old-index → new-index map by `HMONITOR` *before* replacing `monitors_`, and
-    remaps every window and `activeMonitor_` through it. Workspaces travel with the handle, so a
-    remapped index still points at the same `Workspace` the window is listed in. Only windows whose
-    display actually vanished fall through to the salvage path.
-
-14. **User text never goes into a fixed buffer via the `_s` printf family.** `swprintf_s` and
-    `wcscpy_s` invoke the invalid-parameter handler on overflow, and no handler is installed, so
-    the default one terminates the process. A `launch` command is arbitrary user text and is long
-    in practice. Build those strings with `std::wstring` concatenation, or use `_TRUNCATE`
-    (`LogLine` and `TrayBalloon` show both). Ints and table lookups are fine as they are.
-
-15. **Settings tabs are addressed by index from outside the settings window.** `PageIndex` in
-    `settings.h` names them, `g_pages` in `settings.cpp` is asserted to match, and both
-    `LoadAllPages` and `ApplyNow` list every page explicitly. Inserting the Search tab in the
-    middle silently renumbered Monitor once already, which is why the numbers are gone.
-
-16. **Every source the search bar draws on is capped before the merge.** `Refilter` takes at most
-    `kMaxRows` from each of apps, settings pages and files, ranks the pool, and only then trims to
-    the rows on screen. Without the per-source cap the file index - tens of thousands of entries
-    against a handful of apps - would fill all eight rows on any short query. The calculator is
-    inserted at the front rather than ranked (if what you typed is a sum, that is the answer), and
-    "run what I typed" is appended at the back (it is a fallback, not a match).
-
-17. **The file index is a cache, not a scan.** Walking is the expensive part and its result
-    barely differs between launches, so `search.cpp` writes `index.cache` and loads that instead.
-    `CacheSignature` ties a cache to the folders, depth, ceiling and hidden-file setting it was
-    built under — change any of them and the cache is correctly ignored. A walk only happens with
-    no cache, a cache over a day old, or an explicit rebuild. The walk itself runs under
-    `THREAD_MODE_BACKGROUND_BEGIN` (lowered **I/O** priority, not just CPU) and, on a cold start,
-    holds off for twenty seconds on an interruptible wait so it is not competing with every other
-    login program for the disk. Keep all three if you touch that code: they are what makes this
-    usable on a mechanical disk.
-
-18. **Only `lowQuery` is pre-folded; candidate names are folded as they are scanned.** `SearchScore`
-    takes a pointer and a length and calls `LowerFast` per character, so the file index stores one
-    string per entry rather than a name plus a lower-cased copy of it. The pointer form exists so
-    the index can score the tail of a path in place - a keystroke across the whole index allocates
-    nothing at all. Do not "simplify" this back into taking two `std::wstring`s.
-
-19. **The animation ticker parks; it is not respawned.** A retile happens on every window event, so
-    creating and joining a thread per animation was a kernel round trip per event. The thread now
-    waits on `animActive_`, which `AnimCommit` sets and `AnimStop` resets; `AnimShutdown` is the
-    only thing that ends it. `AnimStop` is called on every animation end, so it must stay cheap and
-    must not touch the thread.
-
-20. **Every settings page must call `theme::PrepareDialog(page)` in `WM_INITDIALOG`.** It hides each
-    `GROUPBOX` and records its rectangle so the theme can repaint it as a card, switches combo
-    boxes to owner-draw, and subclasses the edits and lists. A page that forgets it still works but
-    renders as a light-mode Win32 dialog inside a dark one — which is exactly how the Search page
-    shipped until it was noticed by comparing it against Layout.
-
-21. **A window's own size limits are part of the layout, and are learned, not assumed.**
-    Three separate complaints turned out to be the same missing idea: Steam has a minimum size
-    and spilled over its neighbour, a file-copy dialog has a maximum and left most of its tile
-    bare, and an elevated window silently refused to move at all and left a hole.
-
-    `ComputeLayout` therefore takes a `ConsMap` of per-window `SizeLimits` and every algorithm
-    honours it - a split moves off its ratio only as far as the limits demand, and space one
-    window cannot use goes to its neighbours instead of being abandoned. The numbers come from
-    `WM_GETMINMAXINFO` once per window (`SMTO_ABORTIFHUNG`, 60 ms - a hung app must not take the
-    UI thread with it) and are then corrected by `WindowManager::LearnFromLastPass`, which
-    compares where each window was asked to go against where it actually is. Applications
-    enforce limits they never declare, so observation is the authority and the message is only
-    a first guess.
-
-    Two escape hatches matter as much as the solver. A window that ignores placement twice is
-    marked `immovable`, and one that keeps using less than `kUsesEnough` of its tile is marked
-    `tooSmall`; both then drop out of `order` entirely. A tile reserved for a window that will
-    not fill it *is* the empty rectangle the user is complaining about. Note that a maximum on
-    the axis a window's split does not run along cannot be satisfied by geometry at all - see
-    test 9 in `tests\layout_test.cpp` - which is why the escape hatch is not optional.
-
-    The adaptive pass runs at most twice per retile (`relayoutPending_`). Two windows with
-    incompatible limits would otherwise ping-pong forever.
-
-    Two details the first live run turned up, both of which look optional and are not:
-
-    *Something has to ask the question again.* A window only reveals its limits by ignoring a
-    placement, and on an idle desktop nothing else happens to prompt a second look - so the
-    first live run tiled the board once, learned nothing, and left a window sitting in a quarter
-    of its tile. `RetileNow` now re-arms `TIMER_RETILE` when it left any attempt unjudged.
-    `ApplyPlacements` deliberately records an attempt only for a window it is actually asking to
-    move, which is what makes that terminate: once the board has settled there is nothing to
-    verify and the timer is not re-armed.
-
-    *A window that is still opening looks exactly like a window enforcing a limit.* The first
-    unrestricted run on a real desktop opened three File Explorer windows and immediately
-    concluded that Explorer has a 413-pixel maximum width and WhatsApp a 902-pixel one. Neither
-    is true; they were simply measured before they had finished starting. A false limit is far
-    worse than no limit, because it is sticky and it distorts every later pass. `ManagedWindow`
-    therefore keeps `lastSeen`, and a limit is believed only once two consecutive looks agree;
-    until then the attempt stays on the books. After the fix the same board reported no maxima
-    at all and only real minima - Explorer 147x236, WhatsApp 486x393, Claude 602x401.
-
-    *Clamping is not the same as sharing.* When the limits cannot all be met, clamping each
-    split in turn pins whichever subtree is deepest to its bare minimum and leaves every spare
-    pixel with the shallowest one. The first live board came out as 122 / 886 / 122 / 750 px -
-    every limit respected, and unusable. `ConstrainedSplit` therefore falls back to dividing the
-    slack in proportion to how many windows sit on each side, but *only* on the path where the
-    ratio has already proved impossible, so an ordinary board still splits exactly 50/50 as
-    dwindle always has. The same board now comes out 374 / 1139 / 375 with the fourth window
-    floated. Test 10 in `tests\layout_test.cpp` is that board.
+21. **A window's own size limits are part of the layout, and are learned, not assumed.** Steam
+    has a minimum and spilled over its neighbour; a copy dialog has a maximum and left most of its
+    tile bare; an elevated window refused to move and left a hole. `ComputeLayout` takes a
+    `ConsMap` of `SizeLimits`, and every algorithm honours it: a split moves off its ratio only as
+    far as the limits demand, and space one window cannot use goes to its neighbours. The numbers
+    come from `WM_GETMINMAXINFO` once (`SMTO_ABORTIFHUNG`, 60 ms) and are then corrected by
+    `LearnFromLastPass`, which compares where each window was asked to go with where it is —
+    applications enforce limits they never declare, so observation is the authority.
+    - Escape hatches: a window that ignores placement twice is `immovable`; one that keeps using
+      less than `kUsesEnough` of its tile is `tooSmall`; both drop out of `order` (a tile reserved
+      for a window that will not fill it *is* the empty rectangle). A maximum across the axis a
+      split does not run along cannot be met by geometry at all — test 9 in `layout_test.cpp`.
+    - The adaptive pass runs at most twice per retile (`relayoutPending_`), or two windows with
+      incompatible limits ping-pong forever.
+    - *Something has to ask again*: `RetileNow` re-arms `TIMER_RETILE` when it left an attempt
+      unjudged, and `ApplyPlacements` records an attempt only for a window it actually moves,
+      which is what makes that terminate.
+    - *A window still opening looks exactly like one enforcing a limit.* A limit is believed only
+      once two consecutive looks agree (`lastSeen`); a false limit is sticky and distorts every
+      later pass.
+    - *Clamping is not sharing.* When the limits cannot all be met, `ConstrainedSplit` divides the
+      slack in proportion to the windows on each side — but only on the path where the ratio has
+      already proved impossible, so an ordinary board still splits exactly 50/50. Test 10.
 
 22. **`IsElevatedProcess` is a question about integrity levels, not about elevation.**
-    It used to ask whether `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` failed. That access
-    right is deliberately grantable across integrity levels, so it *succeeds* against an elevated
-    process of the same user: elevated windows were reported as ordinary, got tiled, refused
-    every `SetWindowPos` in silence, and left a hole. It now compares the target's mandatory
-    integrity level against ours. `tests\probe.bat` checks that rule against every process on
-    the machine; on the development box 10 were above us and openable - every one of them a
-    window the old test got wrong.
+    `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` succeeds across integrity levels, so it
+    reported elevated windows as ordinary; they got tiled, refused every `SetWindowPos` silently,
+    and left holes. It compares mandatory integrity levels. `tests\probe.bat` checks the rule
+    against every process on the machine.
 
-23. **Nothing happens while a fullscreen application owns the screen.** Every single thing this
-    program does is a cross-process `SetWindowPos`, a DWM attribute write or a foreground change,
-    and each of those costs a game frames — a DWM attribute write on some drivers costs it
-    exclusive fullscreen outright. So `WindowManager` has a parked state: `UpdateGameMode()`
-    asks `FullscreenAppActive()`, and while the answer is yes there is no tiling, no animation,
-    no accent border, no focus-follows-mouse poll and no system-monitor overlay. `Classify` also
-    returns `Ignore` for any window that covers a whole monitor without a title bar, so a game is
-    never managed in the first place.
+25. **What a window will accept is remembered between runs.** `Config::learnedLimits` keys
+    `SizeLimits` by `"process|class"` — the granularity a limit belongs to — and `AddWindow` seeds
+    a new window from it. `RememberLimits` marks the config dirty only when the numbers change;
+    it is flushed once, in `Shutdown`.
 
-    `FullscreenAppActive` asks the shell first (`SHQueryUserNotificationState`), because that is
-    the only way to see *exclusive* fullscreen Direct3D from outside the process, and falls back
-    to measuring the foreground window for borderless-windowed games and fullscreen video. The
-    measurement deliberately rejects a maximised window (`IsZoomed` — that stops at the work
-    area, and the taskbar is still there) and any window that still has a title bar.
-
-    Leaving the state is the awkward half: no window events arrive from a game, so nothing would
-    ever prompt a second look. `AppGameModeChanged(true)` starts `TIMER_GAMECHK` for exactly that
-    reason, and stops it again on the way out.
-
-24. **Three separate things have an opinion about whether the overlay exists.** The user's
-    `monitor_enabled` setting, game mode, and whether the display is switched off. They used to
-    call `MonitorSetVisible` directly, so whichever ran last won — alt-tabbing out of a game with
-    the screen off brought the panel back to repaint at nobody. `UpdateOverlayVisibility()` in
-    `main.cpp` is now the only caller, and it takes all three into account. The display-off case
-    comes from `RegisterPowerSettingNotification(GUID_CONSOLE_DISPLAY_STATE)`: a machine left on
-    overnight was sampling CPU, GPU, disk and network once a second and repainting a layered
-    window nobody could see.
-
-25. **What a window will accept is remembered between runs.** The learning loop in invariant 21
-    can only discover a limit by handing a window a size it refuses and watching it overhang its
-    neighbours — so paying that price on every launch, for the same applications, was pure waste.
-    `Config::learnedLimits` keys `SizeLimits` by `"process|class"` (the granularity the limit
-    actually belongs to: every Steam window has the same minimum, and it is not a property of any
-    one `HWND`), and `AddWindow` seeds a new window from it. Written back through
-    `RememberLimits`, which only marks the config dirty when the numbers actually changed, and
-    flushed once in `Shutdown` rather than on every discovery.
-
-26. **A minimum that does not fit is not a layout problem.** Invariant 21's solver moves splits
-    off their ratio as far as the limits demand, but there is nothing it can do when the minimums
-    genuinely do not fit — it produces slots the windows refuse, and they overhang. Two rules
-    catch that before `ComputeLayout` ever sees them, and the difference between them matters:
-
-    - `tooLarge` is **permanent and remembered**: the window's own minimum is larger than the
-      whole usable area of the monitor. Nothing will ever satisfy it there. It is re-checked
-      every pass against the *current* work area, though, so a larger display or a lower scaling
-      brings the window straight back into the tiling — the flag survives in `config.ini`, and
-      without the re-check a window would stay floating forever because of a monitor that is no
-      longer attached.
-    - `crowdedOut` is **recomputed every pass**: it would fit on its own, but not beside
-      everything else open right now. `DropWindowsThatCannotFit` considers windows
-      smallest-minimum first, so the small ones keep their tiles and the one oversized
-      application is what gets left out — rather than whichever happened to be added last.
-
-    Either way the window is positioned exactly once, by `ParkAsFloating`, and then left alone:
-    from that point it behaves like any other floating window and the user owns its position.
-    `LearnFromLastPass` skips both, because a window nobody is placing is neither obeying nor
-    disobeying anything.
+26. **A minimum that does not fit is not a layout problem.** Two rules catch it before
+    `ComputeLayout` sees it:
+    - `tooLarge` is **permanent and remembered** — the window's minimum exceeds the monitor's
+      usable area — but re-checked every pass against the *current* work area, so a bigger display
+      brings it straight back.
+    - `crowdedOut` is **recomputed every pass** — it fits alone but not beside everything else.
+      `DropWindowsThatCannotFit` considers windows smallest-minimum first, so the one oversized
+      application is what gets left out.
+    Either way the window is positioned once, by `ParkAsFloating`, and then left alone.
 
 27. **An elevated window is reported, not silently dropped.** `Classify` returns
-    `ManageVerdict::Blocked` rather than `Ignore` for a window at a higher integrity level, so
-    the count is visible in the tray tooltip and the settings status line. A window sitting on
-    top of the tiling with no explanation is indistinguishable from the program being broken,
-    which is how it was reported.
+    `ManageVerdict::Blocked` for a window at a higher integrity level, so the count shows in the
+    tray tooltip and the settings status line (with a red mark). The fix offered is a logon task
+    with `RunLevel=HighestAvailable` (`InstallElevatedAutostart`, via `schtasks /Create /XML`), not
+    a manifest: `requireAdministrator` prompts at every launch and `uiAccess` needs a signed binary
+    in a protected folder. `ExecutionTimeLimit` is `PT0S` — the default three days would kill a
+    window manager.
 
-    The fix offered alongside it is a scheduled task, not a manifest. `requestedExecutionLevel`
-    of `requireAdministrator` would put a UAC prompt in front of the user at every single launch,
-    and `uiAccess="true"` needs a signed binary in a protected directory. A logon task registered
-    with `RunLevel=HighestAvailable` (`InstallElevatedAutostart`, via `schtasks /Create /XML`)
-    starts elevated with no prompt at all, which is the only arrangement that both works and is
-    not user-hostile. Registering it needs administrator rights once — hence "Restart as
-    administrator" first. Note `ExecutionTimeLimit` of `PT0S`: the default three-day limit would
-    silently kill a window manager.
-
-28. **Process facts are cached per pid, for two seconds.** `Classify` runs on every window event
-    in the session and asks for the owning process's image name and integrity level; both are
-    several kernel round trips and both give the same answer for every window of the same
-    application. `ProcEntry` in `winutil.cpp` caches them. Two seconds, not forever, because pids
-    are recycled — far longer than a burst of window events and far shorter than any plausible
-    reuse.
+28. **Process facts are cached per pid, for two seconds.** `Classify` asks for the image name and
+    integrity level on every window event; `ProcEntry` caches them. Not forever: pids are recycled.
 
 29. **A drag places a window on the side it was dropped on, and `Insert` cannot do that.**
-    `BspTree::Insert` splits the target leaf along its *longer* axis, which is exactly right for
-    a window appearing out of nowhere and exactly wrong for one the user has just aimed at an
-    edge: drop a window on the right of a tall tile and dwindle's rule puts it underneath.
-    Reported, reasonably, as "sometimes it goes right and sometimes it goes down". Before this
-    the drop did not even choose a side — it swapped the dragged window with whatever was under
-    the pointer, so the result always kept whatever split the tree already had.
-
-    `MoveBeside(moving, target, side)` and `MoveToEdge(moving, side)` take the orientation from
-    the direction instead: left/right always produce a side-by-side split, up/down always a
-    stacked one. Both `Remove` first, so a window dropped next to its own neighbour is not
-    counted twice, and both look the target leaf up *after* that — `Remove` splices the sibling
-    into the parent's slot and frees the parent, so any `BspNode*` held across it is suspect.
-
-    `WindowManager::PlaceBeside` moves the window in `ws->tiled` as well as in the tree. Master
-    and Grid have no tree at all and lay windows out straight from that list, so updating only
-    one of the two would make the same drag do different things depending on the layout.
+    `BspTree::Insert` splits along the longer axis — right for a new window, wrong for one aimed
+    at an edge. `MoveBeside(moving, target, side)` and `MoveToEdge(moving, side)` take the
+    orientation from the direction. Both `Remove` first and look the target leaf up *after* —
+    `Remove` frees the parent, so any `BspNode*` held across it is suspect. `PlaceBeside` updates
+    `ws->tiled` too: Master and Grid lay out from that list, not the tree.
 
 30. **The drop side is decided by the rectangle's diagonals, not by an edge zone.** `DropSide`
-    cuts the target into four triangles meeting at its centre and takes the one the pointer is
-    standing in, measuring each axis as a fraction of that half-dimension. The obvious
-    alternative — "the outer third of each side is that side" — leaves the middle of the window
-    undefined and the corners arbitrary, which is what made the gesture feel random. Ties go to
-    the horizontal, which is the axis people reach for. A drop that lands on no window at all
-    (a gap, the outer margin, an empty workspace) falls through to the same function applied to
-    the monitor's work area, and `MoveToEdge` gives the window that whole side of the screen.
+    cuts the target into four triangles meeting at its centre; ties go to the horizontal. A drop on
+    no window (a gap, an empty workspace) applies the same function to the monitor's work area.
 
-31. **The drop indicator and the drop itself must be one function.** `PlanDrop` returns both the
-    tree operation and the rectangle to highlight, and `OnDragTick` and `OnMoveSizeEnd` both go
-    through it. Two implementations of "where would this land" agree right up until one of them
-    is edited, and the whole point of showing a preview is that it is never wrong.
-
-    The indicator (`dragguide.cpp`) is layered, `WS_EX_TRANSPARENT` and `WS_EX_NOACTIVATE`:
-    Windows runs the drag in a modal loop inside the *other* process, and anything that takes
-    the mouse or the foreground would end that loop. It is only repainted when its rectangle
-    actually changes, which during a drag is a handful of times rather than 25 a second — the
-    highlight can be half of a 4K screen and walking four million pixels per tick is visible.
+31. **The drop indicator and the drop itself are one function.** `PlanDrop` returns both the tree
+    operation and the rectangle to highlight; `OnDragTick` and `OnMoveSizeEnd` both call it. The
+    indicator (`dragguide.cpp`) is layered, `WS_EX_TRANSPARENT` and `WS_EX_NOACTIVATE` — the drag is
+    a modal loop in the *other* process, and taking the mouse or the foreground would end it — and
+    repaints only when its rectangle changes.
 
 32. **`EVENT_SYSTEM_MOVESIZESTART` does not say whether a border or the title bar was grabbed.**
-    Both a move and a resize arrive as the same pair of events, and rearranging the layout
-    because somebody widened a tile by ten pixels would be indefensible. `dragStartRect_` is
-    recorded at the start and the size compared against it: `OnDragTick` hides the indicator as
-    soon as the size moves, `dragIsResize_` latches so a border drag that passes back through
-    its original size does not start offering to rearrange half way through, and
-    `OnMoveSizeEnd` checks the final size itself because a quick drag can finish between two
-    ticks. Note that a mouse resize of a tiled window still only snaps back; adjusting the split
-    ratio from a border drag is a separate feature that does not exist yet.
+    `dragStartRect_` is recorded and the size compared: `OnDragTick` hides the indicator once the
+    size moves, `dragIsResize_` latches, and `OnMoveSizeEnd` checks the final size itself because a
+    quick drag can finish between ticks.
 
-33. **A window is never written off on the strength of its first millisecond.** `Classify` has to
-    say no to a window with no title, one DWM still has cloaked, one not shown yet and one whose
-    styles have not been applied — and almost every application produces all four in the first few
-    milliseconds of opening a window. Electron, Chrome, Qt and JetBrains all create the HWND and
-    name it afterwards. Looking exactly once, on `EVENT_OBJECT_SHOW`, and never again is the whole
-    of "it did not get arranged until I moved it".
+33. **A window is never written off on the strength of its first millisecond.** Electron, Chrome,
+    Qt and JetBrains create the window and name, style and uncloak it afterwards. `Classify`
+    reports **why** it refused (`IgnoreReason::Transient` / `Permanent`) and, since 1.4, **which
+    rule** (a string literal, logged once per window by `ExplainSkip`); a transient refusal buys
+    the window a place on `pending_` and a handful of second looks (`TIMER_PENDING`,
+    `kPendingTries`). `EVENT_OBJECT_NAMECHANGE` is subscribed, `OnMoveSizeEnd` adopts a window it
+    has never seen, and leaving game mode rescans. A new rejection rule must classify itself and
+    name itself: wrong in the permanent direction brings the bug back.
 
-    So `Classify` reports **why** it refused (`IgnoreReason::Transient` vs `Permanent`), and a
-    transient refusal puts the window on `pending_` for a handful of second looks over about two
-    seconds (`TIMER_PENDING`, `kPendingTries`). Three things shorten that wait or make it
-    unnecessary: `EVENT_OBJECT_NAMECHANGE` is subscribed, so a title arriving is acted on at once
-    for windows already on the list; `OnMoveSizeEnd` adopts a window it has never seen, because
-    picking one up and putting it down is the most direct way somebody says "this one"; and
-    `UpdateGameMode` runs a full `ScanExistingWindows()` when a fullscreen application lets go,
-    since everything that opened behind it was waved past.
+34. **The verification pass must be able to stop.** A window that never holds still (a video, a
+    loading app) never reports the same rect twice. `kSettleLooks` retires such a window and
+    `kMaxVerifyChain` bounds how many passes the loop may request without an outside event; any
+    real event resets the budget.
 
-    A new rejection rule must classify itself. Getting it wrong in the permanent direction brings
-    the original bug back; wrong in the transient direction only costs a few hash lookups, and
-    `kMaxPending` caps even that.
+47. **A retile pass measures each window once.** `MeasureWindow` returns both the visible rect and
+    the frame padding from one pair of DWM calls, and the plan is measured into a local vector
+    before anything is decided. The one marked exception: un-maximising moves a window, so it is
+    re-measured.
 
-34. **The verification pass must be able to stop.** After moving windows, `RetileNow` comes back
-    320 ms later to see what they did with the space — a window only reveals its limits by
-    ignoring us. But an entry stays on `attempts_` until the window reports the same rect twice
-    running, and a window that never holds still (a video player, an application still loading)
-    never does. That kept the timer re-arming three times a second for the life of the process,
-    on a desktop nobody was touching. Two caps now bound it: `kSettleLooks` retires a single
-    window that will not settle, and `kMaxVerifyChain` bounds how many passes the loop may ask
-    for without an outside event. `RequestRetile` and any `RetileNow` that is not the loop calling
-    itself back (`verifyPass_`) reset the budget, so responsiveness is untouched — the cap only
-    ever stops the loop talking to itself.
+54. **A window whose limits are remembered is not asked for them again.** A window seeded from
+    `learnedLimits` has `limitsAsked` set, so `ConstraintsFor` skips the 60 ms-ceiling message.
+    Ten familiar windows at logon used to be over half a second of frozen UI.
 
-35. **The crash handler may not touch a container.** `managed_` is mutated on every window event,
-    so an unhandled exception is most likely to arrive part way through one. Walking a half-updated
-    `unordered_map` from the exception filter faults again, and the user is left with exactly the
-    hidden windows the handler exists to put back. `EmergencyUnhideAll` therefore reads a flat
-    fixed array of `HWND` maintained alongside by `SetHidden`. Registered hotkeys and the keyboard
-    hook need no attention there: Windows releases both when the process dies.
+56. **Win-event hooks go in before the first scan**, so a window that opens during it is not
+    nobody's. `Classify` rejects a non-root window *before* testing visibility, or every child an
+    application shows spends two seconds on `pending_`.
 
-36. **`WM_QUERYENDSESSION` answers the question and does nothing else.** Any other application may
-    still veto the session ending. Shutting the manager down there left it torn down — no ticker
-    thread, every hidden window put back, the config already written — inside a process that then
-    carried on running. The work belongs in `WM_ENDSESSION`, and only when its `wParam` is true.
-    `WindowManager::Shutdown()` is idempotent regardless, because the ordinary exit path can still
-    reach it afterwards.
+59. **Hiding and showing a managed window is asynchronous.** `SetHidden` uses `ShowWindowAsync`;
+    `ShowWindow` waits on the other process, and a hung app froze the tiler. Because
+    `IsWindowVisible` does not flip at once, the dead-window sweep excuses a window for
+    `kShowGraceMs` after an un-hide (`shownAt`).
 
-37. **The overlay's bitmap is bigger than the overlay.** `MonMeasure` adds `kShadow` on every
-    side and `MonDraw` insets the panel by the same amount, so the panel's visible edge is not
-    the window's edge. Anything that reasons about where the panel *looks* like it is — the
-    drag, `ClampOnScreen`, the settings preview's scale-to-fit — goes through those two
-    functions and stays correct; anything that measures the window rect directly does not.
+60. **"Immovable" and "too small" are verdicts with an expiry.** A hung application looks exactly
+    like an immovable one. Immovable windows are asked again after `kImmovableRetryMs`, and a
+    window the user moves or sizes by hand has both verdicts cleared.
 
-    The margin is transparent, and a layered window does not hit-test transparent pixels, so it
-    costs nothing in clicks: dragging and the click-through pin behave exactly as before.
+### Safety and recovery
 
-38. **A disabled list view paints itself white and cannot be talked out of it.** `ListView_SetBkColor`
-    is ignored while the control is disabled — comctl32 uses the system window colour — and it does
-    not go through `WM_ERASEBKGND`, so a subclass cannot intercept it either. That is why switching
-    file search off used to put a bright white rectangle in the middle of a black settings page.
-    The fix is not to disable it: `UpdateEnabling` on the Search page greys the buttons around the
-    list and leaves the list alone, which also happens to be more useful, since the list is what
-    the feature *would* index. Do not add a list view to the `gated` array of any page.
+2. **Hidden windows must always be reachable again.** Workspace switching hides windows.
+   `RestoreAllWindows()` runs on exit, on `WM_ENDSESSION`, from the crash handler, and from the
+   tray's Tools → "Show all hidden windows". Anything that reduces the workspace count must first
+   migrate windows off the workspaces being removed.
 
-39. **Dark scrollbars and dark list headers need an undocumented opt-in.** `SetWindowTheme(control,
-    L"DarkMode_Explorer")` does nothing to a scrollbar until the process itself has asked for dark
-    mode, and the only way to ask is `SetPreferredAppMode` — ordinal 135 in `uxtheme.dll`, no
-    name, no header. `theme::Init` calls it with **ForceDark**, not `AllowDark`: `AllowDark` means
-    "follow the system app-mode setting", and this application is dark whatever that setting says,
-    so on a machine set to light apps every scrollbar stayed white. The column header of a list
-    view is a separate control again and needs `DarkMode_ItemsView` of its own — without it there
-    is a pure white band across the top of the list. All of it is best-effort by ordinal: on a
-    build that does not have these the controls look exactly as they did before.
+12. **A worker thread that misses its deadline is abandoned, never freed out from under — and it
+    is asked to stop first.** The thermal probe, the app scan and the file indexer can all exceed
+    their shutdown timeout. Each long walk checks a lock-free cancellation flag
+    (`AbandonRequested()`, `LongScansCancelled()`); results are discarded under the lock
+    (`g_abandon`, `g_abandonLoad`); critical sections are never deleted. The thermal probe, which
+    can be restarted, owns a stop event per run and publishes only under its generation, so an
+    abandoned run can be forgotten at once.
 
-40. **The search bar's icons are never fetched on the way to the screen.** Asking the shell for an
-    icon resolves a shortcut, or looks a packaged app up in its manifest, and either can touch the
-    disk. `appicon.cpp` answers from a cache or returns null and queues the work on a thread of its
-    own; the row draws its lettered tile meanwhile and the window is posted to when the icon lands.
-    `AppIconFor` reserves the cache slot at the moment it queues, so eight rows redrawn on every
-    keystroke queue each icon once rather than once per keystroke.
+14. *Merged into 57.*
 
-    `IShellItemImageFactory::GetImage` hands back **straight** alpha and `AlphaBlend` wants it
-    premultiplied — skip that correction and every icon gets a bright halo. The bitmap is a DIB
-    section, so it is corrected in place rather than copied through `GetDIBits`.
+35. **The crash handler may not touch a container.** `EmergencyUnhideAll` reads a flat fixed
+    array of `HWND` maintained by `SetHidden`, never `managed_`, which may be half-updated.
 
-41. **A worker that can be abandoned must not release a slot it no longer owns.** The thermal probe
-    keeps one live run at a time. That used to be a plain flag, and the abandon path cleared it so
-    a replacement could start — but the abandoned thread then cleared it *again* when it eventually
-    finished, releasing the slot its replacement was using, and the next `Want()` started a second
-    probe alongside it. `running_` now holds the *id* of the run that owns the slot, and every
-    release is a compare-exchange against that id. Any other "one at a time" worker that can be
-    abandoned needs the same shape.
+36. **`WM_QUERYENDSESSION` answers the question and does nothing else.** Another application may
+    still veto. The teardown belongs in `WM_ENDSESSION` with `wParam` true; `Shutdown()` is
+    idempotent anyway.
 
-42. **The search bar never fetches an icon on the way to the screen, and after
-    the first run it never fetches one at all.** Three things in `appicon.cpp`,
-    and all three are needed:
+41. **A worker that can be abandoned must not release a slot it no longer owns.** `running_`
+    holds the *id* of the run that owns the thermal probe's slot, and every release is a
+    compare-exchange against it. Any other abandonable one-at-a-time worker needs the same shape.
 
-    - `AppIconFor` answers from memory or returns null and queues. It reserves
-      the cache slot *at the moment it queues*, so eight rows redrawn on every
-      keystroke queue each icon once rather than once per keystroke.
-    - What was fetched is written to `icons.cache` as raw premultiplied pixels
-      and read back in one sequential pass on the loader thread before it serves
-      anything. Two weeks' expiry, because an icon does change - an application
-      updates - just not often.
-    - Everything in the catalogue that the cache does not hold is fetched anyway,
-      in the background, at `THREAD_MODE_BACKGROUND_BEGIN`, after a fifteen
-      second hold-off. Urgent requests always overtake the sweep, and the thread
-      drops back out of background mode while it serves one.
-
-    Note what that costs if it is got wrong: `IShellItemImageFactory::GetImage`
-    on a cold mechanical disk is tens of milliseconds, and eight of those is
-    most of a second - long enough that the icons look like they are never
-    coming rather than like they are loading.
-
-43. **A shell icon is straight alpha and `AlphaBlend` wants premultiplied.**
-    Skip the correction and every icon gets a bright halo where it should feather
-    into the row behind it. The bitmap `GetImage` hands back is a DIB section, so
-    it is corrected in place rather than copied through `GetDIBits` and back -
-    and the same raw bits are what goes into the cache file.
-
-44. **Programs are a separate source from files, and capped separately.** They
-    come out of the same index - `FileEntry::exe` - but through
-    `SearchPrograms` rather than `SearchFiles`, because a query matching a
-    folder full of documents would otherwise fill all eight rows before the
-    executable anybody was reaching for was considered. MAP invariant 16 applied
-    to a source that did not exist when it was written.
-
-    The walk of Program Files is deliberately not the general walk with a filter
-    on the end: `WalkPrograms` keeps only `.exe`, skips the folders that hold an
-    application's parts rather than the application (`SkipProgramDirectory`),
-    skips the executables that serve another executable (`NoiseExecutable`), and
-    skips two-letter binaries outright - a developer toolchain ships a whole
-    POSIX userland, and `ex`, `sh` and `ls` match almost any short query while
-    being almost never what was meant.
-
-    Every index hit is also penalised by how deep it is buried.
-    `Vendor\Product\product.exe` is the application; the same name four folders
-    further in is one of its parts.
-
-45. **The CPU bar is one segment per logical processor, and brightness is the
-    level.** Filling part of each segment was the obvious first try and it does
-    not survive the size: at six pixels tall, a rounded segment two pixels into
-    its fill is a dot, and sixteen dots is a dashed line. Brightness stays
-    readable all the way down.
-
-    The point of the display is that an averaged bar cannot tell one pinned
-    thread from a machine that is evenly busy, and those mean opposite things -
-    so where several cores are folded into one segment (past about thirty, which
-    is where segments stop being distinguishable) it is the **busiest** of them
-    that is shown, not their mean. Averaging is what the single bar already did.
-
-    `SystemProcessorPerformanceInformation` reports the current processor group
-    only, so the first call is sized from `GetActiveProcessorCount` and there is
-    one retry at whatever size it asks for.
-
-46. **A sensor block published by another process is bounds-checked before it is
-    believed.** `CoreTempSensor` and `HwInfoSensor` read shared memory somebody
-    else wrote: the signature, the element size, the element count and every
-    value go through a range check first, because a block from a version whose
-    layout does not match is not an error - it is another program's memory read
-    as if it were a struct. `tempprobe.bat --selftest` publishes deliberately
-    wrong blocks and checks they are refused.
-
-47. **A retile pass measures each window once.** `VisibleRect` and
-    `WindowFramePad` both ask DWM for the extended frame bounds, and
-    `ApplyPlacements` wanted an answer from each of them for every window it
-    moved - the attempt record, the animation's starting rect, and its frame
-    padding - which was four cross-process round trips per window per window
-    event to answer one question four times. `MeasureWindow` returns both
-    facts from one pair of calls, and the whole plan is measured into a local
-    vector before anything is decided. Anything added to that function reads
-    the measurement; nothing asks again.
-
-    The one exception is deliberate and marked: un-maximising a window moves
-    it, so a window that had to be restored is re-measured afterwards.
-
-48. **Mod-drag starts the system's move loop; it does not run one.**
-    `moddrag.cpp` posts the target `WM_NCLBUTTONDOWN` with `HTCAPTION`, which
-    is exactly the message a real click on a title bar delivers - so Windows
-    runs its own modal move loop and the tiler sees the ordinary
-    `EVENT_SYSTEM_MOVESIZESTART` / `MOVESIZEEND` pair it has always handled.
-    The drop indicator, the drop side, the cross-monitor hand-off and the
-    learned size limits all come for free, and there is exactly one drag
-    implementation to keep correct rather than two.
-
-    Three things that follow from it, and are load-bearing:
-
-    - **The button-up is never swallowed.** A `WH_MOUSE_LL` hook returning
-      non-zero keeps the message from every application including the move
-      loop, so eating the release would leave the window stuck to the pointer.
-      Only the press is eaten, so the application underneath does not also see
-      a click.
-    - **`ModDragBegin` checks the button is still down.** The hook posts and
-      returns; if the UI thread was busy the release can arrive first, and
-      then the loop waits for a button-up that has already happened. Same
-      symptom, reached the other way round.
-    - **The hook decides on membership itself, from a published set.** It has
-      to answer "swallow or not" before anything can look at the window, so
-      `ModDragPublishWindows` hands it the windows the manager is arranging.
-      Without it the gesture would eat mod+click everywhere on the machine -
-      including on the applications the user excluded, which is the one place
-      the exclusion list was supposed to protect.
-
-49. **The overlay's readout order is a permutation, and the config file may
-    lie about it.** `Config::monOrder` is eight metrics in the order they are
-    drawn, stored by name (`monitor_order = cpu, ram, gpu`) for the same
-    reason `monitor_theme` is - invariant 9. A hand-edited file can name a
-    metric twice, leave three out, or name one that no longer exists, and the
-    overlay still has to index eight arrays by it. `MonitorNormaliseOrder`
-    repairs rather than rejects: unknown and duplicate entries are dropped and
-    whatever is missing is appended in the declared order.
-
-    Which metrics are *shown* is separate (`monShow*`), deliberately: hiding a
-    readout and bringing it back must not lose its place. The eight rows on
-    the Monitor page are addressed by **slot**, not by metric - `IDC_MON_SHOW_FIRST + n`
-    is the nth row on screen, and which metric is in it comes from the order.
-    The ids they replaced were per-metric and not in metric order, so
-    `IDC_MON_CPU + 3` was Disk; that is the trap the renaming closes.
-
-50. **Never take the other application's input state to give it focus.**
-    `FocusWindow` used to `AttachThreadInput` this thread to the foreground
-    thread and the target thread, call `SetForegroundWindow` and `SetFocus`,
-    and detach. Attached threads pool their whole input state: keyboard state,
-    capture, the caret, and the cursor - including whether it is shown.
-    Windows hides the pointer while the user types and shows it on the next
-    movement; pool that with ours mid-keystroke and split it a moment later
-    and the hidden pointer can stay hidden. That is the whole of "the mouse
-    disappears when I type". Attaching also made `SetFocus` a synchronous call
-    into the other process, so a hung application hung the tiler. The fallback
-    was a synthetic Alt press, which lands in Explorer's and Office's menu bar
-    and, with Shift held, is the keyboard-layout switch.
-
-    What replaces both is one `SendInput` of a mouse event with no flags set -
-    nothing moves, nothing clicks, no application sees anything - which the
-    input system still records as "this process delivered the last input
-    event", the documented condition for `SetForegroundWindow`. komorebi and
-    GlazeWM arrived at the same call for the same reasons. Anything new that
-    needs the foreground goes through `FocusWindow`; nothing may attach.
-
-51. **Readings for the overlay are taken on the sampling thread, never on the
-    UI thread.** `PdhCollectQueryData` on the GPU Engine wildcard walks every
-    process's GPU engines and is unbounded - tens of milliseconds warm, and the
-    first `PdhAddCounter` after logon is seconds while the provider starts
-    (84 ms warm on the development machine, `scratchpad\pdhbench`). It ran on
-    the UI thread once a second, and the first time during startup, so every
-    animation that overlapped a reading hitched and the application sat frozen
-    at logon until the counters opened.
-
-    `SystemSampler::Sample()` and `Close()` belong to `monitor.cpp`'s
-    `SampleThread` and nothing else calls them; `Configure()` may be called
-    from anywhere and takes effect at the next reading. The thread parks on an
-    event while the panel is hidden (game mode, display off, switched off) and
-    lets the counters go, so a hidden panel costs nothing - which is what
-    invariant 24 promised and the timer could only approximate. The thermal
-    probe is still started and stopped from the UI thread: it has a thread of
-    its own with its own single-controller assumptions, and the sampler only
-    reads what it last published. `Redraw` draws nothing until the first
-    reading has landed - a layered window with no frame is simply invisible,
-    which is better than a frame of "--" replaced a moment later. If the
-    thread cannot be created the old inline path runs from `kTimerSample`; it
-    is kept for that and for nothing else.
-
-52. **The hook threads run at highest priority.** Every keystroke and every
-    pointer movement on the machine passes through `WH_KEYBOARD_LL` and
-    `WH_MOUSE_LL` before the application it was meant for sees it, and the
-    callback is delivered by pumping the installing thread. At normal priority
-    those threads waited for a timeslice behind the file indexer, the icon
-    sweep, a retile, and every other program on a machine that is busy - which
-    at logon is all of them - and typing felt sticky exactly then. Highest, not
-    time-critical: the callbacks are bounded (invariant 3), but a runaway at
-    time-critical would starve the UI thread that acts on what they post.
-
-53. **The animation ticks once per refresh of the fastest display.** It used to
-    tick every 4 ms whatever the screen. A frame the display cannot show is
-    still a `SetWindowPos` into every application on the board, and a relayout
-    in each - a full one for anything Chromium-based - so on a 60 Hz screen
-    three frames in four were pure cost. `MonitorInfo::refreshHz` comes from
-    `EnumDisplaySettings` in `EnumMonitors`, `ReloadMonitors` folds the fastest
-    into `animFrameMs_` (clamped to 4..16 ms), and the ticker reads it when an
-    animation starts. Measured: 31-32 frames per 200 ms animation on a 180 Hz
-    display, worst gap 6.5 ms.
-
-54. **A window whose limits are remembered is not asked for them again.**
-    `WM_GETMINMAXINFO` is a `SendMessageTimeout` with a 60 ms ceiling on the
-    UI thread, and at logon every application is busy starting and takes the
-    whole 60 ms. `RememberLimits` stores the *merged* numbers - declared and
-    observed - so a window seeded from `learnedLimits` in `AddWindow` has
-    `limitsAsked` set and `ConstraintsFor` skips the message. Ten familiar
-    windows at logon was over half a second of the tiler frozen to learn
-    nothing; it is now nothing.
-
-55. **`index.cache` is read on the index thread, and `g_wants` is always
-    recorded.** `SearchInit` used to parse the cache - half a megabyte through
-    `fgetws`, six thousand strings - on the UI thread before the message loop
-    had started. `StartIndex(0, true)` hands that to the thread, which reads
-    the cache at ordinary priority (one sequential read; the sooner it is in
-    the sooner files are searchable) and only then drops to background mode
-    for a walk, if one is needed. Startup to a running loop went from 317 ms
-    to 68 ms warm on the development machine.
-
-    The second half is a bug the first half happened to fix: `StartWalk` was
-    the only thing that set `g_wants`, and on a cache hit it was never called,
-    so `SearchApplyConfig`'s `SameWants(g_wants, wants)` compared against an
-    empty struct - and every Apply, of anything, on any tab, started a full
-    walk of the disk. `StartIndex` records `g_wants` on every path.
-
-56. **Win-event hooks go in before the first scan.** The scan and the first
-    pass take a while at logon, and a window that opened during them was
-    nobody's: too late for the scan, too early for the hooks, and unmanaged
-    until something else prompted a rescan. Events raised before the message
-    loop runs are queued; any delivered inside the pass are deferred by the
-    `Busy` guard exactly as they are for every later pass. `Classify` also
-    rejects a non-root window *before* it tests visibility, because a child
-    window is never going to become top-level and `EVENT_OBJECT_SHOW` arrives
-    for every child an application shows - testing visibility first put each
-    of them on `pending_` for two seconds of second looks.
-
-57. **A fixed buffer is never filled with a `_s` function that cannot truncate.** Invariant 14
-    said so and the tray tooltip did it anyway: `TrayTooltip` built `NOTIFYICONDATAW::szTip`
-    (128 characters) with `swprintf_s`, and the one combination that did not fit - game mode's
-    "paused for fullscreen app" together with a window running as administrator - was 137
-    characters. `swprintf_s` answers that by calling the invalid-parameter handler, and with no
-    handler installed that is a fast-fail: exception `0xC0000409`, no exception filter, nothing in
-    the log, and the tray icon simply gone. Two Watson buckets on the development machine, both at
-    `_invoke_watson`, both at the moment a game started with Task Manager open. Now: `_snwprintf_s`
-    with `_TRUNCATE` there, and `_set_invalid_parameter_handler` in `wWinMain` installing a handler
-    that logs and returns, which turns the whole class of mistake into an error code from the
-    function that made it. The handler is a net, not a licence.
-
-58. **The shell's own full-screen surfaces are not games.** `FullscreenAppActive` measures the
-    foreground window, and on Windows 11 the Alt+Tab switcher, Task View, the lock screen, the
-    snipping overlay and the logon screen all measure as full-screen. Each put the tiler into game
-    mode: the overlay torn down and rebuilt, window events dropped for the next second and a half,
-    and at logon nothing arranged until the user unlocked. Windows from `explorer.exe`, `LockApp`,
-    `LogonUI`, the shell experience hosts and the snipping tools are excused by process name, and
-    an `ApplicationFrameWindow` only counts when it is actually hosting a `CoreWindow`. A window
-    *we* made fullscreen (`ManagedWindow::fullscreen`, Alt+F) is excused in `UpdateGameMode`,
-    because pausing the tiler against its own fullscreen meant the next Alt+F could not undo it.
-
-59. **Hiding and showing a managed window is asynchronous.** `SetHidden` calls `ShowWindowAsync`.
-    `ShowWindow` sends `WM_SHOWWINDOW` into the other process and waits, and an application that
-    is hung or merely busy - a browser under load, a game loading - held the UI thread with it: no
-    shortcuts, no window events, no tray, for as long as it took. A workspace switch with one such
-    window on it looked exactly like the tiler freezing. The cost is that `IsWindowVisible` does
-    not flip on the spot, so the dead sweep at the top of `RetileMonitor` excuses a window for
-    `kShowGraceMs` after an un-hide (`ManagedWindow::shownAt`), and the `EVENT_OBJECT_SHOW` echo
-    clears the grace early.
-
-60. **"Immovable" and "too small" are verdicts with an expiry.** Two refused placements is also
-    what a window looks like while its application is hung, and applications recover. A window
-    written off as immovable is asked again a minute later (`kImmovableRetryMs`), and a window the
-    user has just moved or sized by hand (`OnMoveSizeEnd`) has both verdicts cleared, since it has
-    just demonstrated it can move and can take another size. A window that genuinely cannot be
-    moved costs two placements a minute, which is nothing.
-
-61. **The low-level hooks are re-installed once a minute.** Windows removes a hook whose callback
-    has been late too often and tells nobody; the Win+key bindings and mod-drag then silently stop
-    for the rest of the session. The hook threads (invariant 52) make that rare, not impossible -
-    a machine paging at logon can starve anything. Each hook thread now unhooks and re-hooks on a
-    thread timer, so a dropped hook is back within the minute.
-
-62. **The clock draws the monitor's panel.** `PaintPanel` in `monpaint.h` takes a `PanelLook` -
-    the gradient, border, gloss, radius and bareness - and both overlays build one from their own
-    skin. There is one shadow, one gloss and one chrome cache (four entries: each overlay's live
-    panel and its settings preview) rather than two versions that agree until one is edited. A
-    radius larger than the panel is clamped to a circle, which is how the analog and ring styles
-    get a round panel without a second code path.
-
-63. **The grain is a GDI pattern brush phased to the screen, not a GDI+ hatch.** Every control
-    erases its own background with the brush `WM_CTLCOLOR*` hands it, so a texture painted by the
-    dialog alone shows as a solid rectangle behind every check box and label. The grain is an 8 px
-    pattern brush instead, and every fill of it - the dialog's erase, the `WM_CTLCOLOR` answers,
-    the hand-painted button and combo backdrops - sets the brush origin from the window's *screen*
-    position (`GrainPhase`), so the lines run through every control unbroken, across a dialog and
-    its pages alike. Cards and the header are flat `Panel` and need none of this.
+57. **A fixed buffer is never filled with a `_s` function that cannot truncate.** (Was also 14.)
+    `swprintf_s` and `wcscpy_s` call the invalid-parameter handler on overflow, and the default
+    handler is a fast-fail: exception `0xC0000409`, no filter, nothing in the log, the tray icon
+    simply gone. Launch commands, titles and paths are user text of any length: build those
+    strings with `std::wstring`, or `_snwprintf_s` / `wcsncpy_s` with `_TRUNCATE`. `wWinMain`
+    installs a handler that logs and returns — a net, not a licence. Ints and table lookups into a
+    sized buffer are fine. (1.4 fixed one more: `DiagnosticsText`'s `add` printed a launch
+    binding's command through `swprintf_s`.)
 
 64. **A different executable that finds the mutex taken offers to replace what holds it.** Every
-    version shares `kMutexName`, `kWndClass` and the config folder. Starting 1.3 while 1.2 was
-    running from another folder poked the running 1.2 and opened its settings, which is what "all
-    the versions run the same" looked like. `ReplaceRunningInstance` compares the running process's
-    image path with ours; the same file behaves as before, a different one asks, and on yes posts
-    `WM_CLOSE` to the hidden main window - `DefWindowProc` → `DestroyWindow` → the ordinary exit
-    path with `RestoreAllWindows`, in every version that has shipped - waits for the process, and
-    takes the mutex over. `RepairAutostartPath` then moves the Run entry to the new copy.
+    version shares `kMutexName`, `kWndClass` and the config folder. `ReplaceRunningInstance`
+    compares image paths: the same file behaves as before; a different one asks, posts `WM_CLOSE`
+    to the hidden main window (the ordinary exit path, `RestoreAllWindows` included), waits, and
+    takes the mutex; `RepairAutostartPath` moves the Run entry to the new copy.
 
-65. **NvAPI before NVML for the GPU temperature.** `nvmlInit_v2` commits 19.3 MB of private
-    memory in this process - the driver's user-mode state - and `nvmlShutdown` plus `FreeLibrary`
-    return none of it, so "turn the temperature off" did not help either. `NvApiSensor` reads the
-    same die sensor through `nvapi64.dll` for 2.8 MB, and unloads. NVML is the fallback, and only
-    when NvAPI could not be *opened*: a single failed read must not load 19 MB. `tests\gputemp.bat`
-    measures the three sources on the machine it runs on.
+### Input
 
-66. **The settings window is destroyed when hidden, not kept.** Eight pages, three list views and
-    every owner-drawn control are a few megabytes and hundreds of GDI objects for a window open a
-    minute a week; it rebuilds in under 100 ms and every page reloads from the live Config. The
-    one thing lost is an edit that was never applied, which is what closing a settings window means.
+3. **The low-level keyboard hook must return fast.** Windows silently drops a hook that exceeds
+   `LowLevelHooksTimeout`. It does a lookup and a `PostMessage`; the work happens on
+   `WM_AWA_HOOKKEY`.
 
-67. **Memory is given back on idle, never on the way to doing something.** `AppScheduleTrim` arms
-    `TIMER_TRIM`; when it fires with nothing on screen, `TrimMemory` unloads COM libraries with no
-    objects left (`CoFreeUnusedLibrariesEx` with the default delay, not zero: a zero delay races the
-    thermal probe's MTA thread), compacts the heap, and trims the working set
-    (`SetProcessWorkingSetSizeEx(-1, -1)`). The last moves untouched pages to the standby list -
-    a soft fault brings one back - so it changes what the process is charged for, not what it has.
-    Scheduled 45 s after startup, a few seconds after the settings window or search bar is put
-    away, and every fifteen minutes.
+4. **Only ignore our own synthetic keystrokes.** `MaskWinKey` stamps `dwExtraInfo` with
+   `kSelfInjected` and the hook skips exactly those — not all `LLKHF_INJECTED` input, so macro
+   keyboards, on-screen keyboards and test harnesses still work.
 
-68. **The search bar's icon bitmaps are not held for a hidden window.** `AppIconRelease` after
-    three minutes out of sight: the fresh ones are written to `icons.cache` first, every bitmap is
-    freed, and the loader thread reads the cache back on the next request (invariant 42's rule -
-    never on the way to the screen - still holds; a lettered tile shows for the frame or two before
-    the cache lands).
+48. **Mod-drag starts the system's move loop; it does not run one.** `moddrag.cpp` posts
+    `WM_NCLBUTTONDOWN` with `HTCAPTION`, so the tiler sees the same `MOVESIZESTART`/`END` pair as a
+    real title-bar drag and there is one drag implementation. Load-bearing consequences: the
+    button-up is never swallowed (the window would stick to the pointer); `ModDragBegin` checks the
+    button is still down; the hook decides "swallow or not" from the published set of managed
+    windows (`ModDragPublishWindows`), or it would eat mod+click on excluded apps too.
+
+50. **Never take the other application's input state to give it focus.** `AttachThreadInput`
+    pools keyboard state, capture, the caret and the cursor's show count — the whole of "the mouse
+    disappears when I type" — and made `SetFocus` a synchronous call into a possibly hung process.
+    `FocusWindow` sends one flagless mouse `SendInput` (nothing moves, nothing clicks), which makes
+    this process the last input source, the documented condition for `SetForegroundWindow`.
+    Anything that needs the foreground goes through `FocusWindow`; nothing may attach.
+
+52. **The hook threads run at highest priority** (not time-critical). Every keystroke and pointer
+    movement on the machine passes through them before its application sees it.
+
+61. **The low-level hooks are re-installed once a minute.** Windows removes a hook that was late
+    too often and tells nobody.
 
 69. **The mouse hook is installed only while the mod-drag modifier is held.** A `WH_MOUSE_LL` hook
-    is delivered for every pointer movement on the machine, a thousand times a second on a gaming
-    mouse, and each one was a round trip into this process to decide "not a button". The keyboard
-    hook (invariant 3), which is installed whenever mod-drag is on, reports modifier transitions to
-    `ModDragModifier`, which asks the mouse hook thread to put the hook in or take it out. The
-    thread itself is created at configuration time and idles, so the first press of the modifier
-    is one posted message away from a live hook.
+    sees every pointer movement — a thousand a second on a gaming mouse. The keyboard hook reports
+    modifier transitions to `ModDragModifier`, which asks the idle mouse thread to hook or unhook.
 
-70. **"The display is off" is only believed after a stretch of no input.** The console-display-
-    state notification is the one source for it, and it arrives at registration with the current
-    value - which is genuinely "off" when the process starts while the user is away. That is
-    correct, and it parks both overlays; the guard in `SetDisplayOff` is for the other case, a
-    notification that is wrong, which would otherwise hide both overlays until the next real "on".
-    While "off" is believed, `TIMER_DISPLAY` watches `GetLastInputInfo` and clears it on input.
-    `get state` reports `displayOff`, `monitorShown` and `clockShown` so this is visible from
-    outside.
+### Fullscreen, power and visibility
+
+23. **Nothing happens while a fullscreen application owns the screen.** Every action is a
+    cross-process call that costs a game frames. `UpdateGameMode()` asks `FullscreenAppActive()`
+    (the shell's `SHQueryUserNotificationState` first — the only view of exclusive fullscreen —
+    then a measurement that rejects maximised and captioned windows); while yes: no tiling, no
+    animation, no accent border, no focus-follows-mouse, no overlays. `Classify` ignores a
+    borderless window covering a whole monitor. `TIMER_GAMECHK` runs only in game mode, because no
+    events arrive to say it ended.
+
+24. **Three things have an opinion about whether the overlays exist** — the user's setting, game
+    mode, and display-off — and `UpdateOverlayVisibility()` in `main.cpp` is the only caller that
+    shows or hides them.
+
+58. **The shell's own full-screen surfaces are not games.** Alt+Tab, Task View, the lock and logon
+    screens and the snipping overlay measure as fullscreen. Windows of `explorer.exe`, `LockApp`,
+    `LogonUI`, the shell experience hosts and the snipping tools are excused by name; an
+    `ApplicationFrameWindow` counts only when it hosts a `CoreWindow`; a window *we* made fullscreen
+    is excused.
+
+70. **"The display is off" is only believed after a stretch of no input.** The notification
+    arrives at registration with the current value; while "off" is believed, `TIMER_DISPLAY`
+    clears it on input. `get state` reports `displayOff`, `monitorShown`, `clockShown`.
+
+### Configuration
+
+6. **The config file is the whole truth about bindings.** `SaveToFile` writes `clear_binds = true`
+   then every binding; there is no defaults-plus-overrides merge. The deliberate exception is
+   `config_version`: `LoadFromFile` adds bindings introduced since the file was written, once, and
+   only if the chord is free (`kAdded`, `onlyIfUnbound`). Add to `kAdded` and bump `kConfigVersion`
+   together.
+
+9. **Themes, styles and metric order are stored by name, not by index.** Adding or reordering
+   entries in `kSkins` or `kStyles` must not change anybody's look, so the file holds `holonet`
+   and `rings`, not `0` and `2`. 1.4 relied on this: it put **Holonet** and **Hologram** at the
+   front of both skin tables, which makes Holonet the default for new configs and changes nothing
+   for existing ones. 1.5 did it again with **Frontline**, the settings window's own look.
+
+15. **Settings categories are addressed by index from outside the settings window.** `PageIndex`
+    in `settings.h` names them, `g_pages` in `settings.cpp` is asserted to match, and
+    `tests\uishot.cpp` asserts it covers every one.
+
+49. **The overlay's readout order is a permutation, and the config file may lie about it.**
+    `MonitorNormaliseOrder` repairs rather than rejects: unknown and duplicate names are dropped,
+    missing ones appended. The Monitor category's readout rows are **positions**: row n shows
+    `monOrder[n]`, carries `orderIndex = n`, and its id names the metric, so the focus follows a
+    readout as it moves.
+
+### The overlays: monitor and clock
+
+8. **The monitor is painted once, from `MonDraw`.** The settings preview calls the same function
+    through `MonitorDrawPreview` with a `MonPaintCtx` built from the edit copy, so it shows what
+    Apply would do. Never draw a second, simplified version. The clock's preview is the same.
+
+10. **An overlay frame is only drawn when it would look different, and its chrome is drawn once.**
+    `BeginEase`/`StepEase` refuse glides and frames too small to see; `Redraw` compares a signature
+    of the size, skin, eased values and the *text* of every reading; `MonDraw` caches the panel's
+    shadow, gradient, gloss and border in a bitmap keyed by size, skin, opacity and radius. Rows
+    went from 2.27 to 0.66 ms/frame (`tests\monshot.bat --bench`). Anything per-frame must stay out
+    of `PaintPanelChrome`; anything that changes the chrome must join the cache key.
+
+11. **The overlay stays a top-level window, even on the desktop.** Desktop mode makes the shell
+    window its *owner* and drops it to `HWND_BOTTOM`. Reparenting into `WorkerW` breaks
+    `UpdateLayeredWindow`. Explorer restarting destroys owned windows, hence `MonitorReattach()` on
+    `TaskbarCreated`.
+
+37. **The overlay's bitmap is bigger than the overlay.** `MonMeasure` adds `kShadow` on every side
+    and `MonDraw` insets by it. Anything reasoning about where the panel *looks* goes through those
+    two functions. The margin is transparent, so it costs nothing in clicks.
+
+45. **The CPU bar is one segment per logical processor, and brightness is the level.** Past about
+    thirty cores, a folded segment shows the **busiest** of its cores, not their mean.
+    `SystemProcessorPerformanceInformation` is per processor group; the first call is sized from
+    `GetActiveProcessorCount`, with one retry.
+
+46. **A sensor block published by another process is bounds-checked before it is believed.** Core
+    Temp and HWiNFO shared memory: signature, element size, count and every value are
+    range-checked. `tempprobe.bat --selftest` publishes malformed blocks.
+
+51. **Readings are taken on the sampling thread, never on the UI thread.** The GPU Engine PDH
+    wildcard is unbounded (seconds at logon). `Sample()` and `Close()` belong to `SampleThread`;
+    `Configure()` may be called from anywhere. The thread parks while the panel is hidden; `Redraw`
+    draws nothing until the first reading lands.
+
+62. **The clock draws the monitor's panel.** `PaintPanel` takes a `PanelLook`; one shadow, one
+    gloss, one chrome cache (four entries). A radius larger than the panel is clamped to a circle;
+    a radius of 0 is square, which is what Frontline, Holonet and Hologram use.
+
+65. **NvAPI before NVML for the GPU temperature.** `nvmlInit_v2` commits 19.3 MB that
+    `nvmlShutdown` never returns; `NvApiSensor` reads the same sensor for 2.8 MB and unloads. NVML
+    is the fallback only when NvAPI could not be *opened*. `tests\gputemp.bat` measures all three.
+
+### The search bar
+
+16. **Every source is capped before the merge.** `Refilter` takes at most `kMaxRows` from each of
+    apps, programs, settings and files, ranks the pool, and trims. The calculator goes first
+    (unranked), "run what I typed" last.
+
+17. **The file index is a cache, not a scan.** `index.cache` is tied by `CacheSignature` to the
+    folders, depth, ceiling and hidden-file setting; a walk happens only with no cache, a cache
+    over a day old, or an explicit rebuild — under `THREAD_MODE_BACKGROUND_BEGIN`, after an
+    interruptible 20 s hold-off on a cold start.
+
+18. **Only `lowQuery` is pre-folded; candidate names are folded as they are scanned.**
+    `SearchScore` takes a pointer and a length and scores the tail of a path in place; a keystroke
+    across the whole index allocates nothing. Do not "simplify" it into two `std::wstring`s.
+
+40. *Merged into 42.*
+
+42. **The search bar never fetches an icon on the way to the screen, and after the first run it
+    hardly fetches one at all.** (Was also 40 and 43.)
+    - `AppIconFor` answers from memory or returns null and queues, reserving the slot at the
+      moment it queues, so eight rows redrawn per keystroke queue each icon once.
+    - Fetched icons go to `icons.cache` as raw premultiplied pixels and are read back in one
+      sequential pass before anything is served; two weeks' expiry.
+    - Everything in the catalogue the cache lacks is fetched in the background after a 15 s
+      hold-off; urgent requests overtake the sweep.
+    - `IShellItemImageFactory::GetImage` hands back *straight* alpha and `AlphaBlend` wants
+      premultiplied: skip the correction and every icon gets a halo.
+
+43. *Merged into 42.*
+
+44. **Programs are a separate source from files, and capped separately.** `SearchPrograms` reads
+    the same index (`FileEntry::exe`). `WalkPrograms` keeps only `.exe`, skips parts folders
+    (`SkipProgramDirectory`), helper executables (`NoiseExecutable`) and two-letter binaries, and
+    every hit is penalised by how deep it is buried.
+
+55. **`index.cache` is read on the index thread, and `g_wants` is always recorded.** Parsing it on
+    the UI thread cost 250 ms at startup; and because only `StartWalk` set `g_wants`, every Apply
+    on any page used to start a full walk. `StartIndex` records it on every path.
+
+68. **The search bar's icon bitmaps are not held for a hidden window.** `AppIconRelease` after
+    three minutes out of sight: fresh ones written to `icons.cache`, every bitmap freed.
 
 71. **Every icon bitmap is top-down, made so on the way in, and never asked which way up it is.**
-    `GetObject` reports `dsBmih.biHeight` positive for every DIB section, top-down or not, so a
-    handle cannot say how its rows are ordered. `TopDownCopy` in `appicon.cpp` copies whatever the
-    shell hands back through `GetDIBits` with a negative height - GDI knows the source's real
-    orientation and turns it over if it must - and the shell's bitmap is deleted. From then on
-    `ReadPixels` copies rows in memory order. Anything that guesses the orientation from the
-    handle will be right for one of the two kinds of bitmap in the table and wrong for the other,
-    which is how the cache came to invert every restored icon on each save (`icons.cache` version
-    2). `tests\iconcache.bat` checks the round trip pixel for pixel; run it after touching any of
-    this.
+    `GetObject` reports a positive height for every DIB section, so a handle cannot say how its
+    rows are ordered. `TopDownCopy` copies the shell's bitmap through `GetDIBits` with a negative
+    height and deletes the original; from then on `ReadPixels` copies rows in memory order.
+    `tests\iconcache.bat` checks the round trip pixel for pixel.
 
-## Things that surprised us, recorded so they surprise nobody twice
+### Settings window and the look
+
+7. *Retired in 1.5 — see 80.* `res\app.rc` owned the layout while the settings window was a
+   dialog; there are no templates now.
+
+20. *Retired in 1.5.* Every page had to call `theme::PrepareDialog` and `theme::DialogMessage`;
+    there are no dialogs, no Win32 controls and nothing left to prepare.
+
+38. *Retired in 1.5.* The disabled list view that painted itself white is gone with the list
+    views; lists are rows (`Kind::Item`).
+
+39. **The system's own chrome follows an undocumented opt-in.** `SetPreferredAppMode` (uxtheme
+    ordinal 135) with **ForceDark**, not AllowDark, called once by `theme::Init`. Since 1.5 it only
+    matters for what ProWindows does not draw itself: the tray's popup menu and the file, folder
+    and colour dialogs. Best-effort by ordinal.
+
+63. *Retired in 1.4 — superseded by 72.*
+
+66. **The settings window is destroyed when hidden, not kept.** It is built from nothing in well
+    under 100 ms when the tray icon is clicked. Unapplied edits are settled first: `Close` asks
+    whether to apply or discard them (`ui::Ask`), and `SettingsHide` only ever runs after that.
+
+67. **Memory is given back on idle, never on the way to doing something.** `TIMER_TRIM` fires with
+    nothing on screen: `CoFreeUnusedLibrariesEx` with the *default* delay (zero races the thermal
+    probe's MTA thread), `theme::TrimSurfaces()` (the backdrop bitmaps), `HeapCompact`, and
+    `SetProcessWorkingSetSizeEx(-1, -1)`. Scheduled 45 s after start, a few seconds after the
+    settings window or search bar is put away, and every fifteen minutes.
+
+72. **The backdrop is one picture per canvas size, and the canvas is not the window.**
+    `RenderBackdrop` is a pure function of the pixel (hashes, not `rand()`, with a little noise
+    before rounding - a gradient this dark bands visibly without it), rendered into a DIB at most
+    three of which are cached. The settings window renders it at its **monitor's** size and shows
+    the top-left part, so a resize never re-renders; the search bar renders it at its **tallest**
+    size (`CanvasSize()`), so rows coming and going never do either. Nothing else draws a
+    background: there are no child controls left to phase a brush for.
+
+73. *Retired in 1.5 — see 80.* The category row was a window class of its own; categories are
+    now part of the settings window, and Ctrl+Tab is handled by its own `WM_KEYDOWN`.
+    `SettingsTranslateMessage` survives for the message loop and always answers false.
+
+74. **A prompt is a promise: only show keys that really do the thing.** The footer's prompts come
+    from `RowList::Prompts()` for the focused row, plus Ctrl+S (only while something is unapplied)
+    and Esc (Back from the list, Close from the categories). Each maps to the key it names, and a
+    click on one sends that key through the same `KeyDown`. The search bar's prompts are all bound.
+
+75. *Retired in 1.5.* `PrepareDialog`, and its walk of a dialog's descendants, are gone.
+
+76. *Retired in 1.5.* There is no page area to fit; the panel scrolls.
+
+77. **Spaced text is measured unspaced, plus the spacing - and placed by hand.**
+    `GetTextExtentPoint32` ignores `SetTextCharacterExtra`, and `DrawText` *centres and
+    right-aligns by that unspaced width* while drawing the spaced one, so spaced text ran off the
+    right of its box and lost its last letter (the search bar's `PROGRA`, the version's `V1.5.`).
+    `theme::SpacedWidth` measures with the extra at 0 and adds `tracking × (length − 1)`;
+    `DrawSpaced` lays centred and right-aligned spaced text out from that width and draws it
+    left-aligned. Every width in the theme goes through these two.
+
+78. **Apply writes only what was changed, and it is a three-way merge.** The window edits a copy
+    (`Edit()`) and remembers what the live config was when the edit began (`Saved()`).
+    `MergeEdits` copies a field into the live config only when the copy differs from `Saved()` -
+    so the monitor dragged, pinned or re-skinned from its own menu while the window was open is
+    not overwritten with the stale value from the copy. Every edited field is listed once, in
+    `AWA_EDITED_FIELDS`; a setting added to a category and not to that list is silently never
+    applied. `SettingsRefresh` from outside - the overlays call it after their own menus change
+    something - reloads the copy when nothing is unapplied and otherwise **rebases** it (`Rebase`):
+    fields the user has not touched take the live value, fields they have keep theirs, and
+    `Saved()` moves on to the live config. 1.4 reloaded every page, which silently threw away
+    every unapplied edit whenever the monitor or clock was changed from its own menu.
+
+79. **Rows are rebuilt after every change, so a callback must not outlive its row.** A row is
+    data - `std::function`s capturing pointers into `Edit()` - and `onChanged` rebuilds the whole
+    list, which is what keeps descriptions and greyed-out rows true. Anything that runs a row's
+    callback copies the `std::function` first and touches no `Row&` afterwards: the call may
+    replace the vector it came from (`SetRows`), or open a modal screen whose message loop
+    repaints and rebuilds underneath it. The focus, the scroll position and the lit fade survive
+    a rebuild through the row's `id`, which is therefore stable and unique within a category.
+    Search results prefix ids with the category number, and are not rebuilt on change - a row
+    whose words changed would drop out from under the pointer.
+
+80. **The settings window has no child windows, and its layout is code.** `DoLayout` places
+    everything from the client size in `theme::Scale` units; `WM_DPICHANGED` resizes to the
+    suggested rectangle and lays out again; `WM_GETMINMAXINFO` holds it at 980 × 620 DIPs. It
+    draws its own frame: `WM_NCCALCSIZE` makes the whole window client, `WM_NCHITTEST` answers the
+    resize edges and makes the header draggable where nothing in it is clickable, and a one-pixel
+    DWM margin keeps the shadow. Corners are square (`DWMWCP_DONOTROUND`), as the game's screens
+    are.
+
+81. **A shortcut is recorded through a hook of its own, only while a row is listening.**
+    `BeginCapture` installs a `WH_KEYBOARD_LL` hook on the UI thread that swallows every key while
+    the settings window is in the foreground and posts it as `WM_AWA_CAPTUREKEY`, so the shell
+    never sees `Win`+`E` and ProWindows' own hotkeys never fire. Only `Win` is swallowed among the
+    modifiers (alone it opens Start). A bare key is refused unless nobody types with it (F1-F24,
+    media keys); a bare Esc cancels; losing the foreground or a click elsewhere cancels. The hook
+    is removed before the row's `set` runs, because that may open a modal screen (a taken chord
+    asks first).
+
+82. **A modal screen runs its own loop, and the owner is disabled for exactly that long.**
+    `ui::Run` disables the owner, pumps until the answer, re-enables the owner *before* destroying
+    the modal (so activation returns to it), then brings it forward. A `WM_QUIT` seen inside is
+    re-posted. The settings window dims itself while `ui::ModalOpen()`, and does not treat the
+    modal taking the foreground as a reason to cancel a capture.
+
+83. **A binding without a key never reaches the config file.** A launcher is added with no chord
+    and asks for one at once; if the capture is cancelled the row removes itself, and anything
+    still keyless is dropped by `ApplyNow` before the merge.
+
+84. **Hover follows the pointer only once the pointer has moved.** A window that opens under a
+    stationary pointer is sent a mouse move; acting on it put the lit row wherever the pointer
+    happened to be. `g_mouseAnchor` holds the position at open, as the search bar's does.
+
+85. **Read what was pressed before releasing the capture.** `ReleaseCapture` sends
+    `WM_CAPTURECHANGED` synchronously, and the settings window's handler for it clears
+    `g_pressed`. `MouseUp` released first and read second, so every header and footer button -
+    the X, minimise, Apply, Reset, Close - was dead to the mouse while the keyboard worked. Only
+    `tests\clickprobe.bat`, which clicks with the real pointer, can catch this kind of thing.
+
+86. **"The focused window" is the one in front, not the last one arranged.** `focused_` only ever
+    names a managed window and is left alone when something unmanaged comes to the front, so with
+    the settings window or an excluded app in front, Alt+Q closed whatever had focus before it.
+    `ForeignForeground()` is that unmanaged window: close and minimise act on it, and every other
+    action that changes a window (`ActionTarget()`) does nothing rather than touch one the user is
+    not looking at.
+
+87. **A config reload re-applies exclusions and nothing the user did at runtime.**
+    `ApplyConfigChanged` releases managed windows the ignore rules now name (un-hiding them first,
+    invariant 2) and rescans for ones they no longer name. It applies `tiling_enabled` only when
+    the file's value changed (`cfgTiling_`), so a pause from the tray survives the next Apply.
+    Reload and Restore every default throw unapplied edits away (`DiscardEdits`) before they run;
+    the rebase of invariant 78 is for changes made elsewhere, not for "changes will be lost".
+
+### Animation
+
+19. **The animation ticker parks; it is not respawned.** It waits on `animActive_`; `AnimCommit`
+    sets it, `AnimStop` resets it (and must stay cheap), `AnimShutdown` ends it.
+
+53. **The animation ticks once per refresh of the fastest display** (`animFrameMs_`, 4..16 ms,
+    from `MonitorInfo::refreshHz`). A frame the display cannot show is still a relayout in every
+    application on the board.
+
+## Things that surprised us
 
 - **The shell owns almost every `Win`+letter chord.** `RegisterHotKey` was refused for all but
-  `Win+J` and `Win+Y` on the test machine. That is why the keyboard hook exists; it is not
-  gold-plating.
-- **Windows 11 cannot move its taskbar.** `StuckRects3` is ignored and `TaskbarSi` (small icons) no
-  longer does anything — both verified on build 26200. Only Explorer patchers can do it, and this
-  app deliberately will not. The Layout page's reserved margins are the supported way to make room
-  for a bar.
-- **Win32 has no usable dark mode.** `theme.cpp` builds it from three mechanisms: `WM_CTLCOLOR*`
-  for backgrounds, owner-draw for push buttons / combo boxes / tabs, and subclassing for
-  checkboxes. Custom draw alone is not enough for buttons — the themed control still paints its
-  own label underneath, which shows through as a ghost.
-- **`UpdateLayeredWindow` wants premultiplied alpha.** The overlay draws into a
-  `PixelFormat32bppPARGB` GDI+ bitmap over the DIB bits. Drawing through the HDC instead gives
-  straight alpha and a washed-out panel.
-- **GDI+ headers need bare `min`/`max`**, which `NOMINMAX` removes. `theme.cpp` and `monitor.cpp`
-  pull in `<algorithm>` and `using std::min/max` before including `gdiplus.h`.
-- **Elevated windows cannot be moved by a non-elevated process.** They are classified `Ignore`
-  rather than fought with on every pass, and the tray offers "Restart as administrator" because
-  that is the only actual fix. Detecting them is invariant 21's problem, not a one-liner.
-- **`SetWindowPos` on a window above our integrity level returns success.** UIPI drops it
-  silently. There is no error to check, which is why placement is verified by looking at where
-  the window ended up.
-- **`small` is a `typedef` for `char`** in the RPC headers that `windows.h` drags in. Naming a
-  local `small` produces "'SizeLimits' followed by 'char' is illegal", which reads like anything
-  but the real cause.
-- **A suspended UWP app is DWM-cloaked, not hidden.** Cloaked windows are skipped; they come back
-  through `EVENT_OBJECT_UNCLOAKED` when the user returns to them.
-- **`CoCreateInstance(CLSID_VirtualDesktopManager)` fails at logon** while the shell that
-  serves it is still coming up - which is exactly when an autostarted copy of this program
-  first asks. It used to be asked once and the failure remembered for the session, so on
-  those boots every window on every virtual desktop was tiled onto the one being looked at.
-  `IsOnCurrentVirtualDesktop` retries every five seconds until it gets the object.
-- **`FindWindow(L"Progman", nullptr)` can return null** on this build even though a window of that
-  class is enumerable. `GetShellWindow()` is asked first for that reason.
-- **Per-process CPU, memory and I/O come from one `NtQuerySystemInformation` call.** The documented
-  APIs need a handle per process and several calls each; this returns the lot in one buffer, which
-  is what Task Manager does. `sysinfo.cpp` declares the full `SYSTEM_PROCESS_INFORMATION` rather
-  than the abbreviated one in `winternl.h`, because the times and I/O counters live in the fields
-  that header hides inside `Reserved1`.
-- **`MSAcpi_ThermalZoneTemperature` needs administrator, and that is why temperature used to be
-  blank.** Unelevated it is not `ExecQuery` that refuses but the enumeration afterwards, so the
-  failure looks like an empty result set rather than an error. The same ACPI zone is published as
-  the `Thermal Zone Information` performance counter set, which any user can read
-  (`\Thermal Zone Information(*)\High Precision Temperature`, in tenths of a Kelvin), so that is
-  what `thermal.cpp` asks first. The WMI class is kept only for machines that publish it but not
-  the counter.
-- **The ACPI zone is not the CPU package.** On a desktop it is usually a mainboard sensor and it
-  barely moves. Reading the real package sensor means reading an MSR, which means a kernel driver;
-  the only honest way to have one without shipping one is to use somebody else's, so `thermal.cpp`
-  looks for LibreHardwareMonitor's (or OpenHardwareMonitor's) WMI namespace first and falls back to
-  the zone. The overlay prints which source answered — `package` or `thermal zone` — rather than
-  presenting them as the same claim.
-- **GPU temperature, unlike CPU, is exact and unprivileged.** `nvml.dll` ships with every NVIDIA
-  driver and lands in System32; `atiadlxx.dll` does the same for AMD. Both are loaded by name at
-  run time, so a machine without either simply reports no sensor and nothing has to link against
-  anything. Which ADL Overdrive generation answers depends on the card, so all three are tried.
-- **Every source runs on one background thread.** A WMI round trip costs tens of milliseconds — far
-  too much for the timer that redraws the overlay. The probe backs off to once a minute after three
-  failures, retries the LibreHardwareMonitor namespace about once a minute so starting that tool
-  upgrades the reading without a restart, and the sampler only ever reads the last answer it left
-  behind.
-- **`SetTimer` cannot animate.** Its floor is the ~15.6 ms system tick however small an interval
-   you ask for, and `timeBeginPeriod` does not change that. A 140 ms animation was therefore nine
-   frames, on a 180 Hz screen. The animation is driven by a thread waiting on a
-   `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` timer that posts `WM_AWA_ANIMTICK`, which measures at
-   ~6 ms. Only one tick is ever in flight (`animPending_`), or a slow frame would build a backlog
-   the UI thread then has to drain.
-- **A tray process has no foreground rights.** `SetForegroundWindow` on the launcher leaves it
-   drawn but not typed into. `winutil::FocusWindow` already knows the attach-thread-input dance;
-   use it for anything that has to take the keyboard.
-- **A memory-DC buffer must blit before `EndPaint`.** `theme::Buffered` copies to the target DC in
-   its destructor, so a buffer declared alongside a `PAINTSTRUCT` blits after the DC has been
-   released and the control paints nothing at all. Give it its own scope.
-- **The overlay builds its own fonts.** Borrowing `theme::FontUI()` and friends looked tidy but
-  they are fixed-size, so the "Size" slider stretched the panel while the numbers stayed put.
-  `monpaint.cpp` derives every font size from the same scale as the geometry.
-- **Every `testwin.exe` shares one window class, and learned limits are keyed by process and
-  class.** So the first test window to teach the tiler a minimum teaches it for every test window
-  that follows in the same session, whatever `--min` they were started with - a plain one opened
-  after a `--min 1200x600` one is treated as needing 1200x600 and parked. Use a real application
-  (Notepad) for the unconstrained window in a mixed board, and strip the `learned = testwin.exe`
-  line from `config.ini` between sessions.
-- **The shell's icons are bottom-up DIBs.** `IShellItemImageFactory::GetImage` hands back a DIB
-  section with a positive `biHeight`, which `AlphaBlend` draws correctly - so an icon looks fine
-  the first time and is only wrong when it comes back from `icons.cache`, where the rows had been
-  copied in memory order and rebuilt as top-down. Every icon on the second launch was upside down.
-  `ReadPixels` turns bottom-up sources over; the cache format version was bumped so old files are
-  discarded rather than read.
-- **A layered window is click-through wherever its alpha is zero.** The bare skins draw no
-  panel, and the first version of them could only be grabbed by the letters: everywhere else the
-  pointer went straight to the window underneath. One count of alpha over the panel rectangle
-  is invisible and makes it solid to the mouse. `MonDraw` paints it for every bare skin.
-- **A press on the overlay is two gestures until time tells them apart.** Press-and-go moves the
-  panel; press-and-hold (320 ms without moving more than four pixels) lifts the readout under
-  the pointer, and Ctrl lifts it at once. The panel drag starts on the press as it always did,
-  and `BeginReorder` puts the panel back where it was if the hold wins - which it can, because
-  the hold only wins when nothing has moved. The painter does the drag feedback itself:
-  `MonPaintCtx::drag` names the lifted cell, the slot it would drop into and where to draw it,
-  and `MonDraw` lays the rest out around a dotted hole. The frame signature includes all three,
-  or a lifted readout would sit still while the pointer moved.
-- **`ReleaseCapture()` tells you about itself.** The Monitor tab's row drag has to take the
-  capture off a pushed checkbox (so it lets go without a click) and then take it for itself. The
-  release delivers `WM_CAPTURECHANGED` to the very window that asked for it, and the subclass's
-  "somebody took the capture" handler ended the drag before it had started. The drag is marked
-  active only after the second `SetCapture`.
-- **The shortcut recorder cannot be an edit control.** `WM_KEYDOWN` never arrives for `Win+E` -
-  Explorer has it first - nor for anything ProWindows itself has registered, which fires the
-  action instead. The editor installs a `WH_KEYBOARD_LL` hook for its own lifetime, consulted
-  before the tiler's hook and before `RegisterHotKey`, and swallows what it records. It only does
-  so while the capture box has the focus in the foreground dialog, so the launcher page's Program
-  field and everything else on the desktop keep working.
+  `Win+J` and `Win+Y` on the test machine. That is why the keyboard hook exists.
+- **Windows 11 cannot move its taskbar.** `StuckRects3` and `TaskbarSi` are ignored (build 26200).
+  The Layout page's reserved margins are the supported way to make room for a bar.
+- **Win32 has no usable dark mode.** 1.4 built one out of `WM_CTLCOLOR*`, owner-draw, subclassing
+  and a window class of its own, and every control still had a corner that came out in the
+  system's colours. 1.5 stopped fighting: the settings window has no controls at all.
+- **`GetTextExtentPoint32` ignores `SetTextCharacterExtra`, and `DrawText` aligns by it.**
+  Invariant 77.
+- **`UpdateLayeredWindow` wants premultiplied alpha**; draw into a `PixelFormat32bppPARGB` GDI+
+  bitmap, not through the HDC.
+- **GDI+ headers need bare `min`/`max`**, which `NOMINMAX` removes: `#include <algorithm>` and
+  `using std::min/max` before `gdiplus.h`. The SDK's own GDI+ headers then produce a page of C4458
+  warnings under `/W4`; they are noise, filter them.
+- **`SetWindowPos` on a window above our integrity level returns success.** UIPI drops it silently,
+  which is why placement is verified by looking (21) and such windows are `Blocked` (27).
+- **`small` is a `typedef` for `char`** in the RPC headers `windows.h` drags in. A local named
+  `small` produces "'SizeLimits' followed by 'char' is illegal".
+- **A suspended UWP app is DWM-cloaked, not hidden**; it comes back via `EVENT_OBJECT_UNCLOAKED`.
+- **`CoCreateInstance(CLSID_VirtualDesktopManager)` fails at logon** while the shell is starting;
+  `IsOnCurrentVirtualDesktop` retries every five seconds. And a kept instance can go stale and
+  say "elsewhere" about a window DWM is plainly drawing, so that answer is re-asked of a fresh one
+  before it is believed.
+- **`FindWindow(L"Progman", nullptr)` can return null** on this build; ask `GetShellWindow()` first.
+- **Per-process CPU, memory and I/O come from one `NtQuerySystemInformation` call**, with the full
+  `SYSTEM_PROCESS_INFORMATION` declared locally — `winternl.h` hides the fields in `Reserved1`.
+- **`MSAcpi_ThermalZoneTemperature` needs administrator**, and fails as an empty result rather than
+  an error. The same zone is the `Thermal Zone Information` performance counter set, readable by
+  anyone. **The ACPI zone is not the CPU package** either; the real sensor needs a kernel driver,
+  so `thermal.cpp` reads LibreHardwareMonitor's (or OpenHardwareMonitor's) WMI namespace when one
+  is running, and the overlay says which source answered.
+- **GPU temperature, unlike CPU, is exact and unprivileged** — NvAPI / NVML for NVIDIA, ADL for
+  AMD, all loaded by name at run time (65).
+- **`SetTimer` cannot animate.** Its floor is the ~15.6 ms tick whatever you ask for; the ticker is
+  a thread on a `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` timer, with one tick in flight at most.
+- **A tray process has no foreground rights.** `SetForegroundWindow` on the search bar leaves it
+  drawn but not typed into; use `FocusWindow` (the `SendInput` rule, invariant 50).
+- **A memory-DC buffer must blit before `EndPaint`.** Every painter here blits explicitly, then
+  calls `EndPaint`.
+- **The overlays build their own fonts.** Borrowing `theme::FontUI()` looked tidy, but those are
+  fixed-size and the Size slider stretched the panel around unchanging numbers.
+- **Every `testwin.exe` shares one window class**, and learned limits are keyed by process and
+  class — so the first test window to teach a minimum teaches it for all of them. Use Notepad for
+  the unconstrained window in a mixed board, and strip `learned = testwin.exe` between sessions.
+- **The shell's icons are bottom-up DIBs, and a DIB section's handle will not tell you.** The
+  first cache inverted every icon on the second launch; see invariant 71 for the rule that ended it.
+- **A layered window is click-through wherever its alpha is zero.** The bare skins paint one count
+  of alpha over the panel rectangle to stay grabbable.
+- **A press on the overlay is two gestures until time tells them apart**: press-and-go moves the
+  panel, press-and-hold (320 ms, four pixels) lifts a readout, Ctrl lifts at once.
+- **`ReleaseCapture()` tells you about itself** — `WM_CAPTURECHANGED` arrives at the window that
+  asked.
+- **A shortcut cannot be recorded from `WM_KEYDOWN`.** `Win+E` never reaches any window and our own
+  hotkeys fire instead; the settings window installs its own `WH_KEYBOARD_LL` hook while a row is
+  listening (81).
+- **`SetKeyboardState` is how a harness holds Ctrl.** `GetKeyState` answers from the thread's key
+  state, so a message-driven Ctrl+Tab or Ctrl+S needs the state set as well as the message sent.
+- **Windows PowerShell 5.1's `Set-Content -Encoding utf8` writes a BOM.** The sources are UTF-8
+  *without* one; write through `[IO.File]::WriteAllText` with `UTF8Encoding($false)` when scripting
+  edits.
 
 ## Testing
 
-`tests\run.bat` compiles `layout.cpp` with a console harness and asserts on the rectangles it
-produces - 61 assertions covering every layout, both kinds of size limit, gaps, and boards whose
-constraints cannot all be met. It touches nothing on the desktop, so it is safe to run at any
-time, and it is the right place to add a case for anything geometric.
+Nothing here starts the tiler unless it says so — the only other way to look at a change is to run
+the real thing, and the real thing rearranges every window on the desktop without remembering where
+they were.
 
-`tests\probe.bat` prints how every window currently on screen would be classified, what size
-limits it declares, and whether it is out of reach - read-only, and the fastest way to answer
-"why is this window not being arranged?".
+| Harness | What it does |
+| --- | --- |
+| `tests\run.bat` | Compiles `layout.cpp` with a console harness and asserts on the rectangles: **212 assertions** covering every layout, both kinds of size limit, gaps, and boards whose limits cannot all be met. Safe at any time; the place for anything geometric. |
+| `tests\probe.bat` | Prints how every window on screen would be classified, its declared limits, and whether it is out of reach. Read-only; the fastest answer to "why is this window not arranged?". |
+| `tests\uishot.bat` | Opens the settings window with `app.h` stubbed, captures every category to `tests\shots\ui-*.png`, then drives it by messages sent to the window - nothing pressed on the desktop - and checks: only the row with the keyboard is lit amber (pixels read back), a changed switch is an unapplied edit, Ctrl+S applies it to the live config and leaves nothing unapplied, Right steps a slider, a chord posted as the capture hook would lands on the shortcut; and captures the categories column, Ctrl+Tab, a capture in progress, search results, a modal screen and the window at its smallest. Exit code 1 on any failure. The About text and indexed folders are fixed so captures carry no profile paths. |
+| `tests\clickprobe.bat` | Opens the settings window with `app.h` stubbed and **clicks with the real pointer and keyboard** (it takes the mouse for a few seconds): the X, minimise, footer Close, Esc, Alt+F4, the close and minimise shortcuts with the window in front, Reset to defaults answered on its modal screen, and Discard on close. The only harness that goes through hit-testing, capture and activation (85). |
+| `tests\launchshot.bat` | Stands the search bar up alone, types into it, waits for icons, captures `launcher-*.png`. |
+| `tests\monshot.bat` | Draws the overlay through its own painter, one PNG per style and per skin, over a checkerboard. `--bench` times the painter per style in ms/frame. |
+| `tests\clockshot.bat` | The same for the clock: every style (12- and 24-hour) and every skin. |
+| `tests\clocklive.bat` | Runs the real clock window for a few seconds and captures it off the screen. |
+| `tests\searchprobe.bat` | Runs the file and program index alone and prints what it found, per drive. |
+| `tests\iconcache.bat` | Checks a shell icon comes back from `icons.cache` the right way up, through a save, a release and a reload, twice. Run after touching `appicon.cpp`. |
+| `tests\tempprobe.bat` | Which temperature source this machine answers from; `--selftest` publishes synthetic (and malformed) Core Temp and HWiNFO blocks. |
+| `tests\gputemp.bat` | What each GPU-temperature source costs in private memory here (65). |
+| `tests\analyze.bat` | MSVC `/analyze` over the named sources (or all of them), compile only. |
+| `tests\ctl_test.ps1` | **Starts a real tiler** (`--tray --config <temp folder>`, so your settings are untouched) and drives it through the control channel: workspace switches really hide windows, layout changes take, bad commands are rejected. The sandbox config is fresh, so it **arranges the live desktop's windows** — run it where that is acceptable. It refuses to start while ProWindows is running. |
 
-Three harnesses render the UI to `tests\shots\*.png` **without starting the window manager**,
-which matters more than it sounds: the only other way to look at a change to any of this is to run
-the real thing, and running the real thing rearranges every window on the desktop and does not
-remember where they were.
+Judging the PNGs: zoom in before believing them — the core-load strip was written off as "a dashed
+line" from a downscaled view and was drawing exactly the right thing. **`PrintWindow` does not
+always reproduce a window's client area**: after a synthetic mouse move it returned the category row
+and the footer blank while `GetPixel` on the window showed both intact, and the old tab strip came
+back blank from every capture. `uishot`'s `Capture` therefore takes only the frame from
+`PrintWindow` and the client straight from the window's own surface (`GetDC` + `BitBlt`), which is
+what DWM composites. The theme's painters also answer `WM_PRINTCLIENT`. Confirm a missing control
+before believing it.
 
-- `tests\monshot.bat` draws the overlay through its own painter, one PNG per style and one per
-  skin, composited over a checkerboard so the translucency and the shadow are visible rather than
-  assumed. `monshot.exe --bench` times the painter instead, per style, in ms/frame - which is the
-  number to quote when changing anything in `monpaint.cpp`.
-- `tests\launchshot.bat` stands the search bar up on its own, types into it, waits for the shell
-  icons, and captures it. Safe because the launcher touches no window but its own.
-- `tests\uishot.bat` opens the settings window with `app.h` stubbed out and captures every tab.
-  Note that owner-drawn controls do not always survive `PrintWindow` - the tab strip in particular
-  can come back blank - so a missing control in one of those PNGs is worth confirming before it is
-  believed.
-- `tests\rowdragshot.bat` is `uishot` for the Monitor tab's row drag, with the mouse actually
-  moved: it drags the first row down three rows with `SendInput`, prints the rows before and
-  after, and then makes a plain click on a row to prove a click is still a click. It switches the
-  monitor on in its stub config first - a disabled checkbox ignores the mouse, which is a
-  confusing way to find out the harness's defaults have it off.
-- `tests\bindshot.bat` is `uishot` for the shortcut recorder, with keys actually pressed: it opens
-  the editor for the first binding, injects Win+E, Win+Shift+F, Ctrl+Alt+T and Alt+Enter with
-  `SendInput` from a second thread, prints what the box showed after each, and captures it. The
-  recorder's hook swallows those chords, so nothing else on the desktop reacts - but it only
-  presses anything once it has confirmed the editor is the foreground window, since a Win+E that
-  got past it would open Explorer.
-- `tests\tempprobe.bat` prints what this machine can say about CPU and GPU temperature and which
-  source answered, which is the whole of "why is the temperature blank on my machine".
-  `tempprobe.bat --selftest` publishes synthetic Core Temp and HWiNFO blocks - including a
-  deliberately malformed one - and checks the readers handle them. That matters because neither
-  tool is installed on most machines, so without it those two readers would ship having never run.
-
-A note on judging any of the PNGs: they are worth zooming into before believing. The core-load
-strip was written off as "a dashed line" from a downscaled view and turned out to be drawing
-exactly the right thing; a nearest-neighbour crop settled it in one look.
-
-`tests\testwin.cpp` is a window that misbehaves exactly the way you ask it to:
-`testwin.exe --name X --min 900x500` or `--max 420x260`. Reproducing "Steam will not shrink" or
-"the copy dialog will not grow" with the real applications means installing them and hoping they
-behave the same next time; this reproduces both exactly, and closes when you are done. Build it
-the same way the other two are built.
-
-It also reproduces invariant 33 — the reason a window used to sit untiled until it was touched:
+`tests\testwin.cpp` is a window that misbehaves on request: `--min 900x500`, `--max 420x260`, and
+the three ways a real application arrives half-built (invariant 33):
 
 ```
 testwin.exe --late-title 400        no name until 400 ms in, like Electron and Chrome
@@ -1082,26 +778,22 @@ testwin.exe --late-show 400         created hidden, shown later
 testwin.exe --late-resizable 400    WS_THICKFRAME applied after creation
 ```
 
-Run two or three of those at once and they should take their tiles on their own. Before the fix
-they stayed where Windows put them until they were clicked on, which is what makes this the
-regression check worth running after anything that touches `Classify` or `OnWinEvent`.
+Run two or three at once; they should take their tiles on their own. It is the regression check
+worth running after anything that touches `Classify` or `OnWinEvent`.
 
-With `debug = true`, a retile logs the BSP tree (`BspTree::Describe`, leaf minimums included) and
-the rect it planned for each window. That pair is what turns "the layout looks wrong" into an
-arithmetic question, and it is how the 122px board above was diagnosed - the tree shape is
-otherwise invisible.
+With `debug = true`, `%APPDATA%\ProWindows\log.txt` records every decision: why each window was or
+was not managed (the rule's name, since 1.4), and on each retile the BSP tree
+(`BspTree::Describe`, leaf minimums included) with the rect planned for each window — which turns
+"the layout looks wrong" into arithmetic.
 
-Beyond those two, what has actually been used and is worth reaching for again:
+Other techniques that have earned their keep:
 
-- Drive the settings UI from PowerShell with `SendMessage`/`PostMessage` on control IDs from
-  `src\resource.h`, then assert on `config.ini`. This exercises the real Save → reload path.
-- Assert on geometry, not screenshots: enumerate windows, read
-  `DwmGetWindowAttribute(..., DWMWA_EXTENDED_FRAME_BOUNDS)`, and check for gaps and overlaps.
-- Sample window rects in a tight loop during a layout change to prove the animation is
-  interpolating rather than jumping.
-- `debug = true` in the config writes a decision log to `%APPDATA%\ProWindows\log.txt`,
-  including why each window was or was not managed.
+- Drive the settings UI with `WM_KEYDOWN` / `WM_CHAR` sent to the window (and `SetKeyboardState`
+  for Ctrl), then assert on `Edit()`, `Saved()` or `config.ini` — the real Apply → reload path.
+  `WM_APP + 120` is what the capture hook posts: `(vk, mods)`, or `(0, mods)` while modifiers are
+  held.
+- Assert on geometry, not screenshots: enumerate windows, read `DWMWA_EXTENDED_FRAME_BOUNDS`, check
+  for gaps and overlaps.
+- Sample window rects in a tight loop during a layout change to prove the animation interpolates.
 
-When testing on a live desktop, put every already-running app in `ignore_process` first. Otherwise
-the first launch rearranges the user's real windows, and their original positions are not
-recoverable.
+When testing on a live desktop, put every already-running app in `ignore_process` first.

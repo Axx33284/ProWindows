@@ -1,14 +1,18 @@
 """Generate res/app.ico for ProWindows.
 
 Draws the app mark - a tiled window arrangement (one master pane on the left,
-two stacked panes on the right) on a dark plate with its top-left and
-bottom-right corners cut, in the settings window's own palette: gunmetal
-and hazard orange, after DOOM Eternal's menus. Rendered at several sizes and
-packed into a PNG-compressed .ico. Uses only the standard library.
+two stacked panes on the right) - on a plate cut the way the settings window
+cuts its buttons: a near-black square with its top-right corner taken off at
+45 degrees and a light hairline round the edge. The master pane is the amber
+the settings window keeps for whatever has focus; the other two are white and
+grey, after the options screens of Star Wars Battlefront II. Rendered at
+several sizes and packed into a PNG-compressed .ico. Uses only the standard
+library.
 
     python res/gen_icon.py
 """
 
+import math
 import os
 import struct
 import zlib
@@ -16,71 +20,66 @@ import zlib
 SIZES = [16, 20, 24, 32, 48, 64, 128, 256]
 SS = 4  # supersampling factor for smooth edges
 
-# theme.h: Panel, Border, Accent, PanelAlt, and a darker step of PanelAlt.
-BG        = (0x16, 0x18, 0x1B)   # plate
-EDGE      = (0x3A, 0x3E, 0x44)   # plate border
-PANE_MAIN = (0xF5, 0x92, 0x1E)   # focused / master pane: the accent
-PANE_ALT  = (0x4A, 0x50, 0x58)   # secondary panes
-PANE_DIM  = (0x33, 0x38, 0x3E)
+# theme.h: Raised, Edge, Amber, Text, and a grey between them.
+PLATE     = (0x15, 0x17, 0x1B)
+EDGE      = (0x9A, 0xA0, 0xA8)
+PANE_MAIN = (0xFF, 0xB0, 0x00)   # the master pane: the focus amber
+PANE_ALT  = (0xEC, 0xEE, 0xF0)   # top right: white
+PANE_DIM  = (0x74, 0x7A, 0x84)   # bottom right: grey
+
+LO, HI = 1.0, 31.0               # the plate, on a 32-unit grid
+CUT = 8.0                        # the top-right corner taken off
 
 
-def chamfer_coverage(px, py, x, y, w, h, cut):
-    """1 if the supersample point is inside the cut-corner rect, else 0."""
-    if px < x or py < y or px >= x + w or py >= y + h:
-        return False
-    if (px - x) + (py - y) < cut:                    # top-left corner cut
-        return False
-    if (x + w - px) + (y + h - py) < cut:            # bottom-right corner cut
-        return False
-    return True
+def colour_at(px, py, unit):
+    """The colour of the sample point, or None where the icon is clear.
+
+    Everything is described on a 32 x 32 grid and scaled by `unit`.
+    """
+    x, y = px / unit, py / unit
+    if not (LO <= x <= HI and LO <= y <= HI):
+        return None
+    # The cut: a line from (HI - CUT, LO) to (HI, LO + CUT).
+    over = (x - (HI - CUT)) - (y - LO)
+    if over > 0:
+        return None
+
+    # The hairline round the edge: one device pixel at every size (a grid
+    # unit is SS / unit pixels wide), never thinner than 0.7 of a unit.
+    edge = max(SS / unit, 0.7)
+    d_cut = -over / math.sqrt(2.0)
+    d = min(x - LO, HI - x, y - LO, HI - y, d_cut)
+    if d < edge:
+        return EDGE
+
+    # The tile mark in the middle.
+    lo, hi, gap = 8.0, 24.0, 1.7
+    mid = lo + (hi - lo) * 0.55
+    ymid = (lo + hi) / 2.0
+    if lo <= x <= hi and lo <= y <= hi:
+        if x <= mid - gap / 2.0:
+            return PANE_MAIN
+        if x >= mid + gap / 2.0:
+            if y <= ymid - gap / 2.0:
+                return PANE_ALT
+            if y >= ymid + gap / 2.0:
+                return PANE_DIM
+    return PLATE
 
 
 def render(size):
     """Return RGBA bytes for one square icon of the given size."""
     n = size * SS
-    # accumulate colour + alpha per output pixel
+    unit = n / 32.0
     acc = [[0, 0, 0, 0] for _ in range(size * size)]
-
-    unit = n / 32.0                      # design grid is 32x32
-    tile_x = tile_y = 1.0 * unit
-    tile_w = tile_h = 30.0 * unit
-    tile_cut = 7.0 * unit
-    edge = max(1.0, 1.1 * unit)          # the border ring, one pixel at 16 px
-
-    gap = 2.0 * unit
-    inner_x = tile_x + 4.0 * unit
-    inner_y = tile_y + 4.0 * unit
-    inner_w = tile_w - 8.0 * unit
-    inner_h = tile_h - 8.0 * unit
-    pane_cut = 2.2 * unit
-
-    master_w = inner_w * 0.52
-    right_x = inner_x + master_w + gap
-    right_w = inner_w - master_w - gap
-    right_h = (inner_h - gap) / 2.0
-
-    panes = [
-        (inner_x, inner_y, master_w, inner_h, PANE_MAIN, pane_cut),
-        (right_x, inner_y, right_w, right_h, PANE_ALT, 0.0),
-        (right_x, inner_y + right_h + gap, right_w, right_h, PANE_DIM, 0.0),
-    ]
 
     for sy in range(n):
         py = sy + 0.5
         oy = sy // SS
         for sx in range(n):
-            px = sx + 0.5
-            if not chamfer_coverage(px, py, tile_x, tile_y, tile_w, tile_h, tile_cut):
+            color = colour_at(sx + 0.5, py, unit)
+            if color is None:
                 continue
-            # the border: the plate minus a slightly smaller plate
-            color = EDGE
-            if chamfer_coverage(px, py, tile_x + edge, tile_y + edge,
-                                tile_w - 2 * edge, tile_h - 2 * edge, tile_cut - edge):
-                color = BG
-                for rx, ry, rw, rh, c, cut in panes:
-                    if chamfer_coverage(px, py, rx, ry, rw, rh, cut):
-                        color = c
-                        break
             cell = acc[oy * size + (sx // SS)]
             cell[0] += color[0]
             cell[1] += color[1]
@@ -135,10 +134,18 @@ def main():
     for _, blob in images:
         out += blob
 
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.ico")
-    with open(path, "wb") as fh:
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "app.ico"), "wb") as fh:
         fh.write(out)
-    print("wrote %s (%d bytes)" % (path, len(out)))
+    print("wrote app.ico (%d bytes)" % len(out))
+
+    # The two sizes worth looking at, for the screenshot folder.
+    shots = os.path.join(here, "..", "tests", "shots")
+    if os.path.isdir(shots):
+        for size, blob in images:
+            if size in (32, 256):
+                with open(os.path.join(shots, "icon-%d.png" % size), "wb") as fh:
+                    fh.write(blob)
 
 
 if __name__ == "__main__":

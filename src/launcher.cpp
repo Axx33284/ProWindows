@@ -402,212 +402,192 @@ bool WantsIcon(HitKind kind) {
            kind == HitKind::File || kind == HitKind::Folder;
 }
 
-// ------------------------------------------------------------------ painting
-void PaintInto(HDC dc, const SIZE& size) {
-    using namespace Gdiplus;
+// The size of the bar at its tallest. The backdrop is rendered at this size
+// and the bar shows the top of it, so the picture stays put as rows come and
+// go instead of being re-rendered, and re-framed, on every keystroke.
+SIZE CanvasSize() {
+    SIZE s;
+    s.cx = (int)(kWidth * g_scale);
+    s.cy = (int)((kInputH + kPad) * g_scale) + kMaxRows * (int)(kRowH * g_scale) +
+           (int)(kFooterH * g_scale);
+    return s;
+}
 
+// ------------------------------------------------------------------ painting
+// Drawn the way the settings window is: black, a hairline frame, a hairline
+// between every row, the selected row lit amber - frame, glow and name - and
+// the keys along the bottom as the game's button prompts.
+void PaintInto(HDC dc, const SIZE& size) {
+    using theme::Font;
     const float s = g_scale;
     RECT all = { 0, 0, size.cx, size.cy };
-    FillRect(dc, &all, theme::BrushBg());
-    theme::Chamfer(dc, all, (int)(14 * s), theme::Panel, 255, theme::Border, 255);
-    // An accent rule along the top edge, as the settings header has.
-    {
-        RECT top = { (int)(14 * s), 0, size.cx, (int)(2 * s) };
-        HBRUSH b = CreateSolidBrush(theme::Accent);
-        FillRect(dc, &top, b);
-        DeleteObject(b);
-    }
-
-    Graphics g(dc);
-    g.SetSmoothingMode(SmoothingModeAntiAlias);
-    g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+    theme::PaintBackdrop(dc, all, CanvasSize());
+    theme::Frame(dc, all, theme::Edge, 150, (std::max)(1, (int)s));
+    // A short amber rule at the top left: where the eye starts.
+    RECT mark = { (int)(18 * s), 0, (int)(74 * s), (std::max)(2, (int)(2 * s)) };
+    theme::Wash(dc, mark, theme::Amber, 255);
 
     const int pad    = (int)(kPad * s);
     const int inputH = (int)(kInputH * s);
+    const bool typing = !g_query.empty();
 
     // ---- the query line ----
-    SetBkMode(dc, TRANSPARENT);
-    HGDIOBJ oldFont = SelectObject(dc, theme::FontTitle());
-
     {
-        const float px = (float)(pad + 6 * s), py = (float)inputH / 2.0f;
-        PointF tri[3] = { { px, py - 6 * s }, { px + 9 * s, py }, { px, py + 6 * s } };
-        SolidBrush accent(Color(255, (BYTE)(theme::Accent & 0xFF),
-                                (BYTE)((theme::Accent >> 8) & 0xFF),
-                                (BYTE)((theme::Accent >> 16) & 0xFF)));
-        g.FillPolygon(&accent, tri, 3);
+        Gdiplus::Graphics g(dc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        const float cx = (float)pad + 13.0f * s, cy = (float)inputH / 2.0f - 1.5f * s;
+        const float r = 6.5f * s;
+        const COLORREF ink = typing ? theme::Amber : theme::TextDim;
+        Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(ink), GetGValue(ink), GetBValue(ink)), 1.7f * s);
+        pen.SetStartCap(Gdiplus::LineCapRound);
+        pen.SetEndCap(Gdiplus::LineCapRound);
+        g.DrawEllipse(&pen, cx - r, cy - r, 2.0f * r, 2.0f * r);
+        g.DrawLine(&pen, cx + r * 0.72f, cy + r * 0.72f, cx + r * 1.5f, cy + r * 1.5f);
     }
-
-    RECT text = { pad + (int)(28 * s), 0, size.cx - pad, inputH };
-    if (g_query.empty()) {
-        SetTextColor(dc, theme::TextDim);
-        DrawTextW(dc, L"Search for an app...", -1, &text,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    } else {
-        SetTextColor(dc, theme::Text);
-        DrawTextW(dc, g_query.c_str(), -1, &text,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
+    RECT text = { pad + (int)(34 * s), 0, size.cx - pad, inputH };
+    if (!typing) {
+        theme::Print(dc, Font::Nav, L"SEARCH APPS, FILES AND SETTINGS", text, theme::TextDim,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE, (int)(2 * s));
         if (g_caretOn) {
-            RECT measure = text;
-            DrawTextW(dc, g_query.c_str(), -1, &measure,
-                      DT_LEFT | DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX);
-            const int caretX = text.left + (measure.right - measure.left) + (int)(2 * s);
-            RECT caret = { caretX, inputH / 2 - (int)(10 * s),
-                           caretX + (int)(2 * s), inputH / 2 + (int)(10 * s) };
-            theme::FillRoundBar(dc, caret, 1, theme::Accent, 235);
+            RECT caret = { text.left - (int)(6 * s), inputH / 2 - (int)(10 * s),
+                           text.left - (int)(6 * s) + (std::max)(2, (int)(2 * s)), inputH / 2 + (int)(10 * s) };
+            theme::Wash(dc, caret, theme::Amber, 255);
+        }
+    } else {
+        theme::Print(dc, Font::Query, g_query, text, theme::Text,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        if (g_caretOn) {
+            const int w = theme::Measure(dc, Font::Query, g_query);
+            const int caretX = (std::min)((int)text.right, (int)text.left + w + (int)(2 * s));
+            RECT caret = { caretX, inputH / 2 - (int)(11 * s),
+                           caretX + (std::max)(2, (int)(2 * s)), inputH / 2 + (int)(11 * s) };
+            theme::Wash(dc, caret, theme::Amber, 255);
         }
     }
-    SelectObject(dc, oldFont);
 
-    // ---- the separator, only when there is something below it ----
+    // ---- the rule under it, or a word about why there is nothing below ----
     if (Rows() > 0) {
         RECT line = { pad, inputH - 1, size.cx - pad, inputH };
-        theme::FillRoundBar(dc, line, 0, theme::Border, 200);
+        theme::Wash(dc, line, theme::Line, 255);
     } else {
         EnterCriticalSection(&g_lock);
         const bool appsReady = g_appsReady;
         LeaveCriticalSection(&g_lock);
         const bool indexing = g_cfg && g_cfg->searchFiles && !SearchIndexReady();
-
         const wchar_t* message =
-            !appsReady      ? L"Finding your apps..." :
-            g_query.empty() ? L"Type to search your apps, files and settings "
-                              L"- or type a sum." :
-            indexing        ? L"No match yet - still indexing your files..." :
-                              L"No match";
-
-        RECT empty = { pad + (int)(28 * s), inputH, size.cx - pad, size.cy };
-        SetTextColor(dc, theme::TextDim);
-        oldFont = SelectObject(dc, theme::FontUI());
-        DrawTextW(dc, message, -1, &empty,
-                  DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
-        SelectObject(dc, oldFont);
+            !appsReady ? L"Finding your apps..." :
+            !typing    ? L"Type to search your apps, files and settings - or type a sum." :
+            indexing   ? L"No match yet - still indexing your files..." :
+                         L"No match";
+        RECT empty = { pad + (int)(34 * s), inputH - (int)(4 * s), size.cx - pad, size.cy };
+        theme::Print(dc, Font::Body, message, empty, theme::TextMute,
+                     DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
     }
 
     // ---- results ----
     const int rowH = (int)(kRowH * s);
+    const int listTop = inputH + (int)(pad * 0.5f);
+    const int footerTop = size.cy - (int)(kFooterH * s);
+    const int saved = SaveDC(dc);
+    IntersectClipRect(dc, 1, inputH, size.cx - 1, Rows() > 0 ? footerTop : size.cy - 1);
     for (int i = 0; i < Rows(); ++i) {
-        const int top = inputH + (int)(pad * 0.5f) + i * rowH;
-        RECT row = { pad, top, size.cx - pad, top + rowH - (int)(4 * s) };
+        const int top = listTop + i * rowH;
+        RECT row = { pad, top, size.cx - pad, top + rowH };
         const bool active = (i == g_selected);
         const Hit& hit = g_hits[(size_t)i];
         const std::wstring& name = hit.name;
 
-        if (active) theme::Slant(dc, row, (int)(7 * s), theme::Accent, 255, theme::Accent, 255);
+        RECT under = { row.left + 2, row.bottom - 1, row.right - 2, row.bottom };
+        theme::Wash(dc, under, theme::Line, 255);
+        if (active) theme::RowFocus(dc, row, 1.0f);
 
         // The icon the shell would show for this entry, if it has one and has
-        // had time to fetch it. Until then, the lettered tile - which is what
-        // this always drew and is still what tells a list of applications
-        // apart at a glance.
+        // had time to fetch it. Until then, a lettered tile.
         const int tile = (int)(kIconPx * s);
         const int tileY = row.top + ((row.bottom - row.top) - tile) / 2;
-        RECT badge = { row.left + (int)(12 * s), tileY,
-                       row.left + (int)(12 * s) + tile, tileY + tile };
-
+        RECT badge = { row.left + (int)(14 * s), tileY, row.left + (int)(14 * s) + tile, tileY + tile };
         HBITMAP icon = WantsIcon(hit.kind) ? AppIconFor(hit.target, tile) : nullptr;
         if (icon) {
             AppIconDraw(dc, icon, badge);
         } else {
-            theme::Chamfer(dc, badge, (int)(5 * s),
-                           active ? theme::AccentText : theme::PanelAlt, 255,
-                           active ? theme::AccentText : theme::Border, 255);
-
-            // The badge says what kind of thing this is at a glance: a symbol
-            // for the sources that are not apps, and for apps the initial
-            // letter, which is what tells one row of a list of apps from the
-            // next. All BMP characters - a wchar_t holds no more than that,
-            // and a surrogate pair is not worth it for a 28px tile.
+            theme::Wash(dc, badge, RGB(24, 26, 30), 255);
+            theme::Frame(dc, badge, active ? theme::Amber : theme::Line, 255, 1);
+            // A symbol for the sources that are not apps, the initial for the
+            // ones that are. All BMP characters.
             wchar_t glyph[2] = { L'?', 0 };
             switch (hit.kind) {
-                case HitKind::Folder:  glyph[0] = L'\x25B8'; break;   // ▸
-                case HitKind::File:    glyph[0] = L'\x25A4'; break;   // ▤
-                case HitKind::Setting: glyph[0] = L'\x2699'; break;   // ⚙
-                case HitKind::Calc:    glyph[0] = L'=';      break;
-                case HitKind::Command: glyph[0] = L'>';      break;
-                case HitKind::Program:
-                case HitKind::App:
+                case HitKind::Folder:  glyph[0] = 0x25B8; break;   // a small triangle
+                case HitKind::File:    glyph[0] = 0x25A4; break;   // a ruled square
+                case HitKind::Setting: glyph[0] = 0x2699; break;   // a gear
+                case HitKind::Calc:    glyph[0] = L'=';   break;
+                case HitKind::Command: glyph[0] = L'>';   break;
                 default:
                     glyph[0] = name.empty() ? L'?' : (wchar_t)towupper(name[0]);
                     break;
             }
-
-            SetTextColor(dc, active ? theme::Accent : theme::TextDim);
-            oldFont = SelectObject(dc, theme::FontBold());
-            DrawTextW(dc, glyph, -1, &badge,
-                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            SelectObject(dc, oldFont);
+            theme::Print(dc, Font::Value, glyph, badge, active ? theme::Amber : theme::TextDim,
+                         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
 
-        // The kind, dim, on the right - but only where it says something. An
-        // "app" tag on every row of a list of applications is eight repetitions
-        // of what the icon has already made obvious.
+        // What kind of thing it is, on the right - only where that says
+        // something the icon does not.
         const wchar_t* tag = KindTag(hit.kind);
-        RECT tagBox = { row.right - (int)(12 * s), row.top,
-                        row.right - (int)(12 * s), row.bottom };
+        RECT tagBox = { row.right - (int)(14 * s), row.top, row.right - (int)(14 * s), row.bottom };
         if (tag) {
             const std::wstring caps = theme::Caps(tag);
-            oldFont = SelectObject(dc, theme::FontHeading());
-            RECT tagFit = { 0, 0, 0, 0 };
-            DrawTextW(dc, caps.c_str(), -1, &tagFit, DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX);
-            tagBox.left -= (tagFit.right - tagFit.left) + (int)(8 * s);
-            SetTextColor(dc, active ? theme::AccentText : RGB(112, 118, 130));
-            DrawTextW(dc, caps.c_str(), -1, &tagBox,
-                      DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            SelectObject(dc, oldFont);
+            const int track = (int)(2 * s);
+            tagBox.left -= theme::Measure(dc, Font::Caption, caps, track) + (int)(4 * s);
+            theme::Print(dc, Font::Caption, caps, tagBox, active ? theme::Amber : theme::TextMute,
+                         DT_RIGHT | DT_VCENTER | DT_SINGLELINE, track);
         }
 
-        const int labelLeft  = badge.right + (int)(13 * s);
+        const int labelLeft  = badge.right + (int)(14 * s);
         const int labelRight = tagBox.left - (int)(12 * s);
         if (labelRight <= labelLeft) continue;
-
+        const COLORREF nameInk = active ? theme::Amber : theme::Text;
         if (hit.detail.empty()) {
             RECT label = { labelLeft, row.top, labelRight, row.bottom };
-            SetTextColor(dc, active ? theme::AccentText : RGB(206, 210, 218));
-            oldFont = SelectObject(dc, active ? theme::FontBold() : theme::FontUI());
-            DrawTextW(dc, name.c_str(), -1, &label, DT_LEFT | DT_VCENTER |
-                      DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-            SelectObject(dc, oldFont);
+            theme::Print(dc, Font::BodyBold, name, label, nameInk,
+                         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         } else {
-            // Two lines: the name, and beneath it the folder it lives in or
-            // what pressing Enter will do. Split the row rather than centring.
+            // Two lines: the name, and under it where it lives or what Enter
+            // will do. A long path is shortened from the left - its end is
+            // the part that tells three "notes.txt" apart.
             const int mid = (row.top + row.bottom) / 2;
             RECT label = { labelLeft, row.top + (int)(3 * s), labelRight, mid + (int)(1 * s) };
-            SetTextColor(dc, active ? theme::AccentText : RGB(206, 210, 218));
-            oldFont = SelectObject(dc, active ? theme::FontBold() : theme::FontUI());
-            DrawTextW(dc, name.c_str(), -1, &label, DT_LEFT | DT_BOTTOM |
-                      DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-            SelectObject(dc, oldFont);
-
-            RECT sub = { labelLeft, mid, labelRight, row.bottom - (int)(2 * s) };
-            SetTextColor(dc, active ? RGB(78, 52, 18) : theme::TextDim);
-            oldFont = SelectObject(dc, theme::FontSmall());
-            // Ellipsise a long path from the *left*: the end of it is the part
-            // that tells you which of three "notes.txt" this one is.
-            DrawTextW(dc, hit.detail.c_str(), -1, &sub, DT_LEFT | DT_TOP |
-                      DT_SINGLELINE | DT_PATH_ELLIPSIS | DT_NOPREFIX);
-            SelectObject(dc, oldFont);
+            theme::Print(dc, Font::BodyBold, name, label, nameInk,
+                         DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS);
+            RECT sub = { labelLeft, mid + (int)(1 * s), labelRight, row.bottom - (int)(2 * s) };
+            theme::Print(dc, Font::Small, hit.detail, sub,
+                         active ? theme::AmberDeep : theme::TextDim,
+                         DT_LEFT | DT_TOP | DT_SINGLELINE | DT_PATH_ELLIPSIS);
         }
     }
+    RestoreDC(dc, saved);
 
-    // ---- the key hints ----
+    // ---- the prompts ----
     // Every one of these was already bound and none of them was discoverable.
     // The bar is the one place somebody is looking when they would want to
-    // know, and it costs a line of dim text.
+    // know, so they are shown the way the game shows its button prompts.
     if (Rows() > 0) {
-        const int footerTop = size.cy - (int)(kFooterH * s);
-        RECT line = { pad + (int)(4 * s), footerTop, size.cx - pad - (int)(4 * s),
-                      footerTop + 1 };
-        theme::FillRoundBar(dc, line, 0, theme::Border, 130);
-
-        RECT hint = { pad + (int)(14 * s), footerTop, size.cx - pad - (int)(14 * s),
-                      size.cy };
-        SetTextColor(dc, RGB(120, 126, 136));
-        oldFont = SelectObject(dc, theme::FontHeading());
-        DrawTextW(dc, L"\x2191\x2193 SELECT      ENTER OPEN      "
-                      L"CTRL+SHIFT+ENTER AS ADMINISTRATOR      ESC CLOSE",
-                  -1, &hint, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        SelectObject(dc, oldFont);
+        RECT line = { pad, footerTop, size.cx - pad, footerTop + 1 };
+        theme::Wash(dc, line, theme::Line, 255);
+        struct PromptText { const wchar_t* key; const wchar_t* word; };
+        static const PromptText kPrompts[] = {
+            { L"\x2191 \x2193",       L"Select" },
+            { L"Enter",               L"Open" },
+            { L"Ctrl+Shift+Enter",    L"As administrator" },
+            { L"Esc",                 L"Close" },
+        };
+        const int cy = footerTop + (size.cy - footerTop) / 2;
+        int x = size.cx - pad;
+        for (int i = (int)ARRAYSIZE(kPrompts) - 1; i >= 0; --i) {
+            const int w = theme::Prompt(dc, 0, cy, kPrompts[i].key, kPrompts[i].word, theme::TextDim, true);
+            x -= w;
+            if (x < pad) break;
+            theme::Prompt(dc, x, cy, kPrompts[i].key, kPrompts[i].word, theme::TextDim);
+            x -= (int)(18 * s);
+        }
     }
 }
 
@@ -618,6 +598,12 @@ void Paint(HWND wnd) {
     RECT client;
     GetClientRect(wnd, &client);
     const SIZE size = { client.right, client.bottom };
+
+    // The theme's fonts are shared with the settings window, which points them
+    // at its own monitor every time it paints. Point them back at the scale
+    // this bar was laid out for, or on a second screen at another scale the
+    // text comes out the wrong size.
+    theme::SetDpi((UINT)(g_scale * 96.0f + 0.5f));
 
     // Double buffered: the panel is redrawn on every keystroke.
     HDC mem = CreateCompatibleDC(target);
@@ -868,7 +854,7 @@ int RowAt(int y) {
     const int inputH = (int)(kInputH * g_scale);
     const int rowH   = (int)(kRowH * g_scale);
     if (y <= inputH || rowH <= 0) return -1;
-    const int row = (y - inputH - (int)(kPad * g_scale / 2)) / rowH;
+    const int row = (y - inputH - (int)(kPad * g_scale * 0.5f)) / rowH;
     return (row >= 0 && row < Rows()) ? row : -1;
 }
 

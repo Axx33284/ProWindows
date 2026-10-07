@@ -50,9 +50,10 @@ void AppOpenConfigFolder();
 void AppWriteDiagnostics();     // writes diagnostics.txt and opens it
 void AppReloadFromDisk();       // re-reads config.ini, re-registers hotkeys
 void AppRestoreHiddenWindows(); // the workspace-hiding safety net
-// Throws every setting away and starts again from the built-in defaults.
-// Asks first: it discards keybindings, exclusions and learned window limits.
-void AppRestoreDefaults(HWND owner);
+// Throws every setting away and starts again from the built-in defaults:
+// keybindings, exclusions and learned window limits included. Does not ask -
+// the caller has, together with whatever it has to say about unapplied edits.
+void AppRestoreDefaults();
 // A short account of what this install is: version, where it is, whether it is
 // elevated, and how many windows it is not allowed to touch.
 std::wstring AppAboutText();

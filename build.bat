@@ -86,6 +86,8 @@ cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UN
        "%ROOT%src\hotkeys.cpp" ^
        "%ROOT%src\moddrag.cpp" ^
        "%ROOT%src\theme.cpp" ^
+       "%ROOT%src\rowlist.cpp" ^
+       "%ROOT%src\modal.cpp" ^
        "%ROOT%src\sysinfo.cpp" ^
        "%ROOT%src\thermal.cpp" ^
        "%ROOT%src\montheme.cpp" ^
@@ -101,6 +103,8 @@ cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UN
        "%ROOT%src\search.cpp" ^
        "%ROOT%src\ipc.cpp" ^
        "%ROOT%src\settings.cpp" ^
+       "%ROOT%src\settings_pages.cpp" ^
+       "%ROOT%src\settings_monitor.cpp" ^
        "%ROOT%src\settings_keys.cpp" ^
        "%ROOT%src\settings_search.cpp" ^
        "%ROOT%src\main.cpp" ^

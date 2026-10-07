@@ -559,26 +559,15 @@ void AppRestoreHiddenWindows() {
     TrayUpdate();
 }
 
-void AppRestoreDefaults(HWND owner) {
-    // This throws away every keybinding, every exclusion and every learned
-    // window limit, and there is no undo short of a backup nobody took. It is
-    // the one button in the settings window that asks first.
-    const int answer = MessageBoxW(owner,
-        L"Every setting goes back to how it shipped: keyboard shortcuts, the "
-        L"apps you excluded, the monitor's colours, the search folders, and "
-        L"the window sizes ProWindows has learned.\r\n\r\n"
-        L"This cannot be undone. Continue?",
-        L"Restore default settings", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
-    if (answer != IDYES) return;
-
+void AppRestoreDefaults() {
     // Built from a fresh Config rather than by resetting fields on the live
     // one: a member added later is then defaulted by the compiler instead of
     // being quietly left at whatever the user had.
     g_cfg = Config();
     g_cfg.LoadDefaults();
+    g_wm.ForgetLearnedLimits();
     g_cfg.SaveToFile(ConfigPath());
     ReloadConfig(false);
-    TrayBalloon(kAppName, L"Every setting is back to its default.");
 }
 
 std::wstring AppAboutText() {
@@ -646,6 +635,9 @@ static void TrimMemory() {
     // DLLs this call is here for were loaded from single-threaded apartments
     // and still go at once; the WMI ones follow on a later trim.
     CoFreeUnusedLibrariesEx(INFINITE, 0);
+    // The backdrop pictures behind the settings window and the search bar:
+    // a few megabytes at high DPI, and rebuilt in milliseconds when next shown.
+    theme::TrimSurfaces();
     HeapCompact(GetProcessHeap(), 0);
     SetProcessWorkingSetSizeEx(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1, 0);
     AWA_LOG(L"memory trimmed");
@@ -775,8 +767,10 @@ static std::wstring DiagnosticsText() {
     std::wstring out;
     wchar_t line[1024];
 
+    // Truncating, never swprintf_s (invariant 57): a launch binding's command
+    // is user text of any length, and it is printed below.
     auto add = [&](const wchar_t* fmt, auto... args) {
-        swprintf_s(line, fmt, args...);
+        _snwprintf_s(line, _TRUNCATE, fmt, args...);
         out += line;
         out += L"\r\n";
     };
@@ -1459,8 +1453,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        HWND dlg = SettingsWindow();
-        if (dlg && IsWindow(dlg) && IsDialogMessageW(dlg, &msg)) continue;
+        if (SettingsTranslateMessage(&msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
