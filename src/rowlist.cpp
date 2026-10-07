@@ -883,8 +883,12 @@ void RowList::PaintRow(HDC dc, int i, const RECT& r, float lit) {
     // ---- the control
     switch (row.kind) {
         case Kind::Toggle: {
-            // get() is 0 for the first word (the "on" one), 1 for the second.
-            theme::DrawToggle(dc, c, (row.get ? row.get() : 0) == 0, look);
+            // get() is 0 for the first word, 1 for the second. Use the row's own words.
+            const int n = (int)row.options.size();
+            const int v = row.get ? row.get() : 0;
+            const std::wstring first = (n > 0) ? row.options[0] : L"Off";
+            const std::wstring second = (n > 1) ? row.options[1] : L"On";
+            theme::DrawToggle(dc, c, first, second, v, look);
             break;
         }
         case Kind::Choice:

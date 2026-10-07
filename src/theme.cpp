@@ -702,8 +702,9 @@ void DrawSelector(HDC dc, const RECT& r, const std::wstring& text, const Look& l
     }
 }
 
-void DrawToggle(HDC dc, const RECT& r, bool on, const Look& look) {
-    DrawSelector(dc, r, on ? L"On" : L"Off", look, true, true, CLR_INVALID, 2, on ? 1 : 0);
+void DrawToggle(HDC dc, const RECT& r, const std::wstring& first, const std::wstring& second, int chosen,
+                const Look& look) {
+    DrawSelector(dc, r, chosen == 0 ? first : second, look, true, true, CLR_INVALID, 2, chosen);
 }
 
 void DrawSlider(HDC dc, const RECT& r, float fraction, const std::wstring& text,

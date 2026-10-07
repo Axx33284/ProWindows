@@ -168,7 +168,8 @@ void DrawSelector(HDC dc, const RECT& r, const std::wstring& text, const Look& l
                   bool canBack = true, bool canForward = true, COLORREF swatch = CLR_INVALID,
                   int count = 0, int index = 0);
 // A Choice with two options, "Off" and "On".
-void DrawToggle(HDC dc, const RECT& r, bool on, const Look& look);
+void DrawToggle(HDC dc, const RECT& r, const std::wstring& first, const std::wstring& second, int chosen,
+                const Look& look);
 // A ruler with a marker at `fraction`, - and + at its ends, `text` at the right.
 // `hot`: 0 the left chevron, 1 the -, 3 the +, 2 the right chevron.
 void DrawSlider(HDC dc, const RECT& r, float fraction, const std::wstring& text,
