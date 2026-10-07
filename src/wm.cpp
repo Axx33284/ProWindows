@@ -1276,10 +1276,32 @@ void WindowManager::RetileMonitor(int monitorIndex) {
     // Only visible, non-minimised, non-fullscreen windows take part in tiling.
     std::vector<HWND> order;
     HWND fullscreen = nullptr;
+    // Every way a window can sit out a pass says so in the debug log: "it is
+    // managed but never arranged" is otherwise a question with no answer.
+    auto sitOut = [&](HWND h, const wchar_t* why) {
+        if (cfg_->debug) LogLine(L"pass %p sits out: %s", (void*)h, why);
+    };
+    // A window managed on this workspace but missing from its list would be
+    // arranged by nothing and counted everywhere: still managed, visible, and
+    // left lying wherever it opened (a Brave window did exactly this after a
+    // config reload, and no path that loses it has been found). The list is
+    // what the pass is built from, so put it back and say so.
+    for (const auto& kv : managed_) {
+        const ManagedWindow& m = kv.second;
+        if (m.monitor != monitorIndex || m.workspace != mon->active) continue;
+        if (m.floating || m.scratch || m.sticky) continue;
+        if (std::find(ws.tiled.begin(), ws.tiled.end(), kv.first) != ws.tiled.end()) continue;
+        ws.tiled.push_back(kv.first);
+        AWA_LOG(L"pass %p was managed here but missing from the tiled list; re-listed it",
+                (void*)kv.first);
+    }
     for (HWND h : ws.tiled) {
         ManagedWindow* mw = Find(h);
-        if (!mw || mw->hidden || mw->minimized || mw->scratch) continue;
-        if (mw->fullscreen) { fullscreen = h; continue; }
+        if (!mw) continue;
+        if (mw->hidden)    { sitOut(h, L"hidden");    continue; }
+        if (mw->minimized) { sitOut(h, L"minimized"); continue; }
+        if (mw->scratch)   { sitOut(h, L"scratchpad"); continue; }
+        if (mw->fullscreen) { fullscreen = h; sitOut(h, L"fullscreen"); continue; }
         // A window we have proved we cannot move, or that will not use the
         // space it is given, must not be given a tile: reserving one is
         // exactly what leaves a rectangle of empty desktop behind.
@@ -1294,7 +1316,8 @@ void WindowManager::RetileMonitor(int monitorIndex) {
             mw->refusals  = 0;
             AWA_LOG(L"window %p: trying to place it again", (void*)h);
         }
-        if (mw->immovable || mw->tooSmall) continue;
+        if (mw->immovable) { sitOut(h, L"immovable"); continue; }
+        if (mw->tooSmall)  { sitOut(h, L"uses too little of its tile"); continue; }
 
         if (mw->tooLarge) {
             // "Will not fit" was decided against a particular screen. Plug in
@@ -1303,8 +1326,10 @@ void WindowManager::RetileMonitor(int monitorIndex) {
             // is remembered between runs, so without this re-check a window
             // could stay floating forever because of a monitor that is no
             // longer attached.
-            if (mw->limits.minW > params.work.w || mw->limits.minH > params.work.h)
+            if (mw->limits.minW > params.work.w || mw->limits.minH > params.work.h) {
+                sitOut(h, L"too large for this monitor");
                 continue;
+            }
             mw->tooLarge = false;
             RememberLimits(*mw);
             AWA_LOG(L"window %p fits again (%dx%d needed, %dx%d available)",
@@ -1350,6 +1375,7 @@ void WindowManager::RetileMonitor(int monitorIndex) {
         if (!mw) continue;
         const bool wasOut = mw->crowdedOut;
         mw->crowdedOut = true;
+        sitOut(h, L"no room beside the others (area)");
         if (!wasOut) park.push_back(h);      // position it once, then leave it
     }
 
