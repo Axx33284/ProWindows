@@ -33,7 +33,7 @@ static Config        g_cfg;
 static WindowManager g_wm;
 Config&        AppConfig() { return g_cfg; }
 WindowManager& AppWm()     { return g_wm; }
-void AppApplySettings()   {}
+bool AppApplySettings()   { return true; }
 void AppShowShortcuts()   {}
 void AppOpenConfigFile()  {}
 void AppRetileNow()       {}
@@ -52,7 +52,12 @@ void AppOpenConfigFolder()    {}
 void AppWriteDiagnostics()    {}
 void AppReloadFromDisk()      {}
 void AppRestoreHiddenWindows() {}
-void AppRestoreDefaults()     {}
+bool AppRestoreDefaults()     { return true; }
+int  AppMemoryMB()            { return 0; }
+int  AppManagedWindows()      { return 0; }
+int  AppIndexEntries()        { return 0; }
+int  AppIconCacheCount()      { return 0; }
+int  AppSamplerCostTenths()   { return -1; }
 std::wstring AppAboutText()   { return L""; }
 } // namespace awa
 

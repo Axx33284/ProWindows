@@ -1140,7 +1140,7 @@ void ApplyNow() {
 
     MergeEdits(g_edit, g_base, live);
     const Config snapshot = live;
-    AppApplySettings();                 // save to disk, reload, re-register keys
+    const bool saved = AppApplySettings();   // save to disk, reload, re-register keys
     if (layoutChanged)
         AppWm().SetLayoutEverywhere(snapshot.layout, snapshot.masterRatio, snapshot.masterCount);
     AppUpdateTray();
@@ -1148,7 +1148,15 @@ void ApplyNow() {
     LoadEdit();
     BuildRows(true);
     UpdateDirty();
-    Toast(L"Settings applied and saved");
+    if (saved) {
+        Toast(L"Settings applied and saved");
+    } else {
+        Toast(L"Settings applied, but not saved");
+        ui::Notice(g_wnd, L"Could not save",
+                   L"Your changes are in effect now, but config.ini could not be written, "
+                   L"so they will be lost when ProWindows restarts. Something may have the "
+                   L"file open - an editor or a sync client. Apply again once it is closed.");
+    }
 }
 
 void ResetPage() {

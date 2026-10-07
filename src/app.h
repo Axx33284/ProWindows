@@ -11,8 +11,9 @@ Config&        AppConfig();
 WindowManager& AppWm();
 
 // Writes the current Config to disk, then reloads it so hotkeys, rules and the
-// layout all pick the new values up.
-void AppApplySettings();
+// layout all pick the new values up. False when the file could not be written:
+// the settings are then in effect from memory but will not survive a restart.
+bool AppApplySettings();
 
 void AppShowShortcuts();
 void AppOpenConfigFile();
@@ -53,7 +54,8 @@ void AppRestoreHiddenWindows(); // the workspace-hiding safety net
 // Throws every setting away and starts again from the built-in defaults:
 // keybindings, exclusions and learned window limits included. Does not ask -
 // the caller has, together with whatever it has to say about unapplied edits.
-void AppRestoreDefaults();
+// False when the defaults could not be written to disk (see AppApplySettings).
+bool AppRestoreDefaults();
 // A short account of what this install is: version, where it is, whether it is
 // elevated, and how many windows it is not allowed to touch.
 std::wstring AppAboutText();

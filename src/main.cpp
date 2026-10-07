@@ -513,9 +513,9 @@ static void LoadConfig() {
 // tray menu runs rather than a second copy of it.
 static void WriteDiagnostics();
 
-static void ReloadConfig(bool announce) {
+// Puts whatever is in g_cfg into effect: keys, rules, overlays, search.
+static void ApplyLiveConfig() {
     HotkeysUnregister();
-    LoadConfig();
     HotkeysRegister(g_wnd, &g_cfg);
     ModDragApplyConfig(&g_cfg);   // the gesture follows the modifier
     g_wm.ApplyConfigChanged();
@@ -529,17 +529,35 @@ static void ReloadConfig(bool announce) {
 
     TrayUpdate();
     SettingsRefresh();
+}
+
+static void ReloadConfig(bool announce) {
+    LoadConfig();
+    ApplyLiveConfig();
     if (announce) TrayBalloon(kAppName, L"Settings reloaded.");
+}
+
+// Saves g_cfg and puts it into effect. Applying used to save and then reload
+// from disk, ignoring whether the save worked - so when config.ini could not
+// be written (held open by an editor or a sync client), the reload read the
+// old file back and every change the user had just applied quietly vanished.
+// On a failed save the settings are applied from memory instead, and the
+// caller is told they will not survive a restart.
+static bool SaveAndApply() {
+    if (g_cfg.SaveToFile(ConfigPath())) {
+        ReloadConfig(false);
+        return true;
+    }
+    LogEnable(g_cfg.debug);
+    ApplyLiveConfig();
+    return false;
 }
 
 // ---------------------------------------------------------------- app.h impl
 Config&        AppConfig() { return g_cfg; }
 WindowManager& AppWm()     { return g_wm; }
 
-void AppApplySettings() {
-    g_cfg.SaveToFile(ConfigPath());
-    ReloadConfig(false);
-}
+bool AppApplySettings() { return SaveAndApply(); }
 
 void AppShowShortcuts()  { SettingsOpenTab(PAGE_SHORTCUTS); }
 void AppUpdateTray()     { TrayUpdate(); }
@@ -576,15 +594,14 @@ void AppRestoreHiddenWindows() {
     TrayUpdate();
 }
 
-void AppRestoreDefaults() {
+bool AppRestoreDefaults() {
     // Built from a fresh Config rather than by resetting fields on the live
     // one: a member added later is then defaulted by the compiler instead of
     // being quietly left at whatever the user had.
     g_cfg = Config();
     g_cfg.LoadDefaults();
     g_wm.ForgetLearnedLimits();
-    g_cfg.SaveToFile(ConfigPath());
-    ReloadConfig(false);
+    return SaveAndApply();
 }
 
 std::wstring AppAboutText() {
@@ -621,7 +638,15 @@ void AppTrayBalloon(const wchar_t* title, const wchar_t* text) {
     TrayBalloon(title, text);
 }
 
-void AppSaveConfig() { g_cfg.SaveToFile(ConfigPath()); }
+// The overlays save on every drag, pin and skin change, and learned window
+// sizes are saved as they are found; a failure is said once, not every time.
+void AppSaveConfig() {
+    static bool warned = false;
+    if (g_cfg.SaveToFile(ConfigPath()) || warned) return;
+    warned = true;
+    TrayBalloon(kAppName, L"Could not save config.ini. Something may have it open; "
+                          L"changes will be lost when ProWindows restarts.");
+}
 
 // Memory a tray application does not need to hold while it waits. Three
 // things, each cheap and each honest about what it does:

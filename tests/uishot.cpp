@@ -50,7 +50,7 @@ static int           g_applied = 0;
 Config&        AppConfig() { return g_cfg; }
 WindowManager& AppWm()     { return g_wm; }
 
-void AppApplySettings()   { ++g_applied; SettingsRefresh(); }
+bool AppApplySettings()   { ++g_applied; SettingsRefresh(); return true; }
 void AppShowShortcuts()   {}
 void AppOpenConfigFile()  {}
 void AppRetileNow()       {}
@@ -74,7 +74,7 @@ void AppOpenConfigFolder()    {}
 void AppWriteDiagnostics()    {}
 void AppReloadFromDisk()      {}
 void AppRestoreHiddenWindows() {}
-void AppRestoreDefaults()     {}
+bool AppRestoreDefaults()     { return true; }
 // Fixed text rather than the real thing: the About rows would otherwise put
 // this machine's user name and install path into every capture.
 std::wstring AppAboutText() {

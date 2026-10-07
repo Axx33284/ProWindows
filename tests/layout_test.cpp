@@ -580,6 +580,26 @@ int main() {
         Check(in.searchMaxPrograms == 1234,
               "config: search_max_programs survives the round trip");
 
+        // A file held open without sharing - an editor, a sync client - must
+        // make the save say it failed and leave what was there alone. Apply
+        // used to ignore this answer and reload the old file over the user's
+        // changes.
+        {
+            HANDLE held = CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            Config other = out;
+            other.gapInner = 21;
+            Check(held != INVALID_HANDLE_VALUE && !other.SaveToFile(path),
+                  "config: a save onto a locked file reports failure");
+            if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
+            Config back;
+            back.LoadDefaults();
+            Check(back.LoadFromFile(path) && back.gapInner == 13,
+                  "config: a failed save leaves the old file intact");
+            Check(GetFileAttributesW((path + L".new").c_str()) == INVALID_FILE_ATTRIBUTES,
+                  "config: a failed save leaves no temporary file behind");
+        }
+
         bool orderKept = true;
         for (int i = 0; i < MON_METRIC_COUNT; ++i)
             if (in.monOrder[i] != out.monOrder[i]) orderKept = false;

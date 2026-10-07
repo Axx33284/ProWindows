@@ -79,7 +79,10 @@ bool Config::SaveToFile(const std::wstring& path) const {
     const std::wstring temp = path + L".new";
 
     FILE* f = nullptr;
-    if (_wfopen_s(&f, temp.c_str(), L"w, ccs=UTF-8") != 0 || !f) return false;
+    if (_wfopen_s(&f, temp.c_str(), L"w, ccs=UTF-8") != 0 || !f) {
+        AWA_LOG(L"config: could not open %s for writing (error %lu)", temp.c_str(), GetLastError());
+        return false;
+    }
 
     fwprintf(f,
         L"# ===========================================================================\n"
@@ -330,10 +333,17 @@ bool Config::SaveToFile(const std::wstring& path) const {
     const bool wrote = (ferror(f) == 0);
     fclose(f);
 
-    if (!wrote) { DeleteFileW(temp.c_str()); return false; }
+    if (!wrote) {
+        AWA_LOG(L"config: writing %s failed", temp.c_str());
+        DeleteFileW(temp.c_str());
+        return false;
+    }
 
     if (!MoveFileExW(temp.c_str(), path.c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        // Usually something holding config.ini open without sharing: an
+        // editor, a sync client, an antivirus scan.
+        AWA_LOG(L"config: could not replace %s (error %lu)", path.c_str(), GetLastError());
         DeleteFileW(temp.c_str());
         return false;
     }

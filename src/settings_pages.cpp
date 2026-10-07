@@ -582,8 +582,13 @@ void BuildGeneralPage(std::vector<Row>& rows) {
                                  L"Restore", L"Cancel", true))
                     return;
                 DiscardEdits();
-                AppRestoreDefaults();
-                SettingsToast(L"Every setting is back to its default");
+                if (AppRestoreDefaults())
+                    SettingsToast(L"Every setting is back to its default");
+                else
+                    ui::Notice(SettingsHwnd(), L"Could not save",
+                               L"The defaults are in effect, but config.ini could not be "
+                               L"written, so your old settings come back when ProWindows "
+                               L"restarts. Something may have the file open.");
             });
         r.danger = true;
         rows.push_back(r);
