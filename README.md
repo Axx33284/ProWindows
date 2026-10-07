@@ -22,6 +22,31 @@ out like the menus of *Resident Evil Requiem*, which opens when you launch it.
 
 ---
 
+## What's new in 1.6
+
+- **A new look**, after the options screens of *Resident Evil Requiem*: black,
+  categories as tabs across the top, pages within a category, a brushed-metal
+  bar on the row you are on, and every setting's default shown beside it. See
+  [Running it](#running-it).
+- **The settings window's keys changed.** `Q` / `E` step categories and `1` /
+  `3` step pages; search now opens with `/` or `Ctrl`+`F` rather than on any
+  key. `R` resets a category and `Tab` resets everything, both asking first.
+  Re-arrange is in the tray menu, and pausing is `Alt`+`P`.
+- **Meters** for ProWindows' own memory, the windows it arranges, the file
+  index, the icon cache and the monitor's sampling cost.
+- **Focus follows the mouse without polling.** It used to check the pointer
+  every 120 ms; it now waits for the pointer to move.
+- **A smaller icon cache**: only the size the search bar draws is kept, and
+  icons unused for 30 days are dropped - 813 KB down to 92 KB on the machine it
+  was measured on.
+- **Fixes:** Apply no longer loses your changes when `config.ini` cannot be
+  written; a window that dropped out of the layout is put back; "Reset to
+  defaults" could reset the wrong category; a taken shortcut confirmed during a
+  config reload could remove the wrong binding; tapping `Alt` alone left the
+  window in an invisible menu.
+
+---
+
 ## Why it's light
 
 | | |
@@ -166,98 +191,113 @@ application — copy it anywhere you like.
 Launch the exe. The settings window opens and tiling starts immediately.
 
 ```
- ▣ │◆ TILING · 7 WINDOWS│                                         V1.5.0   —   ✕
-│ PROWINDOWS / LAYOUT │                           ⟨ RE-ARRANGE ⟩⟨ PAUSE TILING ⟩
+ SETTINGS                                        Tiling · 7 windows   —   ✕
+ [Q] LAYOUT │ BEHAVIOUR │ GENERAL │ SHORTCUTS │ APPS │ SEARCH │ MONITOR │ CLOCK [E]
+ ─────▀▀▀▀▀────────────────────────────────────────────────────────────────────
+  ▛ Arrangement ▟━━━━━━━━━━━━━━━━━━━━━━━━━━━━   Every new window splits the one
+  ▐▒▒ Arrangement      ‹     Dwindle      › ▒▒▌  you are focused on...
+                             ▬ ─ ─                (Default: Dwindle)
+    Main area size     ‹ - ┼┼┼┼┼┼│┼┼┼┼ + ›  55%   ┌────────────────────────┐
+  ▛ Spacing ▟━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   │  ██████  │  ░░░░░░░░░  │
+    Gap between windows ‹ - ┼│┼┼┼┼┼┼┼┼┼ + ›  8   │  ██████  │  ░░░░░░░░░  │
+    No gaps for a lone window ‹    On     ›      └────────────────────────┘
+                             ▬ ─
 
- ⌕ SEARCH SETTINGS      ┌───────────────────────╮_____╭───┐   ┌──────────────┐
-                        │ ARRANGEMENT                     │   │██████│░░░░░░░│
- ▓ LAYOUT ▓▓▓▓▓▓▓▓▓▓    ║ ARRANGEMENT        ◀ DWINDLE ▶  ║   │██████│░░░│░░░│
-   BEHAVIOUR            │ MAIN AREA SIZE     [████ 55%   ]│   └──────────────┘
-   SHORTCUTS            │ SPACING                         │   ARRANGEMENT
-   APPS                 │ GAP BETWEEN WINDOWS [█  8 PX   ]│   ▔▔▔▔
-   SEARCH               │ NO GAPS FOR A LONE WINDOW [ON]OFF   Every new window
-   MONITOR              │ WORKSPACES         ◀    9    ▶  │   splits the one you
-   CLOCK                └────╮_____________________╭──────┘   are focused on...
-   GENERAL
- ─────────────────────────────────────────────────────────────────────────────
- ⟨ APPLY ⟩⟨ RESET TO DEFAULTS ⟩⟨ CLOSE ⟩                  [←→] CHANGE [ESC] BACK
+            [R] Reset category   [Tab] Reset all   [Esc] Close
 ```
 
-The window is laid out like the menus in **Resident Evil Requiem**:
-the screen's name as a breadcrumb at the top left - **PROWINDOWS / LAYOUT** -
-the categories down the left, and every setting as one full-width row in a
-single panel whose frame dips into two shallow notches. Each row is its name in
-condensed capitals on the left and its control on the right, and there are only
-three kinds of control, which always look the same:
+The window is laid out like the options screens of **Resident Evil Requiem**:
+a pure black screen, a plain **SETTINGS** title, and the eight categories as a
+row of tabs across the top, stepped with the keycaps at either end. Categories
+with more to show split into pages - Monitor into *Display*, *Readouts* and
+*Colours*, for example - with a second row of tabs under the first.
 
-- two words side by side, the chosen one on a pale bar - **ON | OFF**,
-  **STACKED | IN A ROW**;
-- a value between two arrowheads - **◀ DWINDLE ▶**;
-- a bar filled from the left with the number in the middle.
+Below the tabs are two columns. On the left, every setting is one row: its name
+in plain sentence case, its control on the right. Groups of rows sit under a
+slanted grey plate. There are few kinds of control, and they always look the
+same:
 
-The row you are on is the only colour on the screen: an amber frame with the
-light bleeding out of it, its name turned amber, its chosen word on an amber
-bar. A row that does not apply right now - *Main area size* when the
-arrangement is not Master - is greyed, its chosen word on slate. Beside the
-panel, whatever has focus is explained in plain English, and the Layout,
-Monitor and Clock categories show a live preview there, drawn by the same code
-that draws the real thing. Buttons are frames with their top-right corner cut
-off, and the foot of the window carries the game's button prompts - a keycap
-and a word - for whatever you are on right now.
+- a value between two thin chevrons, with a row of dashes under it - one dash
+  per choice, the chosen one lit. Switches are drawn this way too, with their
+  own two words: **On / Off**, **24-hour / 12-hour**, **Stacked / In a row**;
+- a ruler with a marker for anything numeric, the number at the end;
+- a shortcut, as keycaps;
+- an action, its name with a small open-in icon.
+
+The row you are on is the only thing lit: a bar of brushed metal across the
+whole row, its name turned white. A row that does not apply right now - *Main
+area size* when the arrangement is not Master - is greyed out.
+
+The right column explains whatever has focus in plain English, then shows the
+value it ships with - *(Default: Dwindle)* - so you always know what a reset
+would give you. Under that, the Layout, Monitor and Clock categories show a
+live preview, drawn by the same code that draws the real thing; the others show
+the ProWindows mark. General, Search and Monitor end with meters, in the style
+of the game's VRAM gauge: ProWindows' own memory use and how many windows it is
+arranging, the size of the file index and the icon cache, and what the
+monitor's sampling costs. They refresh once a second, and only while the window
+is open and in front.
+
+Along the foot are the game's button prompts - a keycap and a word - for
+whatever you are on right now. Every prompt shown really does what it says, and
+each one can be clicked.
 
 It is driven the way the game is:
 
 | | |
 | --- | --- |
-| `↑` `↓` | move between rows - or between categories, in the column on the left |
-| `←` `→` | change the value; on a row with nothing to change, `←` goes back to the categories |
-| `Enter` / `Space` | select: flip a switch, press a button, record a new shortcut |
+| `Q` / `E` | previous / next category (`Ctrl`+`Tab`, `Ctrl`+`PgUp` / `PgDn` too) |
+| `1` / `3` | previous / next page, in a category that has pages |
+| `↑` `↓` | move between rows; `↓` from the tabs goes into the rows |
+| `←` `→` | change the value; on a row with nothing to change, `←` goes back to the tabs |
+| `Enter` / `Space` | select: press an action, record a new shortcut |
 | `Delete` | clear a shortcut, remove an entry from a list |
-| `Ctrl`+`Tab` / `Ctrl`+`Shift`+`Tab` | next / previous category from anywhere (`Ctrl`+`PgDn` / `PgUp` too) |
-| `Tab` | between the categories, the settings and the buttons |
+| `/` or `Ctrl`+`F` | search every setting in every category |
 | `Ctrl`+`S` | apply |
-| `Esc` | back: from the settings to the categories, then close |
-| *just type* | search every setting in every category |
+| `R` | reset this category (asks first) |
+| `Tab` | reset every category (asks first) |
+| `Esc` | back: out of a search, from the rows to the tabs, then close |
 
-With the mouse, the row under the pointer lights up; click either word of a
-pair, an arrowhead, or anywhere along a bar (and drag it); the wheel scrolls;
-the prompts along the foot can be clicked too.
+With the mouse, the row under the pointer lights up; click a chevron or
+anywhere along a ruler (and drag it); click a tab or a page; the wheel
+scrolls.
 
-**Search.** Start typing anywhere in the window and every category is searched
-at once - *gap* finds both gap sliders, *No gaps for a lone window* and the
+**Search.** Press `/` or `Ctrl`+`F` and type: every category is searched at
+once - *gap* finds both gap sliders, *No gaps for a lone window* and the
 shortcut that hides the gaps. The results are the real rows, changed in place;
-`Esc` clears the search.
+`Esc` leaves the search. Letters only go into the search once it is open, since
+`Q`, `E`, `R`, `1` and `3` are the window's own keys.
 
 **Nothing takes effect until you apply it.** A changed setting is marked as you
-make it - a small amber diamond after its name, *CHANGED · NOT APPLIED YET* in
-its description, and a count along the foot - and **Apply** (or `Ctrl`+`S`)
-makes it real and writes the config file. **Reset to defaults** puts the
-category you are looking at back the way it shipped (still to be applied).
-Closing with changes you have not applied asks whether to apply them or throw
-them away. Apply only writes what *you* changed, so moving or pinning the
-monitor from its own menu while the window is open is never undone by it.
+make it - a small diamond after its name - and the top right counts what is not
+applied yet. `Ctrl`+`S` (or its prompt) makes it real and writes the config
+file. If the file cannot be written - something else has it open - the settings
+still take effect, and you are told they will not survive a restart. **Reset
+category** and **Reset all** put settings back the way they shipped, still to
+be applied. Closing with changes you have not applied asks whether to apply
+them or throw them away. Apply only writes what *you* changed, so moving or
+pinning the monitor from its own menu while the window is open is never undone
+by it.
 
-At the top left, beside the badge, **TILING · 7 WINDOWS** says whether tiling is
-active and how many windows are being arranged. The diamond before it is green
-while arranging, amber while paused, and red when a shortcut is blocked or a
-window needs administrator rights - and then a line beside it says which.
-**Re-arrange** and **Pause tiling** are at the top right. The window draws its
-own frame: drag it by the header, resize it from any edge.
+At the top right, the window says how the tiler is doing - *Tiling · 7
+windows* - or, in red, when a shortcut is blocked or a window needs
+administrator rights. Re-arranging now is in the tray menu, and pausing is
+`Alt`+`P`. The window draws its own frame: drag it by the header, resize it
+from any edge.
 
-The search bar is drawn the same way, and the monitor and the clock start in
-**Frontline**, a theme that matches: black glass inside a hairline, white type,
-amber for the one thing that matters. They have many other themes, and are
-otherwise not touched by any of this.
+The search bar and the small question screens (*Apply your changes?*) are drawn
+the same way. The monitor and the clock have their own themes and are not
+touched by any of this.
 
-The version is in the window's top right corner. Several copies of this program
+The version is in **General**, under *About*. Several copies of this program
 can live side by side on one machine, and they all share the single-instance
 lock, so starting a newer copy while an older one is running used to silently
 open the *older* copy's settings - which made every version look like the same
 one. Starting a different executable now offers to stop the running copy and
 take over, moving the start-with-Windows entry across with it.
 
-**Close** (or the ✕, or `Esc` from the categories) puts the window away while the
-tiler keeps running; click the tray icon to bring it back.
+`Esc` from the tabs, or the ✕, puts the window away while the tiler keeps
+running; click the tray icon to bring it back.
 
 Everything about setting the application *up*, as opposed to setting up how
 windows behave, is in the **General** category: how it starts with Windows,
@@ -1106,7 +1146,7 @@ src/clocktheme.* the clock's colour schemes, typefaces and styles, as tables of 
 src/clockpaint.* the clock's twelve layouts, one function each, measured and drawn together
 src/clock.*      the clock window: the same drag, pin, desktop and snap as the monitor
 src/dragguide.*  the drop indicator shown while a tiled window is dragged
-src/theme.*      the Battlefront II look: palette, type, backdrop, glow, the notched frame, the row controls
+src/theme.*      the Requiem look: palette, type, the metal focus bar, plates, keycaps, the row controls
 src/moddrag.*    hold the modifier and drag anywhere on a window
 src/rowlist.*    a list of settings rows: layout, painting, focus, keys, mouse, scrolling
 src/modal.*      the question, notice and pick-one screens, in the same look
