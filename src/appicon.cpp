@@ -16,6 +16,7 @@ struct Icon {
     HBITMAP bitmap = nullptr;
     bool    tried  = false;
     bool    fresh  = false;   // fetched this run, so worth writing to the cache
+    ULONGLONG lastUsed = 0;   // seconds (UnixSeconds); drives the 30-day cull on save
 };
 
 // Keyed by "<lowercased target>|<pixels>": the same application at two sizes is
@@ -55,7 +56,24 @@ constexpr unsigned kCacheMagic   = 0x43494D50;   // "PMIC"
 // save, because ReadPixels guessed the orientation from the handle - see
 // TopDownCopy. Either is thrown away rather than read; one background sweep
 // rebuilds it.
-constexpr unsigned kCacheVersion = 3;
+// 4: one size only (the one the search bar draws) and a last_used stamp per
+// entry; entries unused for 30 days are dropped on save.
+constexpr unsigned kCacheVersion = 4;
+constexpr ULONGLONG kEntryMaxAgeSec = 30ull * 24 * 60 * 60;
+
+ULONGLONG UnixSeconds() {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER u;
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    return u.QuadPart / 10000000ull;
+}
+
+int PixelsOfKey(const std::wstring& key) {
+    const size_t bar = key.find_last_of(L'|');
+    return bar == std::wstring::npos ? 0 : _wtoi(key.c_str() + bar + 1);
+}
 // A shell icon does change - an application updates, a shortcut is repointed -
 // just not often. Rebuilding the lot once a fortnight costs one background pass
 // nobody is waiting on.
@@ -279,7 +297,8 @@ void LoadCache() {
     for (unsigned i = 0; i < count; ++i) {
         unsigned keyLen = 0, bytes = 0;
         int w = 0, h = 0;
-        if (!ReadPod(f, &keyLen) || keyLen == 0 || keyLen > 1024) break;
+        ULONGLONG used = 0;
+        if (!ReadPod(f, &used) || !ReadPod(f, &keyLen) || keyLen == 0 || keyLen > 1024) break;
 
         std::wstring key(keyLen, L'\0');
         if (fread(&key[0], sizeof(wchar_t), keyLen, f) != keyLen) break;
@@ -301,6 +320,7 @@ void LoadCache() {
         Icon& slot = g_cache[key];
         if (slot.bitmap) DeleteObject(bmp);       // a live fetch beat us to it
         else { slot.bitmap = bmp; ++restored; }
+        if (used > slot.lastUsed) slot.lastUsed = used;
         slot.tried = true;
         LeaveCriticalSection(&g_lock);
     }
@@ -318,15 +338,29 @@ void SaveCache() {
     // Read out under the lock and written outside it: the file is a couple of
     // megabytes and holding the section across the write would stall the next
     // keystroke in the search bar for as long as it took.
-    struct Entry { std::wstring key; Pixels px; };
+    struct Entry { std::wstring key; ULONGLONG used; Pixels px; };
     std::vector<Entry> entries;
+    const ULONGLONG now = UnixSeconds();
 
     EnterCriticalSection(&g_lock);
+    // Only the size the search bar draws is worth keeping: the one most
+    // entries have. Another size (a second monitor's scaling) is refetched.
+    std::unordered_map<int, int> sizes;
+    for (const auto& e : g_cache)
+        if (e.second.bitmap) ++sizes[PixelsOfKey(e.first)];
+    int keep = 0, keepN = 0;
+    for (const auto& s : sizes)
+        if (s.second > keepN || (s.second == keepN && s.first > keep)) { keep = s.first; keepN = s.second; }
+
     entries.reserve(g_cache.size());
     for (const auto& e : g_cache) {
         if (!e.second.bitmap) continue;
+        if (PixelsOfKey(e.first) != keep) continue;
+        const ULONGLONG used = e.second.lastUsed ? e.second.lastUsed : now;
+        if (now > used && now - used > kEntryMaxAgeSec) continue;
         Entry entry;
         entry.key = e.first;
+        entry.used = used;
         if (!ReadPixels(e.second.bitmap, &entry.px)) continue;
         entries.push_back(std::move(entry));
         if (entries.size() >= kMaxIcons) break;
@@ -342,6 +376,7 @@ void SaveCache() {
     WritePod(f, kCacheVersion);
     WritePod(f, (unsigned)entries.size());
     for (const Entry& e : entries) {
+        WritePod(f, e.used);
         WritePod(f, (unsigned)e.key.size());
         fwrite(e.key.data(), sizeof(wchar_t), e.key.size(), f);
         WritePod(f, e.px.w);
@@ -475,6 +510,7 @@ DWORD WINAPI LoaderThread(LPVOID) {
         } else if (bitmap) {
             slot.bitmap = bitmap;
             slot.fresh  = true;
+            slot.lastUsed = UnixSeconds();
             g_dirty     = true;
             announce    = true;
         }
@@ -557,6 +593,7 @@ HBITMAP AppIconFor(const std::wstring& target, int pixels) {
     auto it = g_cache.find(key);
     if (it != g_cache.end()) {
         found = it->second.bitmap;
+        if (found) it->second.lastUsed = UnixSeconds();
     } else if (g_cache.size() < kMaxIcons) {
         // Reserved right away, so eight rows redrawn on every keystroke queue
         // each icon once rather than once per keystroke.

@@ -66,7 +66,7 @@ enum : UINT {
 enum : UINT_PTR {
     TIMER_RETILE   = 1,   // debounce retile
     TIMER_ANIM     = 2,   // animation stepper
-    TIMER_MOUSE    = 3,   // focus-follows-mouse poll
+    TIMER_MOUSE    = 3,   // focus-follows-mouse: one-shot armed by the cursor hook
     // Runs only while a fullscreen application is on screen. No window events
     // arrive from a game, so without this there would be nothing to notice
     // when it closes and the desktop should come back.

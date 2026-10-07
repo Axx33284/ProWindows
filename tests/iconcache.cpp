@@ -150,13 +150,14 @@ int wmain() {
     // 2. Something that is not in the cache, so the release below has a
     //    reason to write the file; then release and read back.
     const wchar_t* kOther = L"C:\\Windows\\explorer.exe";
-    WaitFor(kOther, 20, 8000);
+    const wchar_t* kOther2 = L"C:\\Windows\\System32\\cmd.exe";
+    WaitFor(kOther, kPixels, 8000);
     AppIconRelease();
     Check(L"after a save and a reload", ref, rw, rh);
 
     // 3. The case that bit: a save whose entries came from a load, not the
     //    shell, and a reload of that.
-    WaitFor(kOther, 21, 8000);
+    WaitFor(kOther2, kPixels, 8000);
     AppIconRelease();
     Check(L"after a second save and reload", ref, rw, rh);
 

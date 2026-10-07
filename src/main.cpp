@@ -52,6 +52,13 @@ static NOTIFYICONDATAW g_nid       = {};
 static bool            g_trayAdded = false;
 static UINT            g_taskbarCreatedMsg = 0;
 static std::vector<HWINEVENTHOOK> g_hooks;
+// Focus-follows-mouse: a LOCATIONCHANGE hook that only cares about the cursor
+// and arms a one-shot TIMER_MOUSE. Installed only while the feature is on and
+// game mode is off. (Not a low-level mouse hook: that stalls the pointer.)
+static HWINEVENTHOOK g_mouseHook = nullptr;
+static bool g_mouseTimerPending = false;
+static constexpr UINT kMouseSettleMs = 60;
+static void ApplyFocusFollows();
 static bool            g_shuttingDown = false;
 static HPOWERNOTIFY    g_powerNotify  = nullptr;
 
@@ -518,8 +525,7 @@ static void ReloadConfig(bool announce) {
     ClockApplyConfig();
     SearchApplyConfig();
 
-    if (g_cfg.focusFollowsMouse) SetTimer(g_wnd, TIMER_MOUSE, 120, nullptr);
-    else                         KillTimer(g_wnd, TIMER_MOUSE);
+    ApplyFocusFollows();
 
     TrayUpdate();
     SettingsRefresh();
@@ -672,12 +678,12 @@ void AppGameModeChanged(bool on) {
         // duration. The overlay in particular is a topmost layered window that
         // repaints several times a second and holds a PDH query open; tearing
         // it down costs a game nothing and gives it back a composition layer.
-        KillTimer(g_wnd, TIMER_MOUSE);
+        ApplyFocusFollows();
         // Nothing else will tell us the game has gone.
         SetTimer(g_wnd, TIMER_GAMECHK, 1500, nullptr);
     } else {
         KillTimer(g_wnd, TIMER_GAMECHK);
-        if (g_cfg.focusFollowsMouse) SetTimer(g_wnd, TIMER_MOUSE, 120, nullptr);
+        ApplyFocusFollows();
     }
     UpdateOverlayVisibility();
     TrayUpdate();
@@ -724,6 +730,29 @@ void AppOpenMonitorSettings() { SettingsOpenTab(PAGE_MONITOR); }
 void AppOpenClockSettings()   { SettingsOpenTab(PAGE_CLOCK); }
 
 // ---------------------------------------------------------------- win events
+// Everything but the cursor is discarded at once; the cursor arms one timer if
+// none is pending. Never blocks, never touches a window.
+static void CALLBACK MouseEventProc(HWINEVENTHOOK, DWORD, HWND, LONG idObject,
+                                    LONG, DWORD, DWORD) {
+    if (idObject != OBJID_CURSOR) return;
+    if (g_shuttingDown || g_mouseTimerPending || !g_wnd) return;
+    g_mouseTimerPending = true;
+    SetTimer(g_wnd, TIMER_MOUSE, kMouseSettleMs, nullptr);
+}
+
+static void ApplyFocusFollows() {
+    const bool want = g_cfg.focusFollowsMouse && !g_wm.GameMode();
+    if (want && !g_mouseHook) {
+        g_mouseHook = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
+                                      nullptr, MouseEventProc, 0, 0,
+                                      WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    } else if (!want) {
+        if (g_mouseHook) { UnhookWinEvent(g_mouseHook); g_mouseHook = nullptr; }
+        if (g_wnd) KillTimer(g_wnd, TIMER_MOUSE);
+        g_mouseTimerPending = false;
+    }
+}
+
 static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
                                   LONG idObject, LONG idChild, DWORD, DWORD) {
     if (!hwnd || idObject != OBJID_WINDOW || idChild != CHILDID_SELF) return;
@@ -761,6 +790,7 @@ static void InstallHooks() {
 }
 
 static void RemoveHooks() {
+    if (g_mouseHook) { UnhookWinEvent(g_mouseHook); g_mouseHook = nullptr; }
     for (HWINEVENTHOOK h : g_hooks) UnhookWinEvent(h);
     g_hooks.clear();
 }
@@ -1034,6 +1064,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             } else if (wp == TIMER_ANIM) {
                 g_wm.AnimStep();
             } else if (wp == TIMER_MOUSE) {
+                KillTimer(hwnd, TIMER_MOUSE);       // one-shot; the hook re-arms it
+                g_mouseTimerPending = false;
                 if (g_wm.GameMode()) return 0;
                 // Only a change of window is worth reporting. The pointer
                 // rests on the same window for seconds at a time, and handing
@@ -1442,7 +1474,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
     IpcStart(g_wnd, IpcCommandHandler);
     MigrateLegacyAutostart();
     RepairAutostartPath();
-    if (g_cfg.focusFollowsMouse)  SetTimer(g_wnd, TIMER_MOUSE, 120, nullptr);
+    ApplyFocusFollows();
     // Startup allocates and then forgets a great deal: the app scan, the
     // index and icon caches, the first pass over every window. Give it back
     // once the machine has settled.
