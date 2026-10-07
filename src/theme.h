@@ -10,11 +10,9 @@
 //   <  VALUE  >    a value between two solid arrowheads
 //   [####    65 ]  a bar filled from the left, the number in the middle
 //
-// The row under the pointer or the keyboard is the only colour on the screen:
-// amber, a lit frame round the whole row with a glow bleeding out of it, the
-// name turned amber and the chosen word on an amber bar. Disabled rows fall
-// back to grey and their chosen word to a slate bar. Buttons are frames with
-// their top-right corner cut off; prompts are a keycap and a word.
+// The row under the pointer or the keyboard is the only thing lit: a bar of
+// brushed metal over the whole row, its name turned white. Disabled rows fall
+// back to grey. Prompts are a keycap and a word.
 //
 // Everything here is plain GDI and GDI+ drawing into whatever DC the caller
 // hands over - the settings window, its modal screens and the search bar are
@@ -28,30 +26,31 @@ namespace awa {
 namespace theme {
 
 // ---------------------------------------------------------------- palette
-constexpr COLORREF Bg        = RGB(7,   8,   10);    // the screen
-constexpr COLORREF Panel     = RGB(10,  11,  13);    // inside the frame
-constexpr COLORREF Raised    = RGB(20,  22,  26);    // a modal screen's plate
-constexpr COLORREF Line      = RGB(46,  50,  56);    // the hairline between rows
-constexpr COLORREF Edge      = RGB(150, 156, 164);   // the panel frame
-constexpr COLORREF Text      = RGB(236, 238, 240);
-constexpr COLORREF TextDim   = RGB(148, 154, 162);
-constexpr COLORREF TextMute  = RGB(92,  97,  104);   // a disabled row
-// The chosen word of a pair sits on a pale bar with dark type on it; on a
-// disabled row the bar is slate. The slider's groove and its travelled part
-// are the same two greys.
-constexpr COLORREF Fill      = RGB(228, 231, 234);
-constexpr COLORREF FillLow   = RGB(200, 205, 210);   // bottom of the bar's gradient
-constexpr COLORREF FillText  = RGB(74,  78,  84);
-constexpr COLORREF Slate     = RGB(64,  74,  88);
-constexpr COLORREF SlateText = RGB(132, 140, 150);
-constexpr COLORREF Track     = RGB(82,  88,  96);
-// Focus. The one warm colour, and only ever where the user is.
-constexpr COLORREF Amber     = RGB(255, 176, 0);
-constexpr COLORREF AmberHot  = RGB(255, 206, 52);    // the chosen word's bar, lit
-constexpr COLORREF AmberDeep = RGB(214, 128, 0);
-constexpr COLORREF AmberText = RGB(126, 72,  0);     // type on an amber bar
-constexpr COLORREF AmberGlow = RGB(255, 146, 0);     // what bleeds out of a lit frame
-constexpr COLORREF AmberTrack= RGB(96,  58,  6);     // a slider's groove, lit
+// The Requiem set (PLAN-1.6 2.2): a black screen, grey hairlines, white type and
+// a brushed-metal focus bar. The one colour is the meter's green.
+constexpr COLORREF Bg        = RGB(0,   0,   0);     // the screen
+constexpr COLORREF Line      = RGB(40,  40,  40);    // hairline between rows, under the bars
+constexpr COLORREF Rule      = RGB(92,  92,  92);    // vertical separators between tabs
+constexpr COLORREF Text      = RGB(232, 232, 232);   // row labels, values
+constexpr COLORREF TextHi    = RGB(255, 255, 255);   // focused row's label, active tab
+constexpr COLORREF TextDim   = RGB(168, 168, 168);   // inactive tabs, section labels, chevrons
+constexpr COLORREF TextBody  = RGB(205, 205, 205);   // the description panel
+constexpr COLORREF TextMute  = RGB(96,  96,  96);    // a disabled row
+constexpr COLORREF SegOn     = RGB(225, 225, 225);   // the chosen value segment
+constexpr COLORREF SegOff    = RGB(78,  78,  78);
+constexpr COLORREF SegOffDis = RGB(110, 110, 110);   // segments of a disabled row
+constexpr COLORREF Plate     = RGB(30,  30,  30);    // section plate gradient, top ...
+constexpr COLORREF PlateLow  = RGB(22,  22,  22);    // ... and bottom
+// The focus bar's gradient stops, at 0 %, 18 %, 60 % and 100 % of its height.
+constexpr COLORREF Metal0    = RGB(88,  88,  88);
+constexpr COLORREF Metal1    = RGB(58,  58,  58);
+constexpr COLORREF Metal2    = RGB(38,  38,  38);
+constexpr COLORREF Metal3    = RGB(30,  30,  30);
+constexpr COLORREF MetalEdge = RGB(150, 150, 150);   // the bar's outline
+constexpr COLORREF KeyFill   = RGB(205, 205, 205);   // a keycap
+constexpr COLORREF KeyInk    = RGB(20,  20,  20);
+constexpr COLORREF MeterFill = RGB(140, 220, 160);   // the one colour
+constexpr COLORREF MeterEdge = RGB(130, 130, 130);
 // Status marks.
 constexpr COLORREF Good      = RGB(96,  210, 132);
 constexpr COLORREF Warn      = RGB(255, 176, 0);
@@ -77,21 +76,19 @@ float ScaleF(float px);
 // Segoe UI for text that has to be read rather than recognised. On a machine
 // without Bahnschrift the capitals fall back to Segoe UI.
 enum class Font {
-    Body,        // Segoe UI - descriptions, paths, anything the user typed
-    BodyBold,
+    // Requiem (PLAN-1.6 2.3). Squared Bahnschrift for the title, the tabs and
+    // keycap letters; Segoe UI in sentence case for everything else.
+    Heading,     // the screen's title                  Bahnschrift SemiCondensed, 26 DIP
+    Tab,         // a tab, capitals                      Bahnschrift SemiCondensed, 17 DIP
+    Row,         // a row's label and value              Segoe UI (Variable), 15 DIP
+    Desc,        // the description panel                Segoe UI (Variable), 16 DIP
+    Plate,       // a section plate's label              Segoe UI (Variable), 14 DIP
+    Prompt,      // a footer prompt's word               Segoe UI (Variable), 16 DIP
+    Keycap,      // the letters in a keycap              Bahnschrift SemiCondensed
+    Body,        // Segoe UI - paths, anything the user typed
     Small,       // Segoe UI, a size down - the second line of a result
-    Label,       // a row's name                     SemiBold SemiCondensed
-    Value,       // an unchosen word, a value         SemiBold SemiCondensed
-    ValueLight,  // the chosen word on its pale bar   SemiCondensed
-    Crumb,       // "PROWINDOWS /"                    SemiCondensed, large
-    CrumbBold,   // "LAYOUT"                          SemiBold SemiCondensed, large
-    Nav,         // the category column
-    Section,     // a group's heading in the list     SemiBold SemiCondensed, small
-    Caption,     // status lines, prompts             SemiCondensed, small
-    Title,       // the description panel's heading
-    Button,
-    Key,         // the letters in a keycap
     Query,       // what is typed into the search bar
+
     Count
 };
 HFONT Get(Font f);
@@ -110,15 +107,6 @@ int  Measure(HDC dc, Font font, const std::wstring& text, int tracking = 0);
 // Word-wrapped body text; returns the height it took. `measureOnly` draws nothing.
 int  PrintWrapped(HDC dc, Font font, const std::wstring& text, RECT r, COLORREF color,
                   bool measureOnly = false);
-
-// ---------------------------------------------------------------- the screen
-// The backdrop: near-black, a little lighter towards the top left, with a
-// vignette and enough noise that the gradient does not band. Rendered once per
-// canvas size and blitted; `r` shows the top-left part of a `canvas`-sized
-// picture, so a window that grows and shrinks keeps the same one.
-void PaintBackdrop(HDC dc, const RECT& r, SIZE canvas);
-// Lets the rendered pictures go (called when a window closes and on idle trim).
-void TrimSurfaces();
 
 void DarkTitleBar(HWND wnd);
 
@@ -171,25 +159,30 @@ struct Look {
     bool  pressed = false;
 };
 
-// The amber frame, glow and wash over a row that has focus. `t` fades it in.
+// The brushed-metal bar over a row that has focus: gradient, sheen, highlight,
+// light outline. `t` fades it in.
 void RowFocus(HDC dc, const RECT& row, float t);
 
-// Two words side by side, `chosen` (0 or 1) on a bar.
-void DrawPair(HDC dc, const RECT& r, const std::wstring& first, const std::wstring& second,
-              int chosen, const Look& look);
-// A value between two arrowheads. `hot`: 0 the left arrow, 2 the right one.
+// A value between two thin chevrons, with one segment per option under it
+// (`count` options, `index` chosen; a track and thumb above 8; nothing when
+// `count` is 0). `hot`: 0 the left chevron, 2 the right one.
 void DrawSelector(HDC dc, const RECT& r, const std::wstring& text, const Look& look,
-                  bool canBack = true, bool canForward = true, COLORREF swatch = CLR_INVALID);
-// A bar filled `fraction` of the way, `text` in the middle.
+                  bool canBack = true, bool canForward = true, COLORREF swatch = CLR_INVALID,
+                  int count = 0, int index = 0);
+// A Choice with two options, "Off" and "On".
+void DrawToggle(HDC dc, const RECT& r, bool on, const Look& look);
+// A ruler with a marker at `fraction`, - and + at its ends, `text` at the right.
+// `hot`: 0 the left chevron, 1 the -, 3 the +, 2 the right chevron.
 void DrawSlider(HDC dc, const RECT& r, float fraction, const std::wstring& text,
                 const Look& look);
-// A button in the control column: a cut frame with a word in it.
+// A row that opens something: the word, and the open-in icon at the right edge.
 void DrawAction(HDC dc, const RECT& r, const std::wstring& text, const Look& look,
                 bool danger = false);
 
-// A key, as the game draws a button prompt: the name in a small outlined box.
-// Returns its width. `ink` is the outline and the letters; `solid` fills the
-// box with `ink` and prints the letters dark.
+// A key, as the game draws a button prompt: the name in a solid light box with
+// dark letters, at least 20 x 20 DIP. Returns its width. `ink` is only used by
+// the legacy callers and is ignored; `solid` and `large` pick the pressed look
+// and the bigger size.
 int  Keycap(HDC dc, int x, int centreY, const std::wstring& key, COLORREF ink,
             bool measureOnly = false, bool solid = false, bool large = false);
 // A whole chord - "Win + Shift + H" - as a row of keycaps, laid out from `x`
@@ -200,22 +193,21 @@ int  Chord(HDC dc, int x, int centreY, UINT mods, UINT vk, COLORREF ink,
 // The name of a key the way a keycap prints it.
 std::wstring KeyName(UINT vk);
 
-// A footer button: a cut frame, the label in capitals, an optional keycap in
-// front of it. `primary` is the action that commits something.
-struct ButtonLook {
-    bool hot = false, pressed = false, enabled = true, primary = false, focused = false;
-};
-void DrawButton(HDC dc, const RECT& r, const std::wstring& label, const wchar_t* key,
-                const ButtonLook& look);
-int  ButtonWidth(HDC dc, const std::wstring& label, const wchar_t* key);
-
 // A prompt in the footer - keycap then word - drawn from `x`. Returns its width.
+// A section's plate: a slanted dark slab with the label inset, and a hairline
+// running on from it to the right edge of `r` (the row's full width).
+void SectionPlate(HDC dc, const RECT& r, const std::wstring& label);
 int  Prompt(HDC dc, int x, int centreY, const std::wstring& key, const std::wstring& word,
             COLORREF ink, bool measureOnly = false);
 
-// The mark: a tiled-window arrangement, master pane amber. Drawn in `r`,
+// The mark: a tiled-window arrangement, master pane silver. Drawn in `r`,
 // `ink` for the other two panes.
 void Mark(HDC dc, const RECT& r, COLORREF ink, COLORREF master);
+
+// A meter bar in `r` (220 x 10 DIP in the settings window): a 1 px MeterEdge
+// frame, a MeterFill gradient for `used` (0..1) and a hatched part for `other`
+// (0..1, drawn after `used`).
+void Meter(HDC dc, const RECT& r, float used, float other);
 
 } // namespace theme
 } // namespace awa

@@ -2,6 +2,7 @@
 #include "rowlist.h"
 #include "theme.h"
 #include <cmath>
+#include <cstring>
 
 namespace awa {
 namespace ui {
@@ -9,6 +10,29 @@ namespace ui {
 using theme::Font;
 
 // ================================================================ row helpers
+namespace {
+const char* g_editBase = nullptr;
+const char* g_defBase  = nullptr;
+size_t      g_defSize  = 0;
+
+// The default int / bool for a field of the edit struct, or false when the
+// field is not in it.
+bool DefaultOffset(const void* field, size_t* off) {
+    const char* f = (const char*)field;
+    if (!g_editBase || f < g_editBase || f >= g_editBase + g_defSize) return false;
+    *off = (size_t)(f - g_editBase);
+    return true;
+}
+int DefaultInt(size_t off)  { int v = 0; memcpy(&v, g_defBase + off, sizeof v); return v; }
+bool DefaultBool(size_t off) { return *(const bool*)(g_defBase + off); }
+} // namespace
+
+void SetDefaultsSource(const void* edit, const void* defaults, size_t size) {
+    g_editBase = (const char*)edit;
+    g_defBase  = (const char*)defaults;
+    g_defSize  = size;
+}
+
 Row Toggle(const std::wstring& id, const std::wstring& label, const std::wstring& help,
            bool* field, const bool* saved, const wchar_t* onWord, const wchar_t* offWord) {
     Row r;
@@ -20,6 +44,11 @@ Row Toggle(const std::wstring& id, const std::wstring& label, const std::wstring
     r.get = [field]() { return *field ? 0 : 1; };
     r.set = [field](int v) { *field = (v == 0); };
     if (saved) r.modified = [field, saved]() { return *field != *saved; };
+    size_t off;
+    if (DefaultOffset(field, &off)) {
+        const std::wstring on = onWord, offw = offWord;
+        r.fallback = [off, on, offw]() { return DefaultBool(off) ? on : offw; };
+    }
     return r;
 }
 
@@ -41,6 +70,11 @@ Row Slider(const std::wstring& id, const std::wstring& label, const std::wstring
         if (u == L"%") return std::to_wstring(v) + L"%";
         return std::to_wstring(v) + L" " + u;
     };
+    size_t off;
+    if (DefaultOffset(field, &off)) {
+        auto fmt = r.format;
+        r.fallback = [off, lo, hi, fmt]() { return fmt((std::max)(lo, (std::min)(hi, DefaultInt(off)))); };
+    }
     return r;
 }
 
@@ -67,6 +101,15 @@ Row ChoiceOf(const std::wstring& id, const std::wstring& label, const std::wstri
         if (v >= 0 && v < (int)values.size()) *field = values[(size_t)v];
     };
     if (saved) r.modified = [field, saved]() { return *field != *saved; };
+    size_t off;
+    if (DefaultOffset(field, &off)) {
+        r.fallback = [off, values, names]() -> std::wstring {
+            const int d = DefaultInt(off);
+            for (size_t i = 0; i < values.size() && i < names.size(); ++i)
+                if (values[i] >= d) return names[i];
+            return names.empty() ? std::wstring() : names.back();
+        };
+    }
     return r;
 }
 
@@ -74,6 +117,14 @@ Row Section(const std::wstring& label) {
     Row r;
     r.kind  = Kind::Section;
     r.id    = L"section:" + label;
+    r.label = label;
+    return r;
+}
+
+Row Page(const std::wstring& label) {
+    Row r;
+    r.kind  = Kind::Page;
+    r.id    = L"page:" + label;
     r.label = label;
     return r;
 }
@@ -106,6 +157,7 @@ Row Info(const std::wstring& id, const std::wstring& label, const std::wstring& 
 namespace {
 
 int RowHeight(const Row& r) {
+    if (r.kind == Kind::Page) return 0;
     if (r.kind == Kind::Section) return theme::Scale(42);
     if (r.raw && !r.detail.empty()) return theme::Scale(50);
     return theme::Scale(46);
@@ -686,8 +738,8 @@ RECT RowList::ThumbRect() const {
     const int h = (std::max)(theme::Scale(28), trackH * view / content_);
     const int y = track_.top + (int)((float)(trackH - h) * (scroll_ / (float)max));
     const int cx = (track_.left + track_.right) / 2;
-    const int w = theme::Scale(2);
-    return { cx - w, y, cx + w, y + h };
+    const int w = theme::Scale(3);              // 3 DIP wide (PLAN-1.6 2.4)
+    return { cx - w / 2, y, cx - w / 2 + w, y + h };
 }
 
 void RowList::Paint(HDC dc, int offsetY) {
@@ -710,7 +762,7 @@ void RowList::Paint(HDC dc, int offsetY) {
     // Where rows run on past the edge of the view they fade out rather than
     // being cut, so it is plain there is more.
     const int fade = theme::Scale(26);
-    const COLORREF under = RGB(10, 11, 13);
+    const COLORREF under = theme::Bg;
     const int inset = (std::max)(2, theme::Scale(2));
     if (scroll_ > 0.5f) {
         RECT top = { bounds_.left + inset, bounds_.top, bounds_.right - inset, bounds_.top + fade };
@@ -721,15 +773,15 @@ void RowList::Paint(HDC dc, int offsetY) {
         theme::FadeV(dc, bottom, under, 0, 255);
     }
 
-    // The scrollbar: a hairline, and a brighter bar for where the view is.
+    // The scrollbar: a 3 DIP track in Line, and a thumb in TextMute for where
+    // the view is. Only drawn when the list overflows.
     if (MaxScroll() > 0) {
+        const int w = theme::Scale(3);
         const int cx = (track_.left + track_.right) / 2;
-        RECT line = { cx - (std::max)(1, theme::Scale(1)) / 2, track_.top,
-                      cx - (std::max)(1, theme::Scale(1)) / 2 + (std::max)(1, theme::Scale(1)),
-                      track_.bottom };
+        RECT line = { cx - w / 2, track_.top, cx - w / 2 + w, track_.bottom };
         theme::Wash(dc, line, theme::Line, 255);
         const RECT th = ThumbRect();
-        theme::Wash(dc, th, drag_ == Drag::Thumb ? theme::Text : theme::TextDim, 255);
+        theme::Wash(dc, th, drag_ == Drag::Thumb ? theme::TextDim : theme::TextMute, 255);
     }
 }
 
@@ -738,10 +790,10 @@ void RowList::PaintRow(HDC dc, int i, const RECT& r, float lit) {
     const int padL = PadLeft();
     const int inset = (std::max)(2, theme::Scale(2));
 
+    if (row.kind == Kind::Page) return;          // shown in the sub-tab row, not here
     if (row.kind == Kind::Section) {
-        RECT tr = { r.left + padL, r.top, r.right - PadRight(), r.bottom - theme::Scale(9) };
-        theme::Print(dc, Font::Section, theme::Caps(row.label), tr, theme::TextDim,
-                     DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS, theme::Scale(2));
+        RECT pr = { r.left + padL, r.top, r.right - PadRight(), r.bottom };
+        theme::SectionPlate(dc, pr, row.label);
         return;
     }
 
@@ -767,11 +819,11 @@ void RowList::PaintRow(HDC dc, int i, const RECT& r, float lit) {
 
     const RECT c = ControlRect(i);
     const int cy = (r.top + r.bottom) / 2;
-    const COLORREF labelInk = enabled ? theme::Mix(theme::Text, theme::Amber, lit) : theme::TextMute;
+    const COLORREF labelInk = enabled ? theme::Mix(theme::Text, theme::TextHi, lit) : theme::TextMute;
 
     // A grip for rows that can be dragged into a new order.
     if (row.orderGroup) {
-        const COLORREF g = enabled ? theme::Mix(theme::TextMute, theme::Amber, lit) : RGB(56, 60, 66);
+        const COLORREF g = enabled ? theme::Mix(theme::TextMute, theme::TextHi, lit) : theme::Line;
         for (int k = -1; k <= 1; ++k) {
             RECT bar = { r.left + theme::Scale(9), cy + k * theme::Scale(4),
                          r.left + theme::Scale(17), cy + k * theme::Scale(4) + (std::max)(1, theme::Scale(1)) };
@@ -786,55 +838,53 @@ void RowList::PaintRow(HDC dc, int i, const RECT& r, float lit) {
     int labelEnd = lr.left;
     if (row.raw) {
         if (row.detail.empty()) {
-            theme::Print(dc, Font::BodyBold, row.label, lr, labelInk,
+            theme::Print(dc, Font::Row, row.label, lr, labelInk,
                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         } else {
             RECT top = { lr.left, r.top + theme::Scale(6), lr.right, cy + theme::Scale(1) };
-            theme::Print(dc, Font::BodyBold, row.label, top, labelInk,
+            theme::Print(dc, Font::Row, row.label, top, labelInk,
                          DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS);
             RECT sub = { lr.left, cy + theme::Scale(2), lr.right, r.bottom - theme::Scale(4) };
             theme::Print(dc, Font::Small, row.detail, sub,
-                         enabled ? theme::Mix(theme::TextDim, theme::AmberDeep, lit) : theme::TextMute,
+                         enabled ? theme::Mix(theme::TextDim, theme::Text, lit) : theme::TextMute,
                          DT_LEFT | DT_TOP | DT_SINGLELINE | DT_PATH_ELLIPSIS);
         }
         labelEnd = lr.left + (std::min)((int)(lr.right - lr.left),
-                                        theme::Measure(dc, Font::BodyBold, row.label));
+                                        theme::Measure(dc, Font::Row, row.label));
     } else {
-        const std::wstring caps = theme::Caps(row.label);
-        theme::Print(dc, Font::Label, caps, lr, labelInk,
+        theme::Print(dc, Font::Row, row.label, lr, labelInk,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         labelEnd = lr.left + (std::min)((int)(lr.right - lr.left),
-                                        theme::Measure(dc, Font::Label, caps));
+                                        theme::Measure(dc, Font::Row, row.label));
     }
 
     // A tag after the name, then the mark for a value that differs from what
     // is saved.
     int x = labelEnd + theme::Scale(10);
     if (row.tag) {
-        const std::wstring tag = theme::Caps(row.tag());
+        const std::wstring tag = row.tag();
         if (!tag.empty()) {
-            const int tw = theme::Measure(dc, Font::Caption, tag, theme::Scale(1));
+            const int tw = theme::Measure(dc, Font::Small, tag);
             RECT box = { x, cy - theme::Scale(9), x + tw + theme::Scale(12), cy + theme::Scale(9) };
             if (box.right < labelRight) {
                 const COLORREF tc = enabled ? row.tagColor : theme::TextMute;
                 theme::Wash(dc, box, tc, 28);
                 theme::Frame(dc, box, tc, 170, 1);
-                theme::Print(dc, Font::Caption, tag, box, tc,
-                             DT_CENTER | DT_VCENTER | DT_SINGLELINE, theme::Scale(1));
+                theme::Print(dc, Font::Small, tag, box, tc,
+                             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 x = box.right + theme::Scale(10);
             }
         }
     }
     if (row.modified && row.modified() && x + theme::Scale(8) < labelRight)
         theme::Diamond(dc, (float)x + theme::ScaleF(3.0f), (float)cy, theme::ScaleF(2.6f),
-                       theme::Amber);
+                       theme::TextHi);
 
     // ---- the control
     switch (row.kind) {
         case Kind::Toggle: {
-            const std::wstring a = row.options.size() > 0 ? row.options[0] : L"On";
-            const std::wstring b = row.options.size() > 1 ? row.options[1] : L"Off";
-            theme::DrawPair(dc, c, a, b, row.get ? row.get() : 0, look);
+            // get() is 0 for the first word (the "on" one), 1 for the second.
+            theme::DrawToggle(dc, c, (row.get ? row.get() : 0) == 0, look);
             break;
         }
         case Kind::Choice:
@@ -846,7 +896,7 @@ void RowList::PaintRow(HDC dc, int i, const RECT& r, float lit) {
             const COLORREF swatch = (row.kind == Kind::Colour && v >= 0 &&
                                      v < (int)row.colours.size()) ? row.colours[(size_t)v]
                                                                   : CLR_INVALID;
-            theme::DrawSelector(dc, c, text, look, wraps || v > 0, wraps || v < n - 1, swatch);
+            theme::DrawSelector(dc, c, text, look, wraps || v > 0, wraps || v < n - 1, swatch, n, v);
             break;
         }
         case Kind::Slider: {
@@ -860,36 +910,36 @@ void RowList::PaintRow(HDC dc, int i, const RECT& r, float lit) {
         case Kind::Keys: {
             const int packed = row.get ? row.get() : 0;
             const UINT vk = LOWORD(packed), mods = HIWORD(packed);
-            const COLORREF ink = enabled ? theme::Mix(theme::Text, theme::Amber, lit) : theme::TextMute;
+            const COLORREF ink = enabled ? theme::Mix(theme::Text, theme::TextHi, lit) : theme::TextMute;
             if (captureRow_ == i) {
                 // Waiting for a chord: the box breathes, and whatever
                 // modifiers are held so far are shown in it.
                 const float t = (float)(GetTickCount64() % 1200) / 1200.0f;
                 const float pulse = 0.5f + 0.5f * std::sin(t * 6.2831853f);
-                theme::Wash(dc, c, theme::AmberGlow, (BYTE)(28 + 30 * pulse));
-                theme::Frame(dc, c, theme::AmberHot, (BYTE)(150 + 105 * pulse), (std::max)(1, theme::Scale(1)));
+                theme::Wash(dc, c, theme::TextHi, (BYTE)(14 + 24 * pulse));
+                theme::Frame(dc, c, theme::TextHi, (BYTE)(150 + 105 * pulse), (std::max)(1, theme::Scale(1)));
                 if (captureHeld_) {
-                    const int w = theme::Chord(dc, 0, cy, captureHeld_, 0, theme::AmberHot, false, true, true);
-                    const int dots = theme::Measure(dc, Font::Value, L"+ ...");
+                    const int w = theme::Chord(dc, 0, cy, captureHeld_, 0, theme::TextHi, false, true, true);
+                    const int dots = theme::Measure(dc, Font::Row, L"+ ...");
                     int cx = c.left + ((c.right - c.left) - (w + theme::Scale(6) + dots)) / 2;
-                    theme::Chord(dc, cx, cy, captureHeld_, 0, theme::AmberHot, false, false, true);
+                    theme::Chord(dc, cx, cy, captureHeld_, 0, theme::TextHi, false, false, true);
                     RECT tr = { cx + w + theme::Scale(6), c.top, c.right, c.bottom };
-                    theme::Print(dc, Font::Value, L"+ ...", tr, theme::AmberHot,
+                    theme::Print(dc, Font::Row, L"+ ...", tr, theme::TextHi,
                                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                 } else {
-                    theme::Print(dc, Font::Value, captureNote_.empty() ? L"PRESS A SHORTCUT"
-                                                                       : theme::Caps(captureNote_),
-                                 c, theme::AmberHot, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    theme::Print(dc, Font::Row, captureNote_.empty() ? L"Press a shortcut"
+                                                                      : captureNote_,
+                                 c, theme::TextHi, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                 }
             } else if (!vk) {
-                theme::Print(dc, Font::Value, L"NOT SET", c, enabled ? theme::TextDim : theme::TextMute,
+                theme::Print(dc, Font::Row, L"Not set", c, enabled ? theme::TextDim : theme::TextMute,
                              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             } else {
-                const int w = theme::Chord(dc, 0, cy, mods, vk, ink, false, true, true);
-                const int from = (std::max)((int)c.left, (int)c.left + (int)((c.right - c.left) - w) / 2);
+                const int w = theme::Chord(dc, 0, cy, mods, vk, ink, false, true, false);
+                const int from = (std::max)((int)c.left, (int)c.right - w);
                 const int saved = SaveDC(dc);
                 IntersectClipRect(dc, c.left - theme::Scale(40), c.top - 2, c.right, c.bottom + 2);
-                theme::Chord(dc, (std::min)(from, (int)c.right - w), cy, mods, vk, ink, false, false, true);
+                theme::Chord(dc, (std::min)(from, (int)c.right - w), cy, mods, vk, ink, false, false, false);
                 RestoreDC(dc, saved);
             }
             break;
@@ -904,12 +954,12 @@ void RowList::PaintRow(HDC dc, int i, const RECT& r, float lit) {
             const std::wstring v = row.value ? row.value() : L"";
             if (!v.empty()) {
                 RECT vr = { labelEnd + theme::Scale(24), r.top, r.right - PadRight(), r.bottom };
-                const COLORREF ink = enabled ? theme::Mix(theme::TextDim, theme::AmberHot, lit) : theme::TextMute;
+                const COLORREF ink = enabled ? theme::Mix(theme::TextDim, theme::TextHi, lit) : theme::TextMute;
                 if (row.rawValue)
                     theme::Print(dc, Font::Body, v, vr, ink,
                                  DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
                 else
-                    theme::Print(dc, Font::Value, theme::Caps(v), vr, ink,
+                    theme::Print(dc, Font::Row, v, vr, ink,
                                  DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             }
             break;

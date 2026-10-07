@@ -12,6 +12,7 @@
 #include "launcher.h"
 #include "dragguide.h"
 #include "search.h"
+#include "appicon.h"
 #include "theme.h"
 #include "ipc.h"
 #include "resource.h"
@@ -539,6 +540,16 @@ void AppUpdateTray()     { TrayUpdate(); }
 bool AppAutostartEnabled()    { return AutostartEnabled(); }
 void AppSetAutostart(bool on) { SetAutostart(on); }
 int  AppHotkeyConflicts()     { return HotkeysBlockedCount(); }
+int  AppManagedWindows()      { return g_wm.ManagedCount(); }
+int  AppIndexEntries()        { return SearchIndexCount(); }
+int  AppIconCacheCount()      { return AppIconCount(); }
+int  AppSamplerCostTenths()   { return MonitorSampleCostTenths(); }
+int  AppMemoryMB() {
+    PROCESS_MEMORY_COUNTERS_EX pmc = {};
+    pmc.cb = sizeof pmc;
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof pmc)) return 0;
+    return (int)(pmc.PrivateUsage / (1024 * 1024));
+}
 
 void AppOpenConfigFile() {
     ShellExecuteW(nullptr, L"open", L"notepad.exe", ConfigPath().c_str(),
@@ -635,9 +646,6 @@ static void TrimMemory() {
     // DLLs this call is here for were loaded from single-threaded apartments
     // and still go at once; the WMI ones follow on a later trim.
     CoFreeUnusedLibrariesEx(INFINITE, 0);
-    // The backdrop pictures behind the settings window and the search bar:
-    // a few megabytes at high DPI, and rebuilt in milliseconds when next shown.
-    theme::TrimSurfaces();
     HeapCompact(GetProcessHeap(), 0);
     SetProcessWorkingSetSizeEx(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1, 0);
     AWA_LOG(L"memory trimmed");

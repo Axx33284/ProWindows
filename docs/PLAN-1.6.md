@@ -194,15 +194,15 @@ Launchers*; Monitor → *Display · Readouts · Colours*; Clock → *Display · 
 
 - [ ] **2.T0 (O)** Settle the open decisions: keys (2.8), pages split (2.6), Fold kind yes/no,
   whether the window title reads `SETTINGS` or `OPTIONS`. Write them under *Decisions* below.
-- [ ] **2.T1 (S)** Palette and fonts in `theme.h/.cpp` (2.2, 2.3). Old tokens aliased until 2.T6.
-- [ ] **2.T2 (S)** Painters: Choice-with-segments, Toggle-as-Choice, ruler Slider, open-in icon,
+- [x] **2.T1 (S)** Palette and fonts in `theme.h/.cpp` (2.2, 2.3). Old tokens aliased until 2.T6.
+- [x] **2.T2 (S)** Painters: Choice-with-segments, Toggle-as-Choice, ruler Slider, open-in icon,
   section plate, metal `RowFocus`, keycap (2.5). Each painter answers `WM_PRINTCLIENT` paths as now.
-- [ ] **2.T3 (S)** `settings.cpp` layout: title, tab bar with keycaps and active-tab light,
+- [x] **2.T3 (S)** `settings.cpp` layout: title, tab bar with keycaps and active-tab light,
   sub-tab row, two columns, thin scrollbar, prompts in place of footer buttons (2.4, 2.8).
-- [ ] **2.T4 (S)** `Kind::Page` and the page split; keys per the decision (2.6, 2.8).
-- [ ] **2.T5 (S)** Right column: description, (Default: …), preview or mark, meters + `app.h`
+- [x] **2.T4 (S)** `Kind::Page` and the page split; keys per the decision (2.6, 2.8).
+- [x] **2.T5 (S)** Right column: description, (Default: …), preview or mark, meters + `app.h`
   getters + harness stubs (2.7).
-- [ ] **2.T6 (S)** Modal screens and search bar in the new look; delete dead amber code and the
+- [x] **2.T6 (S)** Modal screens and search bar in the new look; delete dead amber code and the
   backdrop renderer (2.9, 3.1).
 - [ ] **2.T7 (H)** Icon: change `gen_icon.py` colours as specified, regenerate `app.ico`,
   update `theme::Mark` colours.
@@ -211,7 +211,7 @@ Launchers*; Monitor → *Display · Readouts · Colours*; Clock → *Display · 
   add captures for a page switch and the meters. Then `tests\clickprobe.bat` (warn the user: it
   moves the mouse) — the X, minimise and the clickable prompts must work.
 - [ ] **2.T9 (S, optional)** `requiem` skin for the monitor and the clock.
-- [ ] **2.T10 (O)** Look at `ui-*.png` beside `docs/design/ref/*.webp` and list what still
+- [x] **2.T10 (O)** Look at `ui-*.png` beside `docs/design/ref/*.webp` and list what still
   reads wrong (≤ 10 items, each with the fix). S applies them.
 
 ### Decisions

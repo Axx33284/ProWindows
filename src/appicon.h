@@ -47,6 +47,9 @@ HBITMAP AppIconFor(const std::wstring& target, int pixels);
 // in memory all day for a window nobody is looking at.
 void AppIconRelease();
 
+// How many icons the table holds (for the settings window's meter).
+int AppIconCount();
+
 // Fetch these in the background, at `pixels` square, so that by the time
 // anybody searches for one it is already there. Requests made through
 // `AppIconFor` always overtake these, however long the list is.

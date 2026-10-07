@@ -46,6 +46,7 @@ void BuildMonitorPage(std::vector<Row>& rows) {
     const Config& s = Saved();
     MonitorNormaliseOrder(e.monOrder);
 
+    rows.push_back(ui::Page(L"Display"));
     rows.push_back(ui::Section(L"Overlay"));
     rows.push_back(ui::Toggle(L"enabled", L"System monitor",
         L"A small panel with live readings - processor, memory, graphics, temperatures, "
@@ -136,6 +137,7 @@ void BuildMonitorPage(std::vector<Row>& rows) {
         &e.monitorInterval, &s.monitorInterval, { 500, 1000, 2000, 3000 },
         { L"0.5 seconds", L"1 second", L"2 seconds", L"3 seconds" }));
 
+    rows.push_back(ui::Page(L"Readouts"));
     rows.push_back(ui::Section(L"Readouts, in order"));
     for (int slot = 0; slot < MON_METRIC_COUNT; ++slot) {
         const int metric = e.monOrder[slot];
@@ -161,6 +163,7 @@ void BuildMonitorPage(std::vector<Row>& rows) {
         rows.push_back(r);
     }
 
+    rows.push_back(ui::Page(L"Colours"));
     rows.push_back(ui::Section(L"Colours"));
     const MonitorSkin& skin = MonitorSkinAt(e.monitorTheme);
     for (int slot = 0; slot < MON_METRIC_COUNT; ++slot) {

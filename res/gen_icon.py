@@ -2,12 +2,11 @@
 
 Draws the app mark - a tiled window arrangement (one master pane on the left,
 two stacked panes on the right) - on a plate cut the way the settings window
-cuts its buttons: a near-black square with its top-right corner taken off at
-45 degrees and a light hairline round the edge. The master pane is the amber
-the settings window keeps for whatever has focus; the other two are white and
-grey, after the options screens of Star Wars Battlefront II. Rendered at
-several sizes and packed into a PNG-compressed .ico. Uses only the standard
-library.
+cuts its buttons: pure black with its top-right corner taken off at 45 degrees
+and a light hairline round the edge. The master pane is brushed silver / metal;
+the other two are white and grey, after the options screens of Resident Evil
+Requiem. Rendered at several sizes and packed into a PNG-compressed .ico. Uses
+only the standard library.
 
     python res/gen_icon.py
 """
@@ -20,12 +19,12 @@ import zlib
 SIZES = [16, 20, 24, 32, 48, 64, 128, 256]
 SS = 4  # supersampling factor for smooth edges
 
-# theme.h: Raised, Edge, Amber, Text, and a grey between them.
-PLATE     = (0x15, 0x17, 0x1B)
-EDGE      = (0x9A, 0xA0, 0xA8)
-PANE_MAIN = (0xFF, 0xB0, 0x00)   # the master pane: the focus amber
-PANE_ALT  = (0xEC, 0xEE, 0xF0)   # top right: white
-PANE_DIM  = (0x74, 0x7A, 0x84)   # bottom right: grey
+# theme.h: Bg, MetalEdge, Text, and a grey between them.
+PLATE     = (0x00, 0x00, 0x00)  # the screen: pure black
+EDGE      = (0x96, 0x96, 0x96)  # MetalEdge, light hairline
+PANE_MAIN = (0x96, 0x96, 0x96)  # the master pane: brushed silver (MetalEdge)
+PANE_ALT  = (0xE8, 0xE8, 0xE8)  # top right: white
+PANE_DIM  = (0x82, 0x82, 0x82)  # bottom right: grey
 
 LO, HI = 1.0, 31.0               # the plate, on a 32-unit grid
 CUT = 8.0                        # the top-right corner taken off

@@ -186,6 +186,7 @@ int ShortcutIssues() {
 void BuildShortcutsPage(std::vector<Row>& rows) {
     Config& e = Edit();
 
+    rows.push_back(ui::Page(L"Windows"));
     rows.push_back(ui::Section(L"Modifier"));
     {
         Row r;
@@ -215,6 +216,11 @@ void BuildShortcutsPage(std::vector<Row>& rows) {
             c.modMask = newMod;
         };
         r.modified = []() { return Edit().modMask != Saved().modMask; };
+        r.fallback = []() -> std::wstring {
+            Config d; d.LoadDefaults();
+            for (int i = 0; i < 6; ++i) if (kModChoices[i].mask == d.modMask) return kModChoices[i].label;
+            return L"";
+        };
         rows.push_back(r);
     }
     rows.push_back(TakeoverRow());
@@ -245,11 +251,14 @@ void BuildShortcutsPage(std::vector<Row>& rows) {
     for (const auto& kb : e.binds)
         if (!IsLaunch(kb) && !known(kb.action, kb.arg)) catalogue.push_back({ kb.action, kb.arg });
 
-    for (int group = 0; group < (int)ARRAYSIZE(kGroups); ++group) {
+    // Sections in page order: Windows before Workspaces (PLAN-1.6 2.6).
+    static const int kGroupOrder[] = { 0, 1, 2, 5, 3, 4, 6 };
+    static_assert(ARRAYSIZE(kGroupOrder) == ARRAYSIZE(kGroups), "every group needs a place");
+    for (int group : kGroupOrder) {
         bool headed = false;
         for (const Slot& slot : catalogue) {
             if (GroupOf(slot.a) != group) continue;
-            if (!headed) { rows.push_back(ui::Section(kGroups[group])); headed = true; }
+            if (!headed) { if (group == 3) rows.push_back(ui::Page(L"Workspaces")); if (group == 6) rows.push_back(ui::Page(L"ProWindows")); rows.push_back(ui::Section(kGroups[group])); headed = true; }
 
             int count = 0;
             for (const auto& kb : e.binds)

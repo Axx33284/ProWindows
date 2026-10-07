@@ -47,6 +47,7 @@ void BuildSearchPage(std::vector<Row>& rows) {
     const Config& s = Saved();
     const auto files = []() { return Edit().searchFiles; };
 
+    rows.push_back(ui::Page(L"Sources"));
     rows.push_back(ui::Section(L"What to search"));
     rows.push_back(ui::Toggle(L"files", L"Files and folders",
         L"Finds files and folders by name, from an index of the folders listed below. "
@@ -86,6 +87,7 @@ void BuildSearchPage(std::vector<Row>& rows) {
         rows.push_back(h);
     }
 
+    rows.push_back(ui::Page(L"Index"));
     rows.push_back(ui::Section(L"File index"));
     {
         std::vector<int> depths(std::begin(kDepths), std::end(kDepths));

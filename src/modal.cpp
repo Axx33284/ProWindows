@@ -26,10 +26,17 @@ struct Modal {
     std::wstring title, body, yes, no, prompt, verb;
     bool danger = false;
 
+    // The answers of a Confirm or Notice, as rows (none for a Pick).
     int  buttonCount = 1;
     RECT buttons[2] = {};
     int  focusButton = 0;
-    int  hotButton = -1, pressedButton = -1;
+    int  pressedButton = -1;
+
+    // The footer prompts: where each is, the key it stands for.
+    std::vector<std::pair<RECT, UINT>> promptHits;
+    int  hotPrompt = -1, pressedPrompt = -1;
+    POINT mouseAnchor = {};
+    bool  mouseIdle = true;       // the pointer has not really moved since the screen appeared
 
     // Pick.
     const std::vector<PickEntry>* entries = nullptr;
@@ -51,6 +58,8 @@ int g_open = 0;
 Modal* Of(HWND wnd) { return reinterpret_cast<Modal*>(GetWindowLongPtrW(wnd, GWLP_USERDATA)); }
 
 int Pad() { return theme::Scale(28); }
+int RowH() { return theme::Scale(46); }
+int FooterH() { return theme::Scale(52); }
 
 void Finish(Modal* m, bool ok) {
     m->accepted = ok;
@@ -109,9 +118,9 @@ SIZE Measure(Modal* m) {
         h = theme::Scale(620);
     } else {
         RECT body = { 0, 0, w - 2 * Pad(), 2000 };
-        const int bh = theme::PrintWrapped(dc, Font::Body, m->body, body, 0, true);
-        h = Pad() + theme::Scale(34) + theme::Scale(22) + bh + theme::Scale(34) +
-            theme::Scale(40) + Pad();
+        const int bh = theme::PrintWrapped(dc, Font::Desc, m->body, body, 0, true);
+        h = Pad() + theme::Scale(34) + theme::Scale(22) + bh + theme::Scale(22) +
+            m->buttonCount * RowH() + theme::Scale(12) + FooterH();
     }
     ReleaseDC(nullptr, dc);
     return { w, h };
@@ -121,23 +130,18 @@ void Layout(Modal* m) {
     RECT c;
     GetClientRect(m->wnd, &c);
     const int pad = Pad();
-    const int bh = theme::Scale(40);
-    HDC dc = GetDC(m->wnd);
-    int x = pad;
-    const int y = c.bottom - pad - bh;
-    const std::wstring labels[2] = { m->yes, m->no };
+    const int footerTop = c.bottom - FooterH();
+    const int rowsBottom = footerTop - theme::Scale(12);
     for (int i = 0; i < m->buttonCount; ++i) {
-        const int w = (std::max)(theme::Scale(130), theme::ButtonWidth(dc, labels[i], nullptr));
-        m->buttons[i] = { x, y, x + w, y + bh };
-        x += w + theme::Scale(12);
+        const int top = rowsBottom - (m->buttonCount - i) * RowH();
+        m->buttons[i] = { pad, top, c.right - pad, top + RowH() };
     }
-    ReleaseDC(m->wnd, dc);
 
     if (m->type == Type::Pick) {
         const int top = pad + theme::Scale(34) + theme::Scale(18);
         m->field = { pad, top + theme::Scale(22), c.right - pad, top + theme::Scale(22) + theme::Scale(40) };
         RECT rows = { pad, m->field.bottom + theme::Scale(14), c.right - pad - theme::Scale(14),
-                      y - theme::Scale(20) };
+                      rowsBottom };
         RECT track = { rows.right + theme::Scale(4), rows.top, rows.right + theme::Scale(14), rows.bottom };
         m->list.SetBounds(rows, track);
     }
@@ -145,29 +149,26 @@ void Layout(Modal* m) {
 
 // ---------------------------------------------------------------- painting
 void PaintInto(Modal* m, HDC dc, const RECT& c) {
-    theme::PaintBackdrop(dc, c, { c.right, c.bottom });
-    theme::Frame(dc, c, theme::Edge, 120, 1);
+    theme::Wash(dc, c, theme::Bg, 255);
+    theme::Frame(dc, c, theme::Line, 255, (std::max)(1, theme::Scale(1)));
     const int pad = Pad();
 
-    // The heading: a short amber rail and the title in capitals, a hairline
-    // under both.
-    RECT rail = { pad, pad + theme::Scale(6), pad + theme::Scale(3), pad + theme::Scale(28) };
-    theme::Wash(dc, rail, m->danger ? theme::Danger : theme::Amber, 255);
-    RECT tr = { pad + theme::Scale(14), pad, c.right - pad, pad + theme::Scale(34) };
-    theme::Print(dc, Font::Title, theme::Caps(m->title), tr, theme::Text,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, theme::Scale(1));
+    // The heading: the title in Bahnschrift, a hairline under it.
+    RECT tr = { pad, pad, c.right - pad, pad + theme::Scale(34) };
+    theme::Print(dc, Font::Heading, m->title, tr, m->danger ? theme::Danger : theme::TextHi,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     RECT rule = { pad, pad + theme::Scale(44), c.right - pad, pad + theme::Scale(45) };
     theme::Wash(dc, rule, theme::Line, 255);
 
     if (m->type == Type::Pick) {
         RECT pr = { pad, rule.bottom + theme::Scale(12), c.right - pad, m->field.top - theme::Scale(4) };
-        theme::Print(dc, Font::Caption, theme::Caps(m->prompt), pr, theme::TextDim,
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, theme::Scale(1));
+        theme::Print(dc, Font::Plate, m->prompt, pr, theme::TextDim,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
         // The filter: a field with a magnifier, what has been typed, a caret.
         const RECT& f = m->field;
-        theme::Wash(dc, f, RGB(0, 0, 0), 120);
-        theme::Frame(dc, f, theme::Amber, 200, (std::max)(1, theme::Scale(1)));
+        theme::Wash(dc, f, theme::Bg, 255);
+        theme::Frame(dc, f, theme::Rule, 255, (std::max)(1, theme::Scale(1)));
         const float cx = (float)f.left + theme::ScaleF(20.0f), cy = (float)(f.top + f.bottom) / 2.0f;
         {
             HPEN pen = CreatePen(PS_SOLID, (std::max)(1, theme::Scale(2)), theme::TextDim);
@@ -183,64 +184,77 @@ void PaintInto(Modal* m, HDC dc, const RECT& c) {
         }
         RECT text = { f.left + theme::Scale(40), f.top, f.right - theme::Scale(12), f.bottom };
         if (m->filter.empty()) {
-            theme::Print(dc, Font::Caption, L"TYPE TO SEARCH", text, theme::TextMute,
-                         DT_LEFT | DT_VCENTER | DT_SINGLELINE, theme::Scale(2));
+            theme::Print(dc, Font::Row, L"Type to search", text, theme::TextMute,
+                         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         } else {
-            theme::Print(dc, Font::Body, m->filter, text, theme::Text,
+            theme::Print(dc, Font::Row, m->filter, text, theme::TextHi,
                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
         if (m->caretOn) {
-            const int tw = m->filter.empty() ? 0 : theme::Measure(dc, Font::Body, m->filter);
+            const int tw = m->filter.empty() ? 0 : theme::Measure(dc, Font::Row, m->filter);
             const int x = (std::min)((int)text.right, (int)text.left + tw + theme::Scale(1));
             RECT caret = { x, (int)cy - theme::Scale(9), x + (std::max)(1, theme::Scale(2)),
                            (int)cy + theme::Scale(9) };
-            theme::Wash(dc, caret, theme::Amber, 255);
+            theme::Wash(dc, caret, theme::TextHi, 255);
         }
         m->list.Paint(dc);
     } else {
-        RECT body = { pad, rule.bottom + theme::Scale(20), c.right - pad, m->buttons[0].top - theme::Scale(20) };
-        theme::PrintWrapped(dc, Font::Body, m->body, body, RGB(206, 210, 216));
-    }
+        RECT body = { pad, rule.bottom + theme::Scale(20), c.right - pad, m->buttons[0].top - theme::Scale(12) };
+        theme::PrintWrapped(dc, Font::Desc, m->body, body, theme::TextBody);
 
-    // Buttons, and the prompts that say which keys press them.
-    const std::wstring labels[2] = { m->yes, m->no };
-    for (int i = 0; i < m->buttonCount; ++i) {
-        theme::ButtonLook look;
-        look.hot     = (m->hotButton == i);
-        look.pressed = (m->pressedButton == i && m->hotButton == i);
-        look.primary = (i == 0) && !m->danger;
-        look.focused = (m->type != Type::Pick) && (m->focusButton == i);
-        if (i == 0 && m->danger && !look.hot && !look.pressed) {
-            // A destructive answer is red until it is pointed at.
+        // The answers, as rows; the focused one is on the metal bar.
+        const std::wstring labels[2] = { m->yes, m->no };
+        for (int i = 0; i < m->buttonCount; ++i) {
             const RECT& b = m->buttons[i];
-            theme::CutBox(dc, b, (b.bottom - b.top) * 2 / 5, theme::Danger, 22, theme::Danger,
-                          look.focused ? 255 : 200, (float)(std::max)(2, theme::Scale(2)));
-            if (look.focused) theme::Glow(dc, b, theme::Danger, theme::Scale(10), 70);
-            theme::Print(dc, Font::Button, theme::Caps(labels[i]), b, RGB(255, 132, 116),
-                         DT_CENTER | DT_VCENTER | DT_SINGLELINE, theme::Scale(1));
-            continue;
+            const bool focus = (m->focusButton == i);
+            RECT under = { b.left + 2, b.bottom - 1, b.right - 2, b.bottom };
+            theme::Wash(dc, under, theme::Line, 255);
+            if (i == 0) {
+                RECT over = { b.left + 2, b.top, b.right - 2, b.top + 1 };
+                theme::Wash(dc, over, theme::Line, 255);
+            }
+            theme::RowFocus(dc, b, focus ? 1.0f : 0.0f);
+            COLORREF ink = focus ? theme::TextHi : theme::Text;
+            if (i == 0 && m->danger) ink = theme::Danger;       // a destructive answer is red
+            if (m->pressedButton == i && focus) ink = theme::TextDim;
+            RECT lr = { b.left + theme::Scale(16), b.top, b.right - theme::Scale(16), b.bottom };
+            theme::Print(dc, Font::Row, labels[i], lr, ink,
+                         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
-        theme::DrawButton(dc, m->buttons[i], labels[i], nullptr, look);
     }
 
-    std::vector<std::pair<std::wstring, std::wstring>> prompts;
+    // The prompts along the bottom, centred, as in the settings window. Each
+    // can be pressed or clicked.
+    struct PromptText { std::wstring key, word; UINT vk; };
+    std::vector<PromptText> prompts;
     if (m->type == Type::Pick) {
-        prompts = { { L"\x2191 \x2193", L"Choose" }, { L"Enter", m->verb }, { L"Esc", m->filter.empty() ? L"Cancel" : L"Clear" } };
+        prompts = { { L"\x2191 \x2193", L"Choose", VK_DOWN }, { L"Enter", m->verb, VK_RETURN },
+                    { L"Esc", m->filter.empty() ? L"Cancel" : L"Clear", VK_ESCAPE } };
     } else if (m->type == Type::Confirm) {
-        prompts = { { L"Enter", L"Select" }, { L"Esc", L"Cancel" } };
+        prompts = { { L"\x2191 \x2193", L"Choose", VK_DOWN }, { L"Enter", L"Select", VK_RETURN },
+                    { L"Esc", L"Cancel", VK_ESCAPE } };
     } else {
-        prompts = { { L"Enter", L"OK" } };
+        prompts = { { L"Enter", L"OK", VK_RETURN } };
     }
-    const int cy = (m->buttons[0].top + m->buttons[0].bottom) / 2;
-    const int lastButton = (std::max)(0, (std::min)(1, m->buttonCount - 1));
-    int x = c.right - pad;
-    for (int i = (int)prompts.size() - 1; i >= 0; --i) {
-        const int w = theme::Prompt(dc, 0, cy, prompts[(size_t)i].first, prompts[(size_t)i].second,
-                                    theme::TextDim, true);
-        x -= w;
-        if (x < m->buttons[lastButton].right + theme::Scale(16)) break;
-        theme::Prompt(dc, x, cy, prompts[(size_t)i].first, prompts[(size_t)i].second, theme::TextDim);
-        x -= theme::Scale(18);
+    const int footerTop = c.bottom - FooterH();
+    RECT fline = { pad, footerTop, c.right - pad, footerTop + 1 };
+    theme::Wash(dc, fline, theme::Line, 255);
+    const int cy = footerTop + FooterH() / 2;
+    const int gap = theme::Scale(28);
+    std::vector<int> widths;
+    int total = 0;
+    for (const auto& p : prompts) {
+        widths.push_back(theme::Prompt(dc, 0, cy, p.key, p.word, theme::TextDim, true));
+        total += widths.back() + (total ? gap : 0);
+    }
+    m->promptHits.clear();
+    int x = (std::max)(theme::Scale(20), (int)(c.right - total) / 2);
+    for (size_t i = 0; i < prompts.size(); ++i) {
+        const bool hot = (m->hotPrompt == (int)i);
+        theme::Prompt(dc, x, cy, prompts[i].key, prompts[i].word, hot ? theme::TextHi : theme::TextDim);
+        m->promptHits.push_back({ RECT{ x, cy - theme::Scale(14), x + widths[i], cy + theme::Scale(14) },
+                                  prompts[i].vk });
+        x += widths[i] + gap;
     }
 }
 
@@ -271,8 +285,14 @@ int ButtonAt(Modal* m, POINT pt) {
     return -1;
 }
 
+int PromptAt(Modal* m, POINT pt) {
+    for (size_t i = 0; i < m->promptHits.size(); ++i)
+        if (PtInRect(&m->promptHits[i].first, pt)) return (int)i;
+    return -1;
+}
+
 void Press(Modal* m, int button) {
-    if (m->type == Type::Pick && button == 0) {
+    if (m->type == Type::Pick) {
         const Row* row = m->list.FocusedRow();
         if (row && row->activate) { auto fn = row->activate; fn(); }
         return;
@@ -291,6 +311,47 @@ void Paste(Modal* m) {
     }
     CloseClipboard();
     Refilter(m);
+}
+
+// A key, from the keyboard or from a click on the prompt that shows it.
+bool OnKey(Modal* m, UINT vk) {
+    const bool ctrl = GetKeyState(VK_CONTROL) < 0;
+    const bool shift = GetKeyState(VK_SHIFT) < 0;
+    if (vk == VK_ESCAPE) {
+        if (m->type == Type::Pick && !m->filter.empty()) { m->filter.clear(); Refilter(m); }
+        else if (m->type == Type::Notice) Finish(m, true);
+        else Answer(m, -1);
+        return true;
+    }
+    if (m->type == Type::Pick) {
+        if (vk == VK_BACK) {
+            if (ctrl) {
+                while (!m->filter.empty() && m->filter.back() == L' ') m->filter.pop_back();
+                while (!m->filter.empty() && m->filter.back() != L' ') m->filter.pop_back();
+            } else if (!m->filter.empty()) {
+                m->filter.pop_back();
+            }
+            Refilter(m);
+            return true;
+        }
+        if (ctrl && vk == 'V') { Paste(m); return true; }
+        if (vk == VK_RETURN) { Press(m, 0); return true; }
+        if (vk == VK_UP || vk == VK_DOWN || vk == VK_PRIOR || vk == VK_NEXT) {
+            m->list.Key(vk, false, shift);
+            Kick(m);
+            return true;
+        }
+        return true;
+    }
+    if (m->buttonCount > 1 &&
+        (vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT || vk == VK_TAB)) {
+        const bool back = (vk == VK_UP || vk == VK_LEFT);
+        m->focusButton = (m->focusButton + (back ? m->buttonCount - 1 : 1)) % m->buttonCount;
+        InvalidateRect(m->wnd, nullptr, FALSE);
+        return true;
+    }
+    if (vk == VK_RETURN || vk == VK_SPACE) { Press(m, m->focusButton); return true; }
+    return true;
 }
 
 LRESULT CALLBACK ModalProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -340,52 +401,26 @@ LRESULT CALLBACK ModalProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
 
         case WM_KEYDOWN:
-        case WM_SYSKEYDOWN: {
+        case WM_SYSKEYDOWN:
             if (!m) break;
-            const bool ctrl = GetKeyState(VK_CONTROL) < 0;
-            const bool shift = GetKeyState(VK_SHIFT) < 0;
-            if (wp == VK_ESCAPE) {
-                if (m->type == Type::Pick && !m->filter.empty()) { m->filter.clear(); Refilter(m); }
-                else if (m->type == Type::Notice) Finish(m, true);
-                else Answer(m, -1);
-                return 0;
-            }
-            if (m->type == Type::Pick) {
-                if (wp == VK_BACK) {
-                    if (ctrl) {
-                        while (!m->filter.empty() && m->filter.back() == L' ') m->filter.pop_back();
-                        while (!m->filter.empty() && m->filter.back() != L' ') m->filter.pop_back();
-                    } else if (!m->filter.empty()) {
-                        m->filter.pop_back();
-                    }
-                    Refilter(m);
-                    return 0;
-                }
-                if (ctrl && wp == 'V') { Paste(m); return 0; }
-                if (wp == VK_RETURN) { Press(m, 0); return 0; }
-                if (wp == VK_UP || wp == VK_DOWN || wp == VK_PRIOR || wp == VK_NEXT) {
-                    m->list.Key((UINT)wp, false, shift);
-                    Kick(m);
-                    return 0;
-                }
-                return 0;
-            }
-            if (wp == VK_LEFT || wp == VK_RIGHT || wp == VK_TAB) {
-                if (m->buttonCount > 1) {
-                    m->focusButton = (wp == VK_LEFT) ? 0 : (wp == VK_RIGHT ? 1 : 1 - m->focusButton);
-                    InvalidateRect(wnd, nullptr, FALSE);
-                }
-                return 0;
-            }
-            if (wp == VK_RETURN || wp == VK_SPACE) { Press(m, m->focusButton); return 0; }
+            OnKey(m, (UINT)wp);
             return 0;
-        }
 
         case WM_MOUSEMOVE: {
             if (!m) break;
+            if (m->mouseIdle) {
+                // A pointer left where it was, under a screen that has just
+                // appeared, is not a choice.
+                POINT now;
+                GetCursorPos(&now);
+                if (abs(now.x - m->mouseAnchor.x) < 3 && abs(now.y - m->mouseAnchor.y) < 3) return 0;
+                m->mouseIdle = false;
+            }
             const POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-            const int hot = ButtonAt(m, pt);
-            if (hot != m->hotButton) { m->hotButton = hot; InvalidateRect(wnd, nullptr, FALSE); }
+            const int row = ButtonAt(m, pt);
+            if (row >= 0 && row != m->focusButton) { m->focusButton = row; InvalidateRect(wnd, nullptr, FALSE); }
+            const int hot = PromptAt(m, pt);
+            if (hot != m->hotPrompt) { m->hotPrompt = hot; InvalidateRect(wnd, nullptr, FALSE); }
             if (m->type == Type::Pick) { m->list.MouseMove(pt, (wp & MK_LBUTTON) != 0); Kick(m); }
             TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, wnd, 0 };
             TrackMouseEvent(&t);
@@ -393,7 +428,7 @@ LRESULT CALLBACK ModalProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_MOUSELEAVE:
             if (m) {
-                m->hotButton = -1;
+                m->hotPrompt = -1;
                 if (m->type == Type::Pick) m->list.MouseLeave();
                 InvalidateRect(wnd, nullptr, FALSE);
             }
@@ -403,7 +438,9 @@ LRESULT CALLBACK ModalProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             const POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             SetCapture(wnd);
             m->pressedButton = ButtonAt(m, pt);
-            if (m->pressedButton < 0 && m->type == Type::Pick) m->list.MouseDown(pt);
+            m->pressedPrompt = PromptAt(m, pt);
+            if (m->pressedButton >= 0) m->focusButton = m->pressedButton;
+            if (m->pressedButton < 0 && m->pressedPrompt < 0 && m->type == Type::Pick) m->list.MouseDown(pt);
             InvalidateRect(wnd, nullptr, FALSE);
             Kick(m);
             return 0;
@@ -413,10 +450,17 @@ LRESULT CALLBACK ModalProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             const POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             ReleaseCapture();
             const int was = m->pressedButton;
+            const int wasPrompt = m->pressedPrompt;
             m->pressedButton = -1;
-            if (was >= 0 && ButtonAt(m, pt) == was) Press(m, was);
-            else if (m->type == Type::Pick) m->list.MouseUp(pt);
-            InvalidateRect(wnd, nullptr, FALSE);
+            m->pressedPrompt = -1;
+            if (wasPrompt >= 0) {
+                if (PromptAt(m, pt) == wasPrompt) OnKey(m, m->promptHits[(size_t)wasPrompt].second);
+            } else if (was >= 0) {
+                if (ButtonAt(m, pt) == was) Press(m, was);
+            } else if (m->type == Type::Pick) {
+                m->list.MouseUp(pt);
+            }
+            if (!m->done) InvalidateRect(wnd, nullptr, FALSE);
             return 0;
         }
         case WM_MOUSEWHEEL:
@@ -498,6 +542,7 @@ bool Run(Modal& m) {
         RedrawWindow(owner, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
     }
     m.shownAt = GetTickCount64();
+    GetCursorPos(&m.mouseAnchor);
     ShowWindow(m.wnd, SW_SHOW);
     SetForegroundWindow(m.wnd);
     SetFocus(m.wnd);
@@ -573,9 +618,7 @@ bool Pick(HWND owner, const std::wstring& title, const std::wstring& prompt,
     m.prompt = prompt;
     m.entries = &entries;
     m.verb = verb;
-    m.yes = verb;
-    m.no = L"Cancel";
-    m.buttonCount = 2;
+    m.buttonCount = 0;                 // the list is the answer; the prompts say how
     m.list.onInvalidate = [&m]() { if (m.wnd) { InvalidateRect(m.wnd, nullptr, FALSE); Kick(&m); } };
     if (!Run(m)) return false;
     if (chosen) *chosen = m.chosen;

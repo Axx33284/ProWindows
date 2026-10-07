@@ -86,17 +86,26 @@ Face Pick(std::initializer_list<Face> choices) {
     return { L"Segoe UI", FW_NORMAL };
 }
 
-const Face& Strong() {      // SemiBold SemiCondensed: labels, values, buttons
-    static const Face f = Pick({ { L"Bahnschrift SemiBold SemiConden", FW_NORMAL },
-                                 { L"Bahnschrift SemiBold",            FW_NORMAL },
-                                 { L"Bahnschrift",                     FW_SEMIBOLD },
-                                 { L"Segoe UI Semibold",               FW_NORMAL } });
-    return f;
-}
 const Face& Plain() {       // SemiCondensed: the chosen word, captions
     static const Face f = Pick({ { L"Bahnschrift SemiCondensed", FW_NORMAL },
                                  { L"Bahnschrift",               FW_NORMAL },
                                  { L"Segoe UI",                  FW_NORMAL } });
+    return f;
+}
+
+// The same family one weight lighter for the title and tab captions, where the
+// install has the named instance.
+const Face& Light() {
+    static const Face f = Pick({ { L"Bahnschrift SemiLight SemiCondensed", FW_NORMAL },
+                                 { L"Bahnschrift Light SemiCondensed",     FW_NORMAL },
+                                 Plain() });
+    return f;
+}
+
+// Segoe UI Variable Text where Windows 11 has it, plain Segoe UI otherwise.
+const wchar_t* ReadingFace() {
+    static const wchar_t* f = FaceExists(L"Segoe UI Variable Text") ? L"Segoe UI Variable Text"
+                                                                    : L"Segoe UI";
     return f;
 }
 
@@ -121,57 +130,24 @@ const FontSet& FontsFor(UINT dpi) {
     auto it = g_fontSets.find(dpi);
     if (it != g_fontSets.end()) return it->second;
 
-    const Face& s = Strong();
     const Face& p = Plain();
+    const Face& light = Light();
     FontSet set;
     auto put = [&](Font which, int size, int weight, const wchar_t* face) {
         set.f[(int)which] = MakeFont(size, weight, dpi, face);
     };
+    // 1 DIP = 0.75 pt; sizes are in tenths of a point.
+    put(Font::Heading,    195, light.weight, light.name);
+    put(Font::Tab,        128, light.weight, light.name);
+    put(Font::Row,        113, FW_NORMAL,   ReadingFace());
+    put(Font::Desc,       120, FW_NORMAL,   ReadingFace());
+    put(Font::Plate,      105, FW_NORMAL,   ReadingFace());
+    put(Font::Prompt,     120, FW_NORMAL,   ReadingFace());
+    put(Font::Keycap,     90,  p.weight,    p.name);
     put(Font::Body,       95,  FW_NORMAL,   L"Segoe UI");
-    put(Font::BodyBold,   95,  FW_SEMIBOLD, L"Segoe UI");
     put(Font::Small,      85,  FW_NORMAL,   L"Segoe UI");
-    put(Font::Label,      120, s.weight,    s.name);
-    put(Font::Value,      112, s.weight,    s.name);
-    put(Font::ValueLight, 112, p.weight,    p.name);
-    put(Font::Crumb,      200, p.weight,    p.name);
-    put(Font::CrumbBold,  200, s.weight,    s.name);
-    put(Font::Nav,        112, s.weight,    s.name);
-    put(Font::Section,    85,  s.weight,    s.name);
-    put(Font::Caption,    88,  p.weight,    p.name);
-    put(Font::Title,      150, s.weight,    s.name);
-    put(Font::Button,     105, s.weight,    s.name);
-    put(Font::Key,        80,  s.weight,    s.name);
     put(Font::Query,      150, FW_NORMAL,   L"Segoe UI Semilight");
     return g_fontSets.emplace(dpi, set).first->second;
-}
-
-// ---------------------------------------------------------------- backdrop
-struct Surface {
-    int       w = 0, h = 0;
-    HBITMAP   bmp = nullptr;
-    ULONGLONG used = 0;
-};
-std::vector<Surface> g_surfaces;
-constexpr size_t kMaxSurfaces = 3;
-
-inline uint32_t Hash(uint32_t x) {
-    x ^= x >> 16; x *= 0x7feb352dU;
-    x ^= x >> 15; x *= 0x846ca68bU;
-    x ^= x >> 16;
-    return x;
-}
-
-inline float Smooth(float e0, float e1, float x) {
-    float t = (x - e0) / (e1 - e0);
-    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
-    return t * t * (3.0f - 2.0f * t);
-}
-
-inline uint32_t Pack(float r, float g, float b) {
-    auto c = [](float v) -> uint32_t {
-        return (uint32_t)(v < 0.0f ? 0.0f : (v > 255.0f ? 255.0f : v + 0.5f));
-    };
-    return (c(r) << 16) | (c(g) << 8) | c(b);
 }
 
 HBITMAP MakeDib(int w, int h, uint32_t** bits) {
@@ -187,59 +163,6 @@ HBITMAP MakeDib(int w, int h, uint32_t** bits) {
     *bits = static_cast<uint32_t*>(p);
     if (bmp && !p) { DeleteObject(bmp); bmp = nullptr; }
     return bmp;
-}
-
-// The screen behind everything: black, with the faintest cold light from the
-// top left, a trace of warmth low on the right, and the corners pulled down.
-// A function of the pixel, so it is the same picture every time; the noise is
-// there because a gradient this dark shows each of its few steps as a band.
-void RenderBackdrop(uint32_t* px, int w, int h) {
-    const float W = (float)(std::max)(w, h);
-    for (int y = 0; y < h; ++y) {
-        const float fy = (float)y / (float)h;
-        for (int x = 0; x < w; ++x) {
-            const float fx = (float)x / (float)w;
-            float r = 7.0f, g = 8.0f, b = 10.0f;
-
-            const float nx = ((float)x - 0.10f * (float)w) / (0.95f * W);
-            const float ny = ((float)y + 0.05f * (float)h) / (0.70f * W);
-            const float cool = std::exp(-(nx * nx + ny * ny) * 2.6f);
-            r += 10.0f * cool; g += 12.0f * cool; b += 16.0f * cool;
-
-            const float wx = ((float)x - 0.98f * (float)w) / (0.55f * W);
-            const float wy = ((float)y - 1.02f * (float)h) / (0.40f * W);
-            const float warm = std::exp(-(wx * wx + wy * wy) * 2.2f);
-            r += 9.0f * warm; g += 5.0f * warm; b += 1.0f * warm;
-
-            const float vx = (fx - 0.5f) / 0.64f, vy = (fy - 0.45f) / 0.72f;
-            const float vig = 1.0f - 0.40f * Smooth(0.50f, 1.30f, std::sqrt(vx * vx + vy * vy));
-            const float n = (float)(Hash((uint32_t)x * 73856093U ^ (uint32_t)y * 19349663U) & 255)
-                            / 255.0f - 0.5f;
-            px[(size_t)y * (size_t)w + (size_t)x] = Pack(r * vig + n, g * vig + n, b * vig + n);
-        }
-    }
-}
-
-Surface* SurfaceFor(int w, int h) {
-    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return nullptr;
-    const ULONGLONG now = GetTickCount64();
-    for (Surface& s : g_surfaces)
-        if (s.w == w && s.h == h) { s.used = now; return &s; }
-
-    if (g_surfaces.size() >= kMaxSurfaces) {
-        auto oldest = std::min_element(g_surfaces.begin(), g_surfaces.end(),
-            [](const Surface& a, const Surface& b) { return a.used < b.used; });
-        if (oldest->bmp) DeleteObject(oldest->bmp);
-        g_surfaces.erase(oldest);
-    }
-    Surface s;
-    s.w = w; s.h = h; s.used = now;
-    uint32_t* bits = nullptr;
-    s.bmp = MakeDib(w, h, &bits);
-    if (!s.bmp) return nullptr;
-    RenderBackdrop(bits, w, h);
-    g_surfaces.push_back(s);
-    return &g_surfaces.back();
 }
 
 // A premultiplied 32-bit layer the size of `r`, filled by `alphaAt`, blended
@@ -316,7 +239,6 @@ void Init() {
 }
 
 void Shutdown() {
-    TrimSurfaces();
     for (auto& kv : g_fontSets)
         for (HFONT f : kv.second.f)
             if (f) DeleteObject(f);
@@ -405,31 +327,6 @@ int PrintWrapped(HDC dc, Font font, const std::wstring& text, RECT r, COLORREF c
     }
     SelectObject(dc, old);
     return calc.bottom - calc.top;
-}
-
-// ================================================================ the screen
-void PaintBackdrop(HDC dc, const RECT& r, SIZE canvas) {
-    Surface* s = SurfaceFor(canvas.cx, canvas.cy);
-    const int w = r.right - r.left, h = r.bottom - r.top;
-    if (!s) {
-        HBRUSH b = CreateSolidBrush(Bg);
-        FillRect(dc, &r, b);
-        DeleteObject(b);
-        return;
-    }
-    HDC mem = CreateCompatibleDC(dc);
-    if (!mem) return;
-    HGDIOBJ old = SelectObject(mem, s->bmp);
-    BitBlt(dc, r.left, r.top, (std::min)(w, s->w), (std::min)(h, s->h), mem, 0, 0, SRCCOPY);
-    SelectObject(mem, old);
-    DeleteDC(mem);
-}
-
-void TrimSurfaces() {
-    for (Surface& s : g_surfaces)
-        if (s.bmp) DeleteObject(s.bmp);
-    g_surfaces.clear();
-    g_surfaces.shrink_to_fit();
 }
 
 void DarkTitleBar(HWND wnd) {
@@ -679,155 +576,207 @@ void CutBox(HDC dc, const RECT& r, int cut, COLORREF fill, BYTE fillAlpha,
 // ================================================================ widgets
 void RowFocus(HDC dc, const RECT& row, float t) {
     if (t <= 0.01f) return;
-    // Warm light filling the row from the right, where the control is.
-    Sweep(dc, row, AmberGlow, (BYTE)(10.0f * t), (BYTE)(46.0f * t));
-    Glow(dc, row, AmberGlow, Sc(16), (BYTE)(118.0f * t));
-    Frame(dc, row, Mix(RGB(90, 60, 10), Amber, t), (BYTE)(255.0f * (std::min)(1.0f, t * 1.4f)),
-          (std::max)(2, Sc(2)));
+    if (t > 1.0f) t = 1.0f;
+    const int w = row.right - row.left, h = row.bottom - row.top;
+    if (w < 4 || h < 4) return;
+    auto a8 = [&](float v) { return (BYTE)(v * t + 0.5f); };
+
+    // Soft white bleed a few pixels outside the bar.
+    Glow(dc, row, RGB(255, 255, 255), Sc(4), a8(44.0f));
+
+    // The metal: four stops of vertical gradient, faded in from the screen.
+    const COLORREF stop[4] = { Mix(Bg, Metal0, t), Mix(Bg, Metal1, t),
+                               Mix(Bg, Metal2, t), Mix(Bg, Metal3, t) };
+    const float at[4] = { 0.0f, 0.18f, 0.60f, 1.0f };
+    for (int i = 0; i < 3; ++i) {
+        RECT band = { row.left, row.top + (int)(h * at[i] + 0.5f), row.right,
+                      i == 2 ? row.bottom : row.top + (int)(h * at[i + 1] + 0.5f) };
+        Gradient(dc, band, stop[i], stop[i + 1]);
+    }
+
+    // A sheen from the left, gone by 45 % of the width.
+    RECT sheen = { row.left, row.top, row.left + (int)(w * 0.45f), row.bottom };
+    Sweep(dc, sheen, RGB(255, 255, 255), a8(28.0f), 0);
+
+    // A faint highlight where the value sits (the middle of the right half).
+    const int hw = (int)(w * 0.36f);
+    const int hc = row.left + (int)(w * 0.78f);
+    RECT haze = { hc - hw / 2, row.top, hc + hw / 2, row.bottom };
+    Haze(dc, haze, RGB(255, 255, 255), a8(18.0f));
+
+    // The outline and the lit top edge just inside it.
+    Frame(dc, row, MetalEdge, a8(255.0f), 1);
+    RECT top = { row.left + 1, row.top + 1, row.right - 1, row.top + 2 };
+    Wash(dc, top, RGB(255, 255, 255), a8(130.0f));
+    RECT low = { row.left + 1, row.bottom - 2, row.right - 1, row.bottom - 1 };
+    Wash(dc, low, RGB(255, 255, 255), a8(70.0f));
 }
 
 namespace {
 
-// The colour of a word that is not on a bar.
-COLORREF LooseInk(const Look& look) {
+// What a control's ink does as the row gains focus: grey to white.
+COLORREF Ink(const Look& look, COLORREF rest = Text) {
     if (!look.enabled) return TextMute;
-    return Mix(Text, Amber, look.lit);
+    return Mix(rest, TextHi, look.lit);
 }
 
-void Bar(HDC dc, const RECT& r, const Look& look) {
-    if (!look.enabled) { Wash(dc, r, Slate, 255); return; }
-    Gradient(dc, r, Mix(Fill, AmberHot, look.lit), Mix(FillLow, Amber, look.lit));
+// An opaque rectangle on the pixel grid.
+void Px(HDC dc, int x0, int y0, int x1, int y1, COLORREF c) {
+    RECT r = { x0, y0, x1, y1 };
+    Wash(dc, r, c, 255);
 }
 
-COLORREF BarInk(const Look& look) {
-    if (!look.enabled) return SlateText;
-    return Mix(FillText, AmberText, look.lit);
+// The segment indicator under a Choice's value, centred on `cx`: a segment per
+// option, or a track and a thumb when there are too many (or too little room).
+void Segments(HDC dc, int cx, int y, int count, int index, int room, const Look& look) {
+    if (count <= 0) return;
+    const COLORREF on  = look.enabled ? SegOn : SegOffDis;
+    const COLORREF off = look.enabled ? SegOff : Mix(Bg, SegOffDis, 0.55f);
+    const int sw = Sc(24), gap = Sc(2), th = (std::max)(1, Sc(2));
+    const int total = count * sw + (count - 1) * gap;
+    if (count <= 8 && total <= room) {
+        int x = cx - total / 2;
+        for (int i = 0; i < count; ++i, x += sw + gap)
+            Px(dc, x, y, x + sw, y + th, i == index ? on : off);
+        return;
+    }
+    const int tw = (std::min)(room, 8 * sw + 7 * gap);
+    const int x0 = cx - tw / 2;
+    Px(dc, x0, y, x0 + tw, y + th, off);
+    const int thumb = (std::max)(Sc(4), tw / count);
+    const int tx = x0 + (count > 1 ? (int)((long long)(tw - thumb) * index / (count - 1)) : 0);
+    Px(dc, tx, y, tx + thumb, y + th, on);
+}
+
+// The - and + glyphs of a slider.
+void Sign(HDC dc, int cx, int cy, bool plus, COLORREF c) {
+    const int arm = Sc(4);
+    const int t = (std::max)(1, Sc(1));
+    Px(dc, cx - arm, cy, cx + arm + 1, cy + t, c);
+    if (plus) Px(dc, cx, cy - arm, cx + t, cy + arm + 1, c);
 }
 
 } // namespace
 
-void DrawPair(HDC dc, const RECT& r, const std::wstring& first, const std::wstring& second,
-              int chosen, const Look& look) {
-    const int mid = (r.left + r.right) / 2;
-    const RECT half[2] = { { r.left, r.top, mid, r.bottom }, { mid, r.top, r.right, r.bottom } };
-    const std::wstring* words[2] = { &first, &second };
-
-    // The glow of a lit row pools behind the chosen word, as the game's does.
-    if (look.enabled && look.lit > 0.01f && (chosen == 0 || chosen == 1)) {
-        RECT pool = half[chosen];
-        InflateRect(&pool, Sc(34), Sc(18));
-        Haze(dc, pool, AmberGlow, (BYTE)(70.0f * look.lit));
-    }
-    for (int i = 0; i < 2; ++i) {
-        const bool on = (i == chosen);
-        if (on) {
-            Bar(dc, half[i], look);
-            Print(dc, Font::ValueLight, Caps(*words[i]), half[i], BarInk(look),
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        } else {
-            if (look.enabled && look.hot == i) {
-                RECT box = half[i];
-                InflateRect(&box, -Sc(1), -Sc(1));
-                Frame(dc, box, LooseInk(look), 90, 1);
-            }
-            Print(dc, Font::Value, Caps(*words[i]), half[i], LooseInk(look),
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        }
-    }
-}
-
 void DrawSelector(HDC dc, const RECT& r, const std::wstring& text, const Look& look,
-                  bool canBack, bool canForward, COLORREF swatch) {
-    const int h = r.bottom - r.top;
+                  bool canBack, bool canForward, COLORREF swatch, int count, int index) {
     const float cy = (float)(r.top + r.bottom) / 2.0f;
-    const float size = (float)h * 0.30f;
+    const float size = ScF(4.5f);                    // half the chevron's height
+    const float pen = ScF(1.3f);
     const float lx = (float)r.left + size + (float)Sc(4);
     const float rx = (float)r.right - size - (float)Sc(4);
 
-    if (look.enabled && look.lit > 0.01f) {
-        RECT pool = r;
-        InflateRect(&pool, Sc(10), Sc(14));
-        Haze(dc, pool, AmberGlow, (BYTE)(46.0f * look.lit));
-    }
-    const COLORREF ink = LooseInk(look);
-    auto arrow = [&](float x, int dir, bool can, bool hot) {
-        COLORREF c = ink;
-        BYTE a = 255;
-        if (!can) a = 70;
-        else if (hot && look.enabled) c = look.lit > 0.5f ? AmberHot : RGB(255, 255, 255);
-        Arrowhead(dc, x, cy, size * (hot && can ? 1.12f : 1.0f), dir, c, a);
+    const COLORREF ink = Ink(look);
+    auto chevron = [&](float x, int dir, bool can, bool hot) {
+        COLORREF c = !look.enabled ? TextMute : Mix(TextDim, TextHi, look.lit);
+        if (hot && can && look.enabled) c = TextHi;
+        if (!can) c = Mix(Bg, c, 0.35f);
+        Chevron(dc, x, cy, size, dir, c, pen);
     };
-    arrow(lx, -1, canBack, look.hot == 0);
-    arrow(rx, +1, canForward, look.hot == 2);
+    chevron(lx, -1, canBack, look.hot == 0);
+    chevron(rx, +1, canForward, look.hot == 2);
 
-    RECT tr = { (int)(lx + size * 1.4f), r.top, (int)(rx - size * 1.4f), r.bottom };
-    std::wstring caps = Caps(text);
+    // With a segment row the value rides a little above the centre line.
+    const bool segs = count > 0;
+    const int lift = segs ? Sc(4) : 0;
+    RECT tr = { (int)(lx + size + Sc(8)), r.top - lift, (int)(rx - size - Sc(8)), r.bottom - lift };
     if (swatch != CLR_INVALID) {
         // A chip of the colour, then its name.
-        const int chip = (int)((float)h * 0.46f);
-        const int tw = Measure(dc, Font::Value, caps);
-        const int total = chip + Sc(9) + tw;
-        int x = (int)tr.left + (std::max)(0, (int)((tr.right - tr.left) - total) / 2);
-        RECT sw = { x, (int)cy - chip / 2, x + chip, (int)cy - chip / 2 + chip };
-        Wash(dc, sw, swatch, 255);
-        Frame(dc, sw, look.enabled ? Mix(Text, Amber, look.lit) : TextMute, 200, 1);
-        tr.left = sw.right + Sc(9);
-        Print(dc, Font::Value, caps, tr, ink, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        return;
+        const int chip = Sc(10);
+        const int tw = Measure(dc, Font::Row, text);
+        const int total = chip + Sc(8) + tw;
+        const int x = tr.left + (std::max)(0, (int)(tr.right - tr.left) - total) / 2;
+        const int cyi = (tr.top + tr.bottom) / 2;
+        RECT sw = { x, cyi - chip / 2, x + chip, cyi - chip / 2 + chip };
+        Wash(dc, sw, look.enabled ? swatch : Mix(Bg, swatch, 0.4f), 255);
+        Frame(dc, sw, ink, 120, 1);
+        tr.left = sw.right + Sc(8);
+        Print(dc, Font::Row, text, tr, ink, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    } else {
+        Print(dc, Font::Row, text, tr, ink, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
-    Print(dc, Font::Value, caps, tr, ink, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (segs) {
+        const int cx = (int)(lx + rx) / 2;
+        const int y = (r.top + r.bottom) / 2 + Sc(9);
+        Segments(dc, cx, y, count, index, (std::max)(0, (int)(rx - lx) - Sc(24)), look);
+    }
+}
+
+void DrawToggle(HDC dc, const RECT& r, bool on, const Look& look) {
+    DrawSelector(dc, r, on ? L"On" : L"Off", look, true, true, CLR_INVALID, 2, on ? 1 : 0);
 }
 
 void DrawSlider(HDC dc, const RECT& r, float fraction, const std::wstring& text,
                 const Look& look) {
     fraction = fraction < 0.0f ? 0.0f : (fraction > 1.0f ? 1.0f : fraction);
-    const COLORREF groove = !look.enabled ? RGB(34, 38, 44) : Mix(Track, AmberTrack, look.lit);
-    Wash(dc, r, groove, 255);
+    const int cy = (r.top + r.bottom) / 2;
+    const float size = ScF(4.5f), pen = ScF(1.3f);
+    const COLORREF ink = Ink(look);
+    const COLORREF dim = !look.enabled ? TextMute : Mix(TextDim, TextHi, look.lit);
 
-    const int split = r.left + (int)((float)(r.right - r.left) * fraction + 0.5f);
-    RECT done = { r.left, r.top, split, r.bottom };
-    if (done.right > done.left) Bar(dc, done, look);
+    // The value at the right edge.
+    const int valW = (std::max)(Sc(36), Measure(dc, Font::Row, text));
+    RECT vr = { r.right - valW, r.top, r.right, r.bottom };
+    Print(dc, Font::Row, text, vr, ink, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
-    // The number sits across the edge of the fill, so it is printed twice and
-    // each copy clipped to its own side: dark on the bar, light on the groove.
-    const std::wstring caps = Caps(text);
-    const COLORREF light = !look.enabled ? SlateText : RGB(250, 251, 252);
-    int saved = SaveDC(dc);
-    IntersectClipRect(dc, split, r.top, r.right, r.bottom);
-    Print(dc, Font::Value, caps, r, light, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    RestoreDC(dc, saved);
-    saved = SaveDC(dc);
-    IntersectClipRect(dc, r.left, r.top, split, r.bottom);
-    Print(dc, Font::Value, caps, r, BarInk(look), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    RestoreDC(dc, saved);
+    // < - ruler + >
+    const int end = r.right - valW - Sc(14);
+    const float lx = (float)r.left + size + (float)Sc(4);
+    const float rx = (float)end - size - (float)Sc(4);
+    Chevron(dc, lx, (float)cy, size, -1, (look.hot == 0 && look.enabled) ? TextHi : dim, pen);
+    Chevron(dc, rx, (float)cy, size, +1, (look.hot == 2 && look.enabled) ? TextHi : dim, pen);
 
-    if (look.enabled && (look.hot >= 0 || look.pressed)) {
-        // Where a click would put it.
-        RECT tick = { split - (std::max)(1, Sc(1)), r.top - Sc(3), split + (std::max)(1, Sc(1)),
-                      r.bottom + Sc(3) };
-        Wash(dc, tick, look.lit > 0.5f ? AmberHot : Text, 255);
+    const int minusX = (int)lx + Sc(20), plusX = (int)rx - Sc(20);
+    Sign(dc, minusX, cy, false, (look.hot == 1 && look.enabled) ? TextHi : dim);
+    Sign(dc, plusX,  cy, true,  (look.hot == 3 && look.enabled) ? TextHi : dim);
+
+    const int x0 = minusX + Sc(14), x1 = plusX - Sc(14);
+    if (x1 - x0 < Sc(40)) return;
+    const int t = (std::max)(1, Sc(1));
+    Px(dc, x0, cy, x1, cy + t, dim);                       // the ruler
+    const int shortTick = Sc(3), longTick = Sc(6);
+    for (int i = 0; i < 20; ++i) {
+        const int x = x0 + (int)((long long)(x1 - x0 - t) * i / 19);
+        const int len = (i % 5 == 0) ? longTick : shortTick;
+        Px(dc, x, cy - len / 2, x + t, cy - len / 2 + len + t, dim);
     }
+    // The marker.
+    const int mw = (std::max)(2, Sc(2)), mh = Sc(16);
+    const int mx = x0 + (int)((float)(x1 - x0 - mw) * fraction + 0.5f);
+    Px(dc, mx, cy - mh / 2, mx + mw, cy - mh / 2 + mh, look.enabled ? TextHi : TextMute);
 }
 
+namespace {
+
+// A square missing its top-right corner, with an arrow leaving through the gap.
+void OpenInIcon(HDC dc, float cx, float cy, COLORREF c) {
+    const float s = ScF(14.0f), w = ScF(1.3f);
+    const float x0 = cx - s / 2, x1 = cx + s / 2, y0 = cy - s / 2, y1 = cy + s / 2;
+    const float gap = s * 0.58f, head = s * 0.36f;
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::Pen pen(Argb(c), w);
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    pen.SetLineJoin(Gdiplus::LineJoinRound);
+    Gdiplus::PointF box[5] = { { x0 + gap, y0 }, { x0, y0 }, { x0, y1 }, { x1, y1 }, { x1, y0 + gap } };
+    g.DrawLines(&pen, box, 5);
+    g.DrawLine(&pen, x0 + s * 0.42f, y1 - s * 0.42f, x1, y0);
+    Gdiplus::PointF tip[3] = { { x1 - head, y0 }, { x1, y0 }, { x1, y0 + head } };
+    g.DrawLines(&pen, tip, 3);
+}
+
+} // namespace
+
 void DrawAction(HDC dc, const RECT& r, const std::wstring& text, const Look& look, bool danger) {
-    const int cut = Sc(9);
-    const float w = ScF(1.5f);
-    COLORREF ink = danger ? RGB(255, 120, 104) : Text;
-    if (!look.enabled) {
-        CutBox(dc, r, cut, 0, 0, TextMute, 150, w);
-        Print(dc, Font::Value, Caps(text), r, TextMute, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        return;
-    }
-    if (look.pressed) {
-        CutBox(dc, r, cut, AmberHot, 255, AmberHot, 255, w);
-        Print(dc, Font::Value, Caps(text), r, AmberText, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        return;
-    }
-    const float lit = (std::max)(look.lit, look.hot >= 0 ? 0.6f : 0.0f);
-    CutBox(dc, r, cut, AmberGlow, (BYTE)(40.0f * lit), Mix(ink, Amber, lit),
-           (BYTE)(150.0f + 105.0f * lit), w);
-    Print(dc, Font::Value, Caps(text), r, Mix(ink, Amber, lit),
-          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    COLORREF ink = !look.enabled ? TextMute : (danger ? Danger : Ink(look));
+    if (look.enabled && look.pressed) ink = TextDim;
+    const int iconW = Sc(14);
+    const int cy = (r.top + r.bottom) / 2;
+    OpenInIcon(dc, (float)(r.right - iconW / 2 - Sc(2)), (float)cy, ink);
+    RECT tr = { r.left, r.top, r.right - iconW - Sc(12), r.bottom };
+    Print(dc, Font::Row, text, tr, ink, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
 std::wstring KeyName(UINT vk) {
@@ -850,23 +799,30 @@ std::wstring KeyName(UINT vk) {
 
 int Keycap(HDC dc, int x, int centreY, const std::wstring& key, COLORREF ink,
            bool measureOnly, bool solid, bool large) {
+    (void)ink;
     if (key.empty()) return 0;
     const std::wstring caps = Caps(key);
-    const Font font = large ? Font::Button : Font::Key;
-    const int track = large ? 0 : (std::max)(1, Sc(1)) - 1;
-    const int tw = Measure(dc, font, caps, track);
-    const int h  = large ? Sc(26) : Sc(18);
-    const int w  = (std::max)(h, tw + (large ? Sc(18) : Sc(12)));
+    const bool arrows = !caps.empty() && caps[0] >= 0x2190 && caps[0] <= 0x2193;
+    const Font font = arrows ? Font::Body : (large ? Font::Tab : Font::Keycap);
+    const int tw = Measure(dc, font, caps);
+    const int h  = large ? Sc(26) : Sc(20);
+    const int w  = (std::max)(h, tw + (large ? Sc(16) : Sc(12)));
     if (!measureOnly) {
+        const float fx = (float)x, fy = (float)(centreY - h / 2);
+        const float rad = ScF(2.0f), d = rad * 2.0f;
+        Gdiplus::GraphicsPath path;
+        path.AddArc(fx, fy, d, d, 180, 90);
+        path.AddArc(fx + w - d, fy, d, d, 270, 90);
+        path.AddArc(fx + w - d, fy + h - d, d, d, 0, 90);
+        path.AddArc(fx, fy + h - d, d, d, 90, 90);
+        path.CloseFigure();
+        Gdiplus::Graphics g(dc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+        Gdiplus::SolidBrush brush(Argb(solid ? Mix(KeyFill, TextHi, 0.5f) : KeyFill));
+        g.FillPath(&brush, &path);
         RECT box = { x, centreY - h / 2, x + w, centreY - h / 2 + h };
-        if (solid) {
-            Wash(dc, box, ink, 255);
-        } else {
-            Wash(dc, box, ink, 20);
-            Frame(dc, box, ink, 200, 1);
-        }
-        Print(dc, font, caps, box, solid ? RGB(18, 18, 20) : ink,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE, track);
+        Print(dc, font, caps, box, KeyInk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     return w;
 }
@@ -895,62 +851,43 @@ int Chord(HDC dc, int x, int centreY, UINT mods, UINT vk, COLORREF ink,
     return total;
 }
 
-int ButtonWidth(HDC dc, const std::wstring& label, const wchar_t* key) {
-    int w = Measure(dc, Font::Button, Caps(label), Sc(1)) + Sc(40);
-    if (key && *key) w += Keycap(dc, 0, 0, key, Text, true) + Sc(9);
-    return w;
-}
-
-void DrawButton(HDC dc, const RECT& r, const std::wstring& label, const wchar_t* key,
-                const ButtonLook& look) {
-    const int cut = (r.bottom - r.top) * 2 / 5;
-    const float w = (float)(std::max)(2, Sc(2));
-    const bool lit = look.enabled && (look.hot || look.focused);
-    COLORREF ink;
-    if (!look.enabled) {
-        ink = TextMute;
-        CutBox(dc, r, cut, 0, 0, TextMute, 140, w);
-    } else if (look.pressed) {
-        ink = AmberText;
-        CutBox(dc, r, cut, AmberHot, 255, AmberHot, 255, w);
-    } else if (lit) {
-        ink = Amber;
-        Glow(dc, r, AmberGlow, Sc(12), 90);
-        CutBox(dc, r, cut, AmberGlow, 34, Amber, 255, w);
-    } else if (look.primary) {
-        ink = Amber;
-        CutBox(dc, r, cut, AmberGlow, 16, Amber, 210, w);
-    } else {
-        ink = Text;
-        CutBox(dc, r, cut, 0, 0, RGB(196, 200, 206), 190, w);
-    }
-
-    const std::wstring caps = Caps(label);
-    const int track = Sc(1);
-    const int tw = Measure(dc, Font::Button, caps, track);
-    const int kw = (key && *key) ? Keycap(dc, 0, 0, key, ink, true) + Sc(9) : 0;
-    int x = r.left + ((r.right - r.left) - (tw + kw)) / 2;
-    const int cy = (r.top + r.bottom) / 2;
-    if (kw) {
-        Keycap(dc, x, cy, key, ink, false, look.pressed);
-        x += kw;
-    }
-    RECT tr = { x, r.top, x + tw + track, r.bottom };
-    Print(dc, Font::Button, caps, tr, ink, DT_LEFT | DT_VCENTER | DT_SINGLELINE, track);
-}
-
 int Prompt(HDC dc, int x, int centreY, const std::wstring& key, const std::wstring& word,
            COLORREF ink, bool measureOnly) {
-    const std::wstring caps = Caps(word);
-    const int track = Sc(1);
     const int kw = Keycap(dc, 0, 0, key, ink, true);
-    const int ww = Measure(dc, Font::Caption, caps, track);
-    const int total = kw + Sc(7) + ww;
+    const int ww = Measure(dc, Font::Prompt, word);
+    const int total = kw + Sc(8) + ww;
     if (measureOnly) return total;
     Keycap(dc, x, centreY, key, ink);
-    RECT tr = { x + kw + Sc(7), centreY - Sc(12), x + total + track, centreY + Sc(12) };
-    Print(dc, Font::Caption, caps, tr, ink, DT_LEFT | DT_VCENTER | DT_SINGLELINE, track);
+    RECT tr = { x + kw + Sc(8), centreY - Sc(12), x + total + Sc(2), centreY + Sc(12) };
+    Print(dc, Font::Prompt, word, tr, ink, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     return total;
+}
+
+void SectionPlate(HDC dc, const RECT& r, const std::wstring& label) {
+    const int h = Sc(26);
+    const int bottom = r.bottom - Sc(7), top = bottom - h;
+    const int slant = Sc(9), pad = Sc(16);
+    const int tw = Measure(dc, Font::Plate, label);
+    const int w = tw + pad * 2;
+    const int line = (std::max)(1, Sc(1));
+    {
+        // The hairline along the plate's foot, on to the right.
+        RECT ln = { r.left + w, bottom - line, r.right, bottom };
+        if (ln.right > ln.left) Wash(dc, ln, Line, 255);
+    }
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    const float x = (float)r.left, t = (float)top, b = (float)bottom, s = (float)slant;
+    Gdiplus::PointF pts[4] = { { x + s, t }, { x + w + s, t }, { x + w, b }, { x, b } };
+    Gdiplus::LinearGradientBrush brush(Gdiplus::PointF(0, t), Gdiplus::PointF(0, b + 1),
+                                       Argb(Plate), Argb(PlateLow));
+    g.FillPolygon(&brush, pts, 4);
+    Gdiplus::Pen edge(Argb(Rule, 160), (float)line);
+    g.DrawLine(&edge, pts[0], pts[1]);
+    g.DrawLine(&edge, pts[3], pts[0]);
+    g.DrawLine(&edge, pts[1], pts[2]);
+    RECT tr = { r.left + pad + slant / 2, top, r.left + w, bottom };
+    Print(dc, Font::Plate, label, tr, TextDim, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
 void Mark(HDC dc, const RECT& r, COLORREF ink, COLORREF master) {
@@ -964,6 +901,32 @@ void Mark(HDC dc, const RECT& r, COLORREF ink, COLORREF master) {
     Wash(dc, a, master, 255);
     Wash(dc, b, ink, 255);
     Wash(dc, c, Mix(ink, Bg, 0.45f), 255);
+}
+
+void Meter(HDC dc, const RECT& r, float used, float other) {
+    used  = (std::max)(0.0f, (std::min)(1.0f, used));
+    other = (std::max)(0.0f, (std::min)(1.0f - used, other));
+    const int line = (std::max)(1, Sc(1));
+    RECT in = { r.left + line, r.top + line, r.right - line, r.bottom - line };
+    const int w = in.right - in.left;
+    Frame(dc, r, MeterEdge, 255, line);
+    RECT u = { in.left, in.top, in.left + (int)(w * used + 0.5f), in.bottom };
+    if (u.right > u.left) Gradient(dc, u, MeterFill, Mix(MeterFill, Bg, 0.45f));
+    RECT o = { u.right, in.top, u.right + (int)(w * other + 0.5f), in.bottom };
+    if (o.right > o.left) {
+        const int saved = SaveDC(dc);
+        IntersectClipRect(dc, o.left, o.top, o.right, o.bottom);
+        const int step = (std::max)(3, Sc(4));
+        HPEN pen = CreatePen(PS_SOLID, 1, MeterEdge);
+        HGDIOBJ old = SelectObject(dc, pen);
+        for (int x = o.left - (o.bottom - o.top); x < o.right; x += step) {
+            MoveToEx(dc, x, o.bottom, nullptr);
+            LineTo(dc, x + (o.bottom - o.top), o.top - 1);
+        }
+        SelectObject(dc, old);
+        DeleteObject(pen);
+        RestoreDC(dc, saved);
+    }
 }
 
 } // namespace theme

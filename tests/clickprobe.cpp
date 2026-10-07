@@ -53,6 +53,11 @@ bool AppAutostartEnabled()    { return false; }
 void AppSetAutostart(bool)    {}
 void AppGameModeChanged(bool) {}
 int  AppHotkeyConflicts()     { return 0; }
+int  AppMemoryMB()            { return 38; }
+int  AppManagedWindows()      { return 7; }
+int  AppIndexEntries()        { return 12400; }
+int  AppIconCacheCount()      { return 140; }
+int  AppSamplerCostTenths()   { return 12; }
 void AppOpenConfigFolder()    {}
 void AppWriteDiagnostics()    {}
 void AppReloadFromDisk()      {}
@@ -106,23 +111,10 @@ void PressKey(WORD vk) {
 
 int Sc(int px) { return theme::Scale(px); }
 
-// Where settings.cpp's DoLayout puts the footer's buttons.
-RECT FooterButton(HWND wnd, int index) {
+// The footer prompt for a key: where the window drew it.
+RECT FooterPrompt(HWND wnd, UINT key) {
     theme::SetDpi(DpiForWindow(wnd));
-    RECT c;
-    GetClientRect(wnd, &c);
-    const int footerY = c.bottom - Sc(34) - Sc(40);
-    HDC dc = GetDC(wnd);
-    const wchar_t* labels[3] = { L"Apply", L"Reset to defaults", L"Close" };
-    int x = Sc(36);
-    RECT r = {};
-    for (int i = 0; i <= index; ++i) {
-        const int w = (std::max)(Sc(120), theme::ButtonWidth(dc, labels[i], nullptr));
-        r = { x, footerY, x + w, footerY + Sc(40) };
-        x += w + Sc(12);
-    }
-    ReleaseDC(wnd, dc);
-    return r;
+    return SettingsPromptRect(key);
 }
 
 void ClickCentre(HWND wnd, const RECT& r) {
@@ -149,11 +141,12 @@ void CALLBACK AnswerModal(HWND, UINT, UINT_PTR id, DWORD) {
     if (!modal) return;
     RECT c;
     GetClientRect(modal, &c);
-    const int pad = Sc(28), bh = Sc(40);
-    const int y = c.bottom - pad - bh / 2;
-    // The first button starts at the pad; the second after the first's width.
-    const int x = g_modalButton == 0 ? pad + Sc(40) : pad + Sc(130) + Sc(12) + Sc(40);
-    ClickAt(modal, x, y);
+    // The answers are two rows above the footer (modal.cpp's Layout): 12 DIP
+    // over a 52 DIP footer, 46 DIP a row.
+    const int rowH = Sc(46);
+    const int bottom = c.bottom - Sc(52) - Sc(12);
+    const int top = bottom - (2 - g_modalButton) * rowH;
+    ClickAt(modal, c.right / 2, top + rowH / 2);
 }
 
 } // namespace
@@ -170,7 +163,7 @@ int wmain() {
     if (!wnd) { wprintf(L"the settings window never appeared\n"); return 1; }
     {
         RECT c; GetClientRect(wnd, &c);
-        ClickAt(wnd, c.right - Sc(24), Sc(17));
+        ClickAt(wnd, c.right - Sc(46), Sc(27));
         Pump(600);
         Check(SettingsWindow() == nullptr, L"the X closes the window");
     }
@@ -179,16 +172,18 @@ int wmain() {
     wnd = Reopen(PAGE_LAYOUT);
     {
         RECT c; GetClientRect(wnd, &c);
-        ClickAt(wnd, c.right - Sc(72), Sc(17));
+        ClickAt(wnd, c.right - Sc(86), Sc(27));
         Pump(600);
         Check(SettingsWindow() && IsIconic(SettingsWindow()), L"the minimise button minimises it");
     }
 
-    // ---- Close in the footer
+    // ---- the Esc prompt in the footer: Back from the list, then Close
     wnd = Reopen(PAGE_LAYOUT);
-    ClickCentre(wnd, FooterButton(wnd, 2));
+    ClickCentre(wnd, FooterPrompt(wnd, VK_ESCAPE));
+    Pump(300);
+    ClickCentre(wnd, FooterPrompt(wnd, VK_ESCAPE));
     Pump(600);
-    Check(SettingsWindow() == nullptr, L"Close in the footer closes the window");
+    Check(SettingsWindow() == nullptr, L"the Esc prompt in the footer closes the window");
 
     // ---- Esc, from the categories column, closes
     wnd = Reopen(PAGE_LAYOUT);
@@ -224,7 +219,7 @@ int wmain() {
     Pump(600);
     Check(SettingsWindow() == nullptr, L"the close shortcut closes the window in front");
 
-    // ---- Reset to defaults, confirmed with the mouse
+    // ---- Reset (the R prompt), confirmed with the mouse
     wnd = Reopen(PAGE_LAYOUT);
     Config d; d.LoadDefaults();
     Edit().gapInner = d.gapInner + 6;
@@ -234,17 +229,19 @@ int wmain() {
     g_modalButton = 0;
     g_modalSeen = false;
     SetTimer(nullptr, 0, 700, AnswerModal);
-    ClickCentre(wnd, FooterButton(wnd, 1));
+    ClickCentre(wnd, FooterPrompt(wnd, 'R'));
     Pump(1600);
-    Check(g_modalSeen, L"Reset to defaults asks first");
+    Check(g_modalSeen, L"the Reset prompt asks first");
     Check(Edit().gapInner == d.gapInner && Edit().gapOuter == d.gapOuter,
-          L"Reset to defaults puts the page back to its defaults");
+          L"Reset puts the page back to its defaults");
 
     // ---- and a close with that unapplied: Discard
     g_modalButton = 1;
     g_modalSeen = false;
     SetTimer(nullptr, 0, 700, AnswerModal);
-    ClickCentre(wnd, FooterButton(wnd, 2));
+    PressKey(VK_ESCAPE);                      // the list -> the categories
+    Pump(250);
+    ClickCentre(wnd, FooterPrompt(wnd, VK_ESCAPE));
     Pump(1600);
     Check(!g_modalSeen || SettingsWindow() == nullptr,
           L"closing with unapplied changes, then Discard, closes the window");

@@ -644,3 +644,13 @@ void AppIconDraw(HDC dc, HBITMAP icon, const RECT& box) {
 }
 
 } // namespace awa
+
+namespace awa {
+int AppIconCount() {
+    if (!g_lockReady) return 0;
+    EnterCriticalSection(&g_lock);
+    const int n = (int)g_cache.size();
+    LeaveCriticalSection(&g_lock);
+    return n;
+}
+} // namespace awa

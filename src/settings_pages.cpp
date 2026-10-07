@@ -140,6 +140,11 @@ void BuildLayoutPage(std::vector<Row>& rows) {
         r.get = []() { const int v = (int)Edit().layout; return (v >= 0 && v < (int)LayoutKind::COUNT) ? v : 0; };
         r.set = [](int v) { Edit().layout = (LayoutKind)v; };
         r.modified = []() { return Edit().layout != Saved().layout; };
+        r.fallback = []() -> std::wstring {
+            Config d; d.LoadDefaults();
+            const int v = (int)d.layout;
+            return (v >= 0 && v < (int)LayoutKind::COUNT) ? kLayoutInfo[v].name : L"";
+        };
         rows.push_back(r);
     }
     {
@@ -274,12 +279,12 @@ void PreviewLayout(HDC dc, const RECT& box) {
         if (r.bottom < area.bottom) r.bottom -= (gap + 1) / 2;
         if (r.right - r.left < 3 || r.bottom - r.top < 3) continue;
         if (i == 0) {
-            theme::Gradient(dc, r, theme::Fill, theme::FillLow);
+            theme::Gradient(dc, r, theme::KeyFill, theme::Mix(theme::KeyFill, theme::Bg, 0.25f));
             RECT edge = { r.left, r.top, r.right, r.top + (std::max)(2, theme::Scale(2)) };
-            theme::Wash(dc, edge, theme::Amber, 255);
+            theme::Wash(dc, edge, theme::TextHi, 255);
         } else {
-            theme::Wash(dc, r, RGB(34, 37, 42), 255);
-            theme::Frame(dc, r, theme::Edge, 110, 1);
+            theme::Gradient(dc, r, theme::Plate, theme::PlateLow);
+            theme::Frame(dc, r, theme::Rule, 255, 1);
         }
     }
 }
@@ -503,10 +508,14 @@ void BuildGeneralPage(std::vector<Row>& rows) {
     const EditExtras& xs = SavedExtra();
 
     rows.push_back(ui::Section(L"Startup"));
-    rows.push_back(ui::Toggle(L"autostart", L"Start with Windows",
-        L"Starts ProWindows when you sign in. One registry entry under your own "
-        L"account - no service, no scheduled task.",
-        &x.autostart, &xs.autostart));
+    {
+        Row r = ui::Toggle(L"autostart", L"Start with Windows",
+            L"Starts ProWindows when you sign in. One registry entry under your own "
+            L"account - no service, no scheduled task.",
+            &x.autostart, &xs.autostart);
+        r.fallback = []() -> std::wstring { return L"Off"; };
+        rows.push_back(r);
+    }
     rows.push_back(ui::Toggle(L"startmin", L"Start in the tray",
         L"Starts without opening this window; ProWindows waits in the notification "
         L"area, already arranging.",

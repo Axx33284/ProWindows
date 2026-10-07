@@ -69,4 +69,11 @@ void AppGameModeChanged(bool on);
 // line, since a stolen chord is otherwise silently missing).
 int  AppHotkeyConflicts();
 
+// Figures for the settings window's meters. Each is cheap to call.
+int  AppMemoryMB();             // ProWindows' private bytes, in MB
+int  AppManagedWindows();       // windows the tiler is arranging
+int  AppIndexEntries();         // entries in the search file index
+int  AppIconCacheCount();       // icons held for the search bar
+int  AppSamplerCostTenths();    // the monitor's last sample, in 0.1 ms; -1 when not sampling
+
 } // namespace awa

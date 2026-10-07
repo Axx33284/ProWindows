@@ -22,6 +22,10 @@ namespace awa {
 Config&       Edit();            // what the rows change
 const Config& Saved();           // the live config, for "has this changed"
 
+// Where the footer prompt for `key` (VK_ESCAPE, VK_TAB, 'R', ...) was last drawn, in client
+// coordinates; empty when it is not shown. For the click probe.
+RECT SettingsPromptRect(UINT key);
+
 // Settings that live outside config.ini: the Run key and the elevated logon
 // task. Edited like everything else and applied with it.
 struct EditExtras {

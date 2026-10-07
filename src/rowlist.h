@@ -28,6 +28,7 @@ enum class Kind {
     Colour,     // < swatch name >: get() is an index into `options` / `colours`
     Item,       // an entry in a list the user builds (an excluded app, a folder)
     Info,       // a label and a value, read-only
+    Page,       // marks where a page (sub-tab) of a category starts; never drawn in the list
 };
 
 struct Row {
@@ -43,6 +44,11 @@ struct Row {
     std::function<int()>     get;
     std::function<void(int)> set;
     std::function<bool()>    modified;   // differs from what is saved; null = never
+    // The value the row has in a default Config, formatted as the row shows
+    // it; the right column prints "(Default: ...)". Null = omitted. The
+    // Toggle / Slider / ChoiceOf helpers fill it when their field lies inside
+    // the source given to SetDefaultsSource.
+    std::function<std::wstring()> fallback;
 
     // Toggle: the two words. Choice: the values' names. Colour: the swatches' names.
     std::vector<std::wstring> options;
@@ -78,7 +84,7 @@ struct Row {
     std::function<void(int from, int to)> move;
 
     bool Enabled() const { return !enabled || enabled(); }
-    bool Focusable() const { return kind != Kind::Section && Enabled(); }
+    bool Focusable() const { return kind != Kind::Section && kind != Kind::Page && Enabled(); }
 };
 
 // Helpers for the common shapes. `field` points into an edit buffer that
@@ -95,7 +101,12 @@ Row Slider(const std::wstring& id, const std::wstring& label, const std::wstring
 Row ChoiceOf(const std::wstring& id, const std::wstring& label, const std::wstring& help,
              int* field, const int* saved, std::vector<int> values,
              std::vector<std::wstring> names);
+// Where the helpers find a default for a field: `edit` is the struct the rows'
+// fields point into, `defaults` a default-constructed copy of the same type.
+void SetDefaultsSource(const void* edit, const void* defaults, size_t size);
 Row Section(const std::wstring& label);
+// Starts a page of the category; its id is "page:<label>", stable across rebuilds.
+Row Page(const std::wstring& label);
 Row Action(const std::wstring& id, const std::wstring& label, const std::wstring& help,
            const std::wstring& button, std::function<void()> run);
 Row Info(const std::wstring& id, const std::wstring& label, const std::wstring& help,

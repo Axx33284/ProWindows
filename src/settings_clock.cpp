@@ -17,6 +17,7 @@ void BuildClockPage(std::vector<Row>& rows) {
     const Config& s = Saved();
     auto add = [&](Row r) { r.enabled = On; rows.push_back(r); };
 
+    rows.push_back(ui::Page(L"Display"));
     rows.push_back(ui::Section(L"Clock"));
     rows.push_back(ui::Toggle(L"enabled", L"Desktop clock",
         L"A clock that sits on your screen in one of a dozen styles. Drag it anywhere; "
@@ -37,6 +38,16 @@ void BuildClockPage(std::vector<Row>& rows) {
             SettingsToast(L"The clock is back in its corner");
         }));
 
+    rows.push_back(ui::Section(L"What it shows"));
+    add(ui::Toggle(L"hours24", L"Hours", L"A 24-hour clock, or 12 hours with AM and PM.",
+        &e.clockHours24, &s.clockHours24, L"24-hour", L"12-hour"));
+    add(ui::Toggle(L"seconds", L"Seconds", L"Shows the seconds as well. The clock then wakes "
+        L"every second instead of every minute.", &e.clockSeconds, &s.clockSeconds));
+    add(ui::Toggle(L"date", L"Date", L"Shows the date under the time.", &e.clockDate, &s.clockDate));
+    add(ui::Toggle(L"weekday", L"Day of the week", L"Shows the day's name with the date.",
+        &e.clockWeekday, &s.clockWeekday));
+
+    rows.push_back(ui::Page(L"Look"));
     rows.push_back(ui::Section(L"Look"));
     {
         Row r;
@@ -67,15 +78,6 @@ void BuildClockPage(std::vector<Row>& rows) {
         &e.clockOpacity, &s.clockOpacity, 20, 100, 1, 5, L"%"));
     add(ui::Slider(L"scale", L"Size", L"The clock's size, as a share of its normal size.",
         &e.clockScale, &s.clockScale, 50, 250, 1, 10, L"%"));
-
-    rows.push_back(ui::Section(L"What it shows"));
-    add(ui::Toggle(L"hours24", L"Hours", L"A 24-hour clock, or 12 hours with AM and PM.",
-        &e.clockHours24, &s.clockHours24, L"24-hour", L"12-hour"));
-    add(ui::Toggle(L"seconds", L"Seconds", L"Shows the seconds as well. The clock then wakes "
-        L"every second instead of every minute.", &e.clockSeconds, &s.clockSeconds));
-    add(ui::Toggle(L"date", L"Date", L"Shows the date under the time.", &e.clockDate, &s.clockDate));
-    add(ui::Toggle(L"weekday", L"Day of the week", L"Shows the day's name with the date.",
-        &e.clockWeekday, &s.clockWeekday));
 }
 
 void ResetClockPage() {

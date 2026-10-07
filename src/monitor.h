@@ -22,6 +22,8 @@ bool MonitorPinned();
 // Re-reads the config: metrics, style, theme, opacity, scale, interval, and
 // whether the panel floats on top or sits down on the desktop.
 void MonitorApplyConfig();
+// The last sample's cost in 0.1 ms; -1 while the sampler is not running.
+int  MonitorSampleCostTenths();
 
 // The last reading of every metric, one line each - "cpu_temp: 41°C (thermal
 // zone)" - for the control channel's `get monitor`, so a script or a bug

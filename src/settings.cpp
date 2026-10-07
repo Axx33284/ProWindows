@@ -186,6 +186,10 @@ bool ArraysEqual(const Config& a, const Config& b) {
 
 // Loads the edit copy from the live config.
 void LoadEdit() {
+    static Config defaults;
+    static bool haveDefaults = false;
+    if (!haveDefaults) { defaults.LoadDefaults(); haveDefaults = true; }
+    ui::SetDefaultsSource(&g_edit, &defaults, sizeof(Config));
     g_edit = AppConfig();
     g_base = AppConfig();
     g_extra.autostart = AppAutostartEnabled();
@@ -312,6 +316,7 @@ namespace {
 constexpr wchar_t kClass[] = L"ProWindowsSettings";
 constexpr UINT_PTR kTimerStatus = 1;
 constexpr UINT_PTR kTimerAnim   = 2;
+constexpr UINT_PTR kTimerMeters = 3;
 constexpr UINT WM_AWA_CAPTUREKEY = WM_APP + 120;
 
 const PageDef g_pages[] = {
@@ -349,28 +354,37 @@ const PageDef g_pages[] = {
 };
 static_assert(ARRAYSIZE(g_pages) == PAGE_COUNT, "PageIndex is out of step with g_pages");
 
-enum class Zone { Nav, List, Footer };
+enum class Zone { Nav, List };
 
 // Things in the window that answer the mouse.
 enum Hot {
-    HOT_NONE = 0, HOT_MIN, HOT_CLOSE, HOT_RETILE, HOT_PAUSE, HOT_SEARCH,
-    HOT_APPLY, HOT_RESET, HOT_BACK,
-    HOT_NAV = 100,           // + category
+    HOT_NONE = 0, HOT_MIN, HOT_CLOSE, HOT_KEYQ, HOT_KEYE, HOT_SUBKEY1, HOT_SUBKEY3,
+    HOT_TAB = 100,           // + position in the tab bar
+    HOT_SUB = 150,           // + sub-tab
     HOT_PROMPT = 200,        // + prompt
 };
 
+// The tab bar's order (PLAN-1.6 2.4). The categories themselves keep their
+// PageIndex numbers, which callers outside the window use.
+const int kTabOrder[PAGE_COUNT] = { PAGE_LAYOUT, PAGE_BEHAVIOUR, PAGE_GENERAL, PAGE_SHORTCUTS,
+                                    PAGE_APPS, PAGE_SEARCH, PAGE_MONITOR, PAGE_CLOCK };
+constexpr int kMaxSub = 8;
+
 struct Geometry {
     RECT client = {};
-    RECT badge = {}, chip = {}, crumb = {};
-    RECT retile = {}, pause = {};
     RECT winMin = {}, winClose = {};
-    RECT search = {};
-    RECT nav[PAGE_COUNT] = {};
-    RECT frame = {}, rows = {}, track = {};
-    RECT desc = {};
-    RECT apply = {}, reset = {}, back = {};
+    RECT search = {}, status = {};           // header: the search readout (left), status (right)
+    RECT keyQ = {}, keyE = {};
+    RECT tab[PAGE_COUNT] = {};
+    bool subRow = false;
+    RECT key1 = {}, key3 = {};
+    RECT sub[kMaxSub] = {};
+    int  subCount = 0;
+    RECT rows = {}, track = {};              // the left column's list and its scrollbar
+    RECT right = {};                         // the right column
+    int  tabRuleY = 0, subRuleY = 0;
+    int  footerCy = 0;
     int  headerBottom = 0;
-    int  footerY = 0;
 };
 
 struct Status {
@@ -388,7 +402,10 @@ int         g_page = 0;
 Zone        g_zone = Zone::Nav;
 int         g_hot = HOT_NONE;
 int         g_pressed = HOT_NONE;
-int         g_footFocus = 0;
+bool        g_searching = false;       // / or Ctrl+F: typing goes into the query
+std::wstring g_pageId;                 // the current page of the category: a Kind::Page row's id
+struct PageTab { std::wstring id, label; };
+std::vector<PageTab> g_pageTabs;       // the pages of the category, in order (empty while searching)
 std::wstring g_query;
 bool        g_dirty = false;
 Status      g_status;
@@ -424,6 +441,48 @@ void Animate() {
     SetTimer(g_wnd, kTimerAnim, 15, nullptr);
 }
 
+// ---------------------------------------------------------------- pages
+// A category can split into pages, each a sub-tab (PLAN-1.6 2.6). A page is
+// the run of rows after a Kind::Page row; the row list is only ever given the
+// current page's rows, so the Page rows themselves are never drawn there.
+void DoLayout();
+
+bool HasPages() { return g_pageTabs.size() > 1; }
+
+int PageNames(std::wstring* out, int max) {
+    int n = 0;
+    for (const auto& t : g_pageTabs) { if (n >= max) break; out[n++] = t.label; }
+    return n;
+}
+
+int PageIndex(const std::wstring& id) {
+    for (int i = 0; i < (int)g_pageTabs.size(); ++i) if (g_pageTabs[i].id == id) return i;
+    return -1;
+}
+
+// The id of the page being shown: the one holding the focused row, which with
+// one page's rows in the list is the current page; the first when unset.
+std::wstring CurrentPage() {
+    if (PageIndex(g_pageId) >= 0) return g_pageId;
+    return g_pageTabs.empty() ? std::wstring() : g_pageTabs[0].id;
+}
+
+void BuildRows(bool keepFocus);
+
+// Shows the page with this id and puts the focus on its first row.
+void SetPage(const std::wstring& id) {
+    if (!g_query.empty() || PageIndex(id) < 0) return;
+    const bool changed = (id != CurrentPage());
+    g_pageId = id;
+    BuildRows(false);
+    if (changed) {
+        g_pageShownAt = GetTickCount64();
+        Animate();
+    }
+    if (g_zone == Zone::List) g_list.FocusFirst();
+    Invalidate();
+}
+
 // ---------------------------------------------------------------- rows
 void BuildSearchResults(std::vector<ui::Row>& out) {
     // Every word of the query has to appear somewhere in the row's name, its
@@ -442,6 +501,7 @@ void BuildSearchResults(std::vector<ui::Row>& out) {
         std::wstring section;
         bool headed = false;
         for (auto& r : rows) {
+            if (r.kind == ui::Kind::Page) continue;
             if (r.kind == ui::Kind::Section) { section = r.label; continue; }
             const std::wstring hay = ToLower(r.label + L" " + r.help + L" " + r.detail + L" " +
                                              section + L" " + g_pages[p].caption);
@@ -466,13 +526,30 @@ void BuildSearchResults(std::vector<ui::Row>& out) {
 
 void BuildRows(bool keepFocus) {
     std::vector<ui::Row> rows;
+    const std::vector<PageTab> hadTabs = g_pageTabs;
+    g_pageTabs.clear();
     if (!g_query.empty()) {
         BuildSearchResults(rows);
     } else {
-        g_pages[g_page].build(rows);
-        for (auto& r : rows) r.page = g_pages[g_page].caption;
+        std::vector<ui::Row> all;
+        g_pages[g_page].build(all);
+        for (const auto& r : all)
+            if (r.kind == ui::Kind::Page) g_pageTabs.push_back({ r.id, r.label });
+        if (PageIndex(g_pageId) < 0) g_pageId = g_pageTabs.empty() ? std::wstring() : g_pageTabs[0].id;
+        // Rows before the first Page row (a category that starts without one)
+        // belong to the first page.
+        bool inPage = g_pageTabs.empty() || g_pageTabs[0].id == g_pageId;
+        for (auto& r : all) {
+            if (r.kind == ui::Kind::Page) { inPage = (r.id == g_pageId); continue; }
+            if (!inPage) continue;
+            r.page = g_pages[g_page].caption;
+            rows.push_back(std::move(r));
+        }
     }
     g_list.SetRows(std::move(rows), keepFocus);
+    bool sameTabs = hadTabs.size() == g_pageTabs.size();
+    for (size_t i = 0; sameTabs && i < hadTabs.size(); ++i) sameTabs = hadTabs[i].id == g_pageTabs[i].id;
+    if (g_wnd && !sameTabs) DoLayout();        // the sub-tab row's size follows the page names
 }
 
 int PageOfRow(const ui::Row* row) {
@@ -513,139 +590,139 @@ void ReadStatus(Status* s) {
 }
 
 // ---------------------------------------------------------------- geometry
+// The layout is written in DIPs for a 1280 x 720 window (PLAN-1.6 2.4): the
+// header, the tab bar and the footer keep their size and the two columns take
+// whatever width is left, in the same proportions.
+
+int TabOf(int page) {
+    for (int t = 0; t < PAGE_COUNT; ++t) if (kTabOrder[t] == page) return t;
+    return 0;
+}
+
 void DoLayout() {
     Geometry& g = g_geo;
     GetClientRect(g_wnd, &g.client);
     const int W = g.client.right, H = g.client.bottom;
-    const int M = Sc(36);
+    const int dpi = (int)theme::Dpi();
+    const int wd = MulDiv(W, 96, dpi), hd = MulDiv(H, 96, dpi);
+    const int M = 70;
 
-    g.winClose = { W - Sc(48), 0, W, Sc(34) };
-    g.winMin   = { W - Sc(96), 0, W - Sc(48), Sc(34) };
-
-    const int y0 = Sc(24);
-    g.badge = { M, y0, M + Sc(34), y0 + Sc(34) };
-    g.chip  = { g.badge.right + Sc(10), y0, g.badge.right + Sc(10), y0 + Sc(34) };   // width at paint
-    g.crumb = { M, y0 + Sc(34) + Sc(16), W - M, y0 + Sc(34) + Sc(16) + Sc(40) };
-    g.headerBottom = g.crumb.bottom + Sc(22);
+    g.winClose = { W - Sc(66), Sc(10), W - Sc(26), Sc(44) };
+    g.winMin   = { W - Sc(106), Sc(10), W - Sc(66), Sc(44) };
+    g.search   = { Sc(M), Sc(14), W / 2 - Sc(120), Sc(60) };
+    g.status   = { W / 2 + Sc(120), Sc(14), g.winMin.left - Sc(8), Sc(60) };
+    g.headerBottom = Sc(60);
 
     HDC dc = GetDC(g_wnd);
-    const std::wstring pauseLabel = g_status.tiling ? L"Pause tiling" : L"Resume tiling";
-    const int pw = (std::max)(Sc(150), theme::ButtonWidth(dc, L"Resume tiling", nullptr));
-    const int rw = (std::max)(Sc(130), theme::ButtonWidth(dc, L"Re-arrange", nullptr));
-    const int by = g.crumb.top + Sc(3);
-    g.pause  = { W - M - pw, by, W - M, by + Sc(34) };
-    g.retile = { g.pause.left - Sc(12) - rw, by, g.pause.left - Sc(12), by + Sc(34) };
 
-    // Footer.
-    g.footerY = H - Sc(34) - Sc(40);
-    const int fb = Sc(40);
-    int x = M;
-    auto place = [&](RECT& r, const wchar_t* label) {
-        const int w = (std::max)(Sc(120), theme::ButtonWidth(dc, label, nullptr));
-        r = { x, g.footerY, x + w, g.footerY + fb };
-        x += w + Sc(12);
-    };
-    place(g.apply, L"Apply");
-    place(g.reset, L"Reset to defaults");
-    place(g.back, L"Close");
+    // The tab bar: a keycap at each end, eight cells between them.
+    const int tabTop = 64, tabBottom = 98;
+    const int cyTab = Sc((tabTop + tabBottom) / 2);
+    const int kw = theme::Keycap(dc, 0, 0, L"Q", 0, true);
+    g.keyQ = { Sc(M), cyTab - Sc(14), Sc(M) + kw, cyTab + Sc(14) };
+    g.keyE = { W - Sc(M) - kw, cyTab - Sc(14), W - Sc(M), cyTab + Sc(14) };
+    const int cellsL = g.keyQ.right + Sc(18), cellsR = g.keyE.left - Sc(18);
+    for (int t = 0; t < PAGE_COUNT; ++t)
+        g.tab[t] = { cellsL + (cellsR - cellsL) * t / PAGE_COUNT, Sc(tabTop),
+                     cellsL + (cellsR - cellsL) * (t + 1) / PAGE_COUNT, Sc(tabBottom) };
+    g.tabRuleY = Sc(99);
+
+    // The columns.
+    const int span = wd - 2 * M;
+    const int leftW = span * 600 / 1140;
+    g.subRow = HasPages();
+    g.subCount = 0;
+    int listTop = 118;
+    if (g.subRow) {
+        listTop = 184;
+        g.subRuleY = Sc(171);
+        std::wstring names[kMaxSub];
+        const int n = PageNames(names, kMaxSub);
+        const int cy = Sc(154);
+        g.key1 = { Sc(104), cy - Sc(14), Sc(104) + theme::Keycap(dc, 0, 0, L"1", 0, true), cy + Sc(14) };
+        int x = g.key1.right + Sc(22);
+        for (int i = 0; i < n; ++i) {
+            const int w = theme::Measure(dc, Font::Row, names[i]);
+            g.sub[i] = { x, Sc(140), x + w, Sc(168) };
+            x += w + Sc(30);
+            g.subCount = i + 1;
+        }
+        g.key3 = { x - Sc(8), cy - Sc(14), x - Sc(8) + theme::Keycap(dc, 0, 0, L"3", 0, true), cy + Sc(14) };
+    }
     ReleaseDC(g_wnd, dc);
 
-    // Body: the categories, the panel, the description.
-    const int top = g.headerBottom;
-    const int bottom = g.footerY - Sc(26);
-    const int navW = Sc(200);
-    const int descW = (std::max)(Sc(250), (std::min)(Sc(340), W * 26 / 100));
-    g.desc  = { W - M - descW, top, W - M, bottom };
-    g.frame = { M + navW + Sc(30), top, g.desc.left - Sc(40), bottom };
-    const int notch = theme::PanelNotch();
-    g.rows  = { g.frame.left, g.frame.top + notch + Sc(14), g.frame.right,
-                g.frame.bottom - notch - Sc(14) };
-    g.track = { g.frame.right + Sc(10), g.frame.top + Sc(4), g.frame.right + Sc(22),
-                g.frame.bottom - Sc(4) };
+    const int listBottom = hd - 64;
+    g.rows  = { Sc(M), Sc(listTop), Sc(M + leftW), Sc(listBottom) };
+    g.track = { Sc(M + leftW + 23), Sc(listTop), Sc(M + leftW + 23) + Sc(3), Sc(listBottom) };
+    g.right = { Sc(M + leftW + 72), Sc(listTop), W - Sc(M), Sc(listBottom) };
     g_list.SetBounds(g.rows, g.track);
-
-    g.search = { M, top, M + navW, top + Sc(38) };
-    const int itemH = Sc(42);
-    int y = g.search.bottom + Sc(18);
-    for (int i = 0; i < PAGE_COUNT; ++i) {
-        g.nav[i] = { M, y, M + navW, y + itemH };
-        y += itemH;
-    }
+    g.footerCy = Sc(hd - 26);
 }
 
 // ---------------------------------------------------------------- painting
 void PaintHeader(HDC dc) {
     const Geometry& g = g_geo;
+    const int W = g.client.right;
 
-    // The badge where the game shows the player's: the app's own mark on its
-    // cut plate, as the icon draws it.
-    theme::CutBox(dc, g.badge, Sc(9), theme::Raised, 255, theme::Edge, 230,
-                  (float)(std::max)(1, Sc(1)) * 1.5f);
-    RECT mark = g.badge;
-    InflateRect(&mark, -Sc(9), -Sc(9));
-    theme::Mark(dc, mark, theme::Text, theme::Amber);
+    // The title, centred, its baseline near y 52.
+    RECT title = { Sc(70), Sc(10), W, Sc(58) };
+    theme::Print(dc, Font::Heading, L"SETTINGS", title, theme::TextHi,
+                 DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
 
-    // Beside it, between two bars, what is going on.
-    const int cy = (g.chip.top + g.chip.bottom) / 2;
-    const int bar = (std::max)(2, Sc(2));
-    const int tw = theme::Measure(dc, Font::Caption, theme::Caps(g_status.chip), Sc(1));
-    RECT chip = g.chip;
-    chip.right = chip.left + Sc(12) + Sc(14) + tw + Sc(14);
-    RECT l = { chip.left, chip.top + Sc(4), chip.left + bar, chip.bottom - Sc(4) };
-    RECT r = { chip.right - bar, chip.top + Sc(4), chip.right, chip.bottom - Sc(4) };
-    theme::Wash(dc, l, theme::Edge, 200);
-    theme::Wash(dc, r, theme::Edge, 200);
-    theme::Diamond(dc, (float)(chip.left + Sc(15)), (float)cy, theme::ScaleF(3.0f), g_status.mark);
-    RECT ct = { chip.left + Sc(26), chip.top, chip.right - Sc(8), chip.bottom };
-    theme::Print(dc, Font::Caption, theme::Caps(g_status.chip), ct, theme::Text,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE, Sc(1));
-    if (!g_status.alert.empty()) {
-        RECT at = { chip.right + Sc(16), chip.top, g.winMin.left - Sc(100), chip.bottom };
-        theme::Print(dc, Font::Caption, theme::Caps(g_status.alert), at, theme::Danger,
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, Sc(1));
+    // Left: what is being searched for, while a search is open.
+    if (g_searching) {
+        RECT s = g.search;
+        const int cy = (s.top + s.bottom) / 2 + Sc(6);
+        RECT t = { s.left, cy - Sc(14), s.right, cy + Sc(14) };
+        if (g_query.empty()) {
+            theme::Print(dc, Font::Body, L"Type to search the settings", t, theme::TextMute,
+                         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        } else {
+            theme::Print(dc, Font::Body, g_query, t, theme::TextHi,
+                         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+        const int w = (std::min)((int)(s.right - s.left),
+                                 g_query.empty() ? 0 : theme::Measure(dc, Font::Body, g_query));
+        if ((GetTickCount64() / 530) % 2 == 0) {
+            RECT caret = { s.left + w + Sc(1), cy - Sc(9), s.left + w + Sc(1) + (std::max)(1, Sc(1)), cy + Sc(9) };
+            theme::Wash(dc, caret, theme::TextHi, 255);
+        }
     }
 
-    // The breadcrumb, between its bars: "PROWINDOWS / LAYOUT".
-    const std::wstring lead = L"PROWINDOWS / ";
-    const std::wstring here = g_query.empty() ? theme::Caps(g_pages[g_page].caption) : L"SEARCH";
-    const int lw = theme::Measure(dc, Font::Crumb, lead);
-    const int hw = theme::Measure(dc, Font::CrumbBold, here);
-    const RECT& c = g.crumb;
-    RECT lb = { c.left, c.top - Sc(4), c.left + bar, c.bottom + Sc(10) };
-    theme::Wash(dc, lb, theme::Edge, 220);
-    RECT t1 = { c.left + Sc(18), c.top, c.left + Sc(18) + lw + Sc(4), c.bottom };
-    theme::Print(dc, Font::Crumb, lead, t1, RGB(176, 180, 186), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    RECT t2 = { t1.right - Sc(2), c.top, t1.right + hw + Sc(4), c.bottom };
-    theme::Print(dc, Font::CrumbBold, here, t2, theme::Text, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    RECT rb = { t2.right + Sc(16), c.top - Sc(6), t2.right + Sc(16) + bar, c.bottom + Sc(4) };
-    theme::Wash(dc, rb, theme::Edge, 220);
-
-    // Header buttons.
-    theme::ButtonLook bl;
-    bl.hot = (g_hot == HOT_RETILE);
-    bl.pressed = (g_pressed == HOT_RETILE && bl.hot);
-    theme::DrawButton(dc, g.retile, L"Re-arrange", nullptr, bl);
-    bl.hot = (g_hot == HOT_PAUSE);
-    bl.pressed = (g_pressed == HOT_PAUSE && bl.hot);
-    theme::DrawButton(dc, g.pause, g_status.tiling ? L"Pause tiling" : L"Resume tiling", nullptr, bl);
-
-    // The version, and the window's own two buttons.
+    // Right, left of the window's own buttons: a message, the reminder that
+    // something is not applied, or how the tiler is doing.
     {
-        const std::wstring v = std::wstring(L"V") + kVersion;
-        const int w = theme::Measure(dc, Font::Caption, v, Sc(1));
-        RECT ver = { g.winMin.left - Sc(12) - w, g.winMin.top, g.winMin.left, g.winMin.bottom };
-        theme::Print(dc, Font::Caption, v, ver, theme::TextMute, DT_LEFT | DT_VCENTER | DT_SINGLELINE, Sc(1));
+        RECT s = g.status;
+        const int cy = (s.top + s.bottom) / 2 + Sc(6);
+        RECT t = { s.left, cy - Sc(12), s.right, cy + Sc(12) };
+        const ULONGLONG age = GetTickCount64() - g_toastAt;
+        const UINT fmt = DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS;
+        if (!g_toast.empty() && age < 2600) {
+            const float fade = age < 2100 ? 1.0f : 1.0f - (float)(age - 2100) / 500.0f;
+            theme::Print(dc, Font::Small, g_toast, t, theme::Mix(theme::Bg, theme::Good, fade), fmt);
+        } else if (g_dirty) {
+            const int n = ChangeCount();
+            theme::Print(dc, Font::Small,
+                         std::to_wstring(n) + (n == 1 ? L" change not applied yet" : L" changes not applied yet"),
+                         t, theme::TextBody, fmt);
+        } else if (!g_status.alert.empty()) {
+            theme::Print(dc, Font::Small, g_status.alert, t, theme::Danger, fmt);
+        } else {
+            theme::Print(dc, Font::Small, g_status.chip, t, theme::TextMute, fmt);
+        }
     }
-    if (g_hot == HOT_MIN)   theme::Wash(dc, g.winMin, theme::Text, 30);
-    if (g_hot == HOT_CLOSE) theme::Wash(dc, g.winClose, RGB(196, 43, 28), 255);
+
+    // The window's own two buttons: thin strokes, white under the pointer.
     {
+        const int t = (std::max)(1, Sc(1));
+        const bool hm = (g_hot == HOT_MIN), hc = (g_hot == HOT_CLOSE);
         const int mx = (g.winMin.left + g.winMin.right) / 2, my = (g.winMin.top + g.winMin.bottom) / 2;
-        RECT dash = { mx - Sc(6), my, mx + Sc(6), my + (std::max)(1, Sc(1)) };
-        theme::Wash(dc, dash, theme::TextDim, 255);
+        RECT dash = { mx - Sc(6), my, mx + Sc(6), my + t };
+        theme::Wash(dc, dash, hm ? theme::TextHi : theme::TextDim, 255);
         const float cx = (float)(g.winClose.left + g.winClose.right) / 2.0f;
         const float cyy = (float)(g.winClose.top + g.winClose.bottom) / 2.0f;
         const float s = theme::ScaleF(5.5f);
-        HPEN pen = CreatePen(PS_SOLID, (std::max)(1, Sc(1)), g_hot == HOT_CLOSE ? RGB(255, 255, 255) : theme::TextDim);
+        HPEN pen = CreatePen(PS_SOLID, t, hc ? theme::TextHi : theme::TextDim);
         HGDIOBJ old = SelectObject(dc, pen);
         MoveToEx(dc, (int)(cx - s), (int)(cyy - s), nullptr); LineTo(dc, (int)(cx + s) + 1, (int)(cyy + s) + 1);
         MoveToEx(dc, (int)(cx + s), (int)(cyy - s), nullptr); LineTo(dc, (int)(cx - s) - 1, (int)(cyy + s) + 1);
@@ -654,100 +731,106 @@ void PaintHeader(HDC dc) {
     }
 }
 
-void PaintNav(HDC dc) {
+void PaintTabs(HDC dc) {
     const Geometry& g = g_geo;
+    const int W = g.client.right;
+    const int cy = (g.tab[0].top + g.tab[0].bottom) / 2;
+    const int one = (std::max)(1, Sc(1));
 
-    // The search field.
-    {
-        const RECT& s = g.search;
-        const bool lit = !g_query.empty() || g_hot == HOT_SEARCH;
-        theme::Wash(dc, s, RGB(0, 0, 0), 110);
-        theme::Frame(dc, s, lit ? theme::Amber : theme::Line, 255, (std::max)(1, Sc(1)));
-        const int cx = s.left + Sc(18), cy = (s.top + s.bottom) / 2;
-        HPEN pen = CreatePen(PS_SOLID, (std::max)(1, Sc(2)), lit ? theme::Amber : theme::TextDim);
-        HGDIOBJ old = SelectObject(dc, pen);
-        HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-        const int r = Sc(5);
-        Ellipse(dc, cx - r, cy - r - Sc(1), cx + r, cy + r - Sc(1));
-        MoveToEx(dc, cx + r - Sc(1), cy + r - Sc(2), nullptr);
-        LineTo(dc, cx + r + Sc(4), cy + r + Sc(3));
-        SelectObject(dc, oldBrush);
-        SelectObject(dc, old);
-        DeleteObject(pen);
-        RECT tr = { s.left + Sc(34), s.top, s.right - Sc(10), s.bottom };
-        if (g_query.empty()) {
-            theme::Print(dc, Font::Caption, L"SEARCH SETTINGS", tr, theme::TextMute,
-                         DT_LEFT | DT_VCENTER | DT_SINGLELINE, Sc(1));
-        } else {
-            theme::Print(dc, Font::Body, g_query, tr, theme::Text,
-                         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-            const int w = (std::min)((int)(tr.right - tr.left), theme::Measure(dc, Font::Body, g_query));
-            if ((GetTickCount64() / 530) % 2 == 0) {
-                RECT caret = { tr.left + w + Sc(1), cy - Sc(8), tr.left + w + Sc(1) + (std::max)(1, Sc(2)), cy + Sc(8) };
-                theme::Wash(dc, caret, theme::Amber, 255);
-            }
-        }
-    }
+    theme::Keycap(dc, g.keyQ.left, cy, L"Q", 0, false, g_hot == HOT_KEYQ);
+    theme::Keycap(dc, g.keyE.left, cy, L"E", 0, false, g_hot == HOT_KEYE);
 
-    // The categories. The current one sits on a pale bar, as a chosen word
-    // does; with the keyboard on this column it is lit amber instead.
-    for (int i = 0; i < PAGE_COUNT; ++i) {
-        const RECT& r = g.nav[i];
-        const bool current = g_query.empty() && i == g_page;
-        const bool hot = (g_hot == HOT_NAV + i);
-        RECT line = { r.left, r.bottom - 1, r.right, r.bottom };
-        theme::Wash(dc, line, theme::Line, 255);
-        RECT text = { r.left + Sc(16), r.top, r.right - Sc(24), r.bottom };
-        const std::wstring caps = theme::Caps(g_pages[i].caption);
-        if (current) {
-            RECT bar = { r.left, r.top + Sc(3), r.right, r.bottom - Sc(3) };
-            const bool lit = (g_zone == Zone::Nav);
-            if (lit) theme::Glow(dc, bar, theme::AmberGlow, Sc(12), 100);
-            theme::Gradient(dc, bar, lit ? theme::AmberHot : theme::Fill, lit ? theme::Amber : theme::FillLow);
-            theme::Print(dc, Font::Nav, caps, text, lit ? theme::AmberText : theme::FillText,
-                         DT_LEFT | DT_VCENTER | DT_SINGLELINE, Sc(1));
-        } else {
-            if (hot) {
-                RECT box = { r.left, r.top + Sc(3), r.right, r.bottom - Sc(3) };
-                theme::Wash(dc, box, theme::Text, 14);
-            }
-            theme::Print(dc, Font::Nav, caps, text, hot ? theme::Text : theme::TextDim,
-                         DT_LEFT | DT_VCENTER | DT_SINGLELINE, Sc(1));
+    for (int t = 0; t < PAGE_COUNT; ++t) {
+        const RECT& r = g.tab[t];
+        const int page = kTabOrder[t];
+        const bool active = g_query.empty() && page == g_page;
+        const bool hot = (g_hot == HOT_TAB + t);
+        const std::wstring caps = theme::Caps(g_pages[page].caption);
+        // A caption that will not fit the cell at tab size falls back to the row font.
+        const bool narrow = theme::Measure(dc, Font::Tab, caps, Sc(1)) > (r.right - r.left) - Sc(14);
+        const Font tabFont = narrow ? Font::Row : Font::Tab;
+        const int track = narrow ? 0 : Sc(1);
+        {
+            RECT rule = { r.left, cy - Sc(9), r.left + one, cy + Sc(9) };
+            theme::Wash(dc, rule, theme::Rule, 255);
         }
-        if (g_pages[i].issues && g_pages[i].issues() > 0)
-            theme::Diamond(dc, (float)(r.right - Sc(14)), (float)(r.top + r.bottom) / 2.0f,
-                           theme::ScaleF(3.0f), theme::Danger);
+        if (t == PAGE_COUNT - 1) {
+            RECT rule = { r.right - one, cy - Sc(9), r.right, cy + Sc(9) };
+            theme::Wash(dc, rule, theme::Rule, 255);
+        }
+        theme::Print(dc, tabFont, caps, r, active ? theme::TextHi : hot ? theme::Text : theme::TextDim,
+                     DT_CENTER | DT_VCENTER | DT_SINGLELINE, track);
+        const int tw = theme::Measure(dc, tabFont, caps, track);
+        const int mid = (r.left + r.right) / 2;
+        if (active) {
+            // A short soft light under the word, sitting on the hairline.
+            RECT light = { mid - tw / 2 - Sc(12), g.tabRuleY - Sc(8), mid + tw / 2 + Sc(12), g.tabRuleY + Sc(8) };
+            theme::Haze(dc, light, theme::TextHi, 150);
+            RECT bar = { mid - tw / 2, g.tabRuleY - one, mid + tw / 2, g.tabRuleY + one };
+            theme::Wash(dc, bar, theme::TextHi, 255);
+        }
+        if (g_pages[page].issues && g_pages[page].issues() > 0)
+            theme::Diamond(dc, (float)(mid + tw / 2 + Sc(9)), (float)(cy - Sc(6)), theme::ScaleF(3.0f), theme::Danger);
     }
+    RECT hair = { Sc(70), g.tabRuleY, W - Sc(70), g.tabRuleY + one };
+    theme::Wash(dc, hair, theme::Line, 255);
 }
 
-void PaintDescription(HDC dc) {
+void PaintSubTabs(HDC dc) {
     const Geometry& g = g_geo;
-    RECT d = g.desc;
+    if (!g.subRow || g.subCount == 0) return;
+    std::wstring names[kMaxSub];
+    PageNames(names, kMaxSub);
+    const int cy = (g.sub[0].top + g.sub[0].bottom) / 2;
+    theme::Keycap(dc, g.key1.left, cy, L"1", 0, false, g_hot == HOT_SUBKEY1);
+    theme::Keycap(dc, g.key3.left, cy, L"3", 0, false, g_hot == HOT_SUBKEY3);
+    for (int i = 0; i < g.subCount; ++i) {
+        const bool active = (i == PageIndex(CurrentPage())), hot = (g_hot == HOT_SUB + i);
+        theme::Print(dc, Font::Row, names[i], g.sub[i], active ? theme::TextHi : hot ? theme::Text : theme::TextDim,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        if (active) {
+            RECT light = { g.sub[i].left - Sc(6), g.sub[i].bottom - Sc(6), g.sub[i].right + Sc(6), g.sub[i].bottom + Sc(4) };
+            theme::Haze(dc, light, theme::TextHi, 130);
+        }
+    }
+    RECT hair = { g.rows.left, g.subRuleY, g.rows.right, g.subRuleY + (std::max)(1, Sc(1)) };
+    theme::Wash(dc, hair, theme::Line, 255);
+}
+
+// Figures behind the right column's meters: read when a category opens and
+// once a second while the window is visible and in front.
+struct Meters { int memMB = 0, managed = 0, topLevel = 0, index = 0, icons = 0, cost = -1; };
+Meters g_meters;
+
+BOOL CALLBACK CountTop(HWND h, LPARAM lp) {
+    if (IsWindowVisible(h) && !IsIconic(h) && GetWindow(h, GW_OWNER) == nullptr &&
+        !(GetWindowLongW(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) && GetWindowTextLengthW(h) > 0)
+        ++*(int*)lp;
+    return TRUE;
+}
+
+void ReadMeters(bool all) {
+    g_meters.memMB = AppMemoryMB();
+    g_meters.managed = AppManagedWindows();
+    g_meters.index = AppIndexEntries();
+    g_meters.icons = AppIconCacheCount();
+    g_meters.cost = AppSamplerCostTenths();
+    if (all) { int n = 0; EnumWindows(CountTop, (LPARAM)&n); g_meters.topLevel = n; }
+}
+
+// The right column: what the focused row says about itself, then a picture.
+void PaintRight(HDC dc) {
+    const Geometry& g = g_geo;
+    RECT d = g.right;
+    if (d.right - d.left < Sc(120)) return;
     const ui::Row* row = (g_zone == Zone::Nav && g_query.empty()) ? nullptr : g_list.FocusedRow();
     const int page = PageOfRow(row);
 
-    // The preview for the category, if it has one: a miniature of the thing
-    // being set, drawn by the same code that draws the real one.
-    if (g_pages[page].preview) {
-        RECT box = { d.left, d.top, d.right, d.top + Sc(g_pages[page].previewHeight) };
-        theme::Wash(dc, box, RGB(0, 0, 0), 150);
-        theme::Frame(dc, box, theme::Line, 255, 1);
-        RECT inner = box;
-        InflateRect(&inner, -Sc(8), -Sc(8));
-        const int saved = SaveDC(dc);
-        IntersectClipRect(dc, box.left + 1, box.top + 1, box.right - 1, box.bottom - 1);
-        g_pages[page].preview(dc, inner);
-        RestoreDC(dc, saved);
-        d.top = box.bottom + Sc(26);
-    }
-
-    std::wstring title, body;
+    std::wstring body;
     if (!row) {
-        title = theme::Caps(g_pages[g_page].caption);
-        body  = g_pages[g_page].blurb;
+        body = g_pages[g_page].blurb;
     } else {
-        title = row->raw ? row->label : theme::Caps(row->label);
-        body  = row->help;
+        body = row->help;
         if (g_captureRow >= 0)
             body = L"Hold the modifiers you want - Win, Ctrl, Alt, Shift - and press the "
                    L"key. The shortcut is taken the moment the key goes down.\r\n\r\n"
@@ -755,59 +838,119 @@ void PaintDescription(HDC dc) {
                    L"F24 and the media keys, which nobody types with.";
     }
 
+    int y = d.top;
     if (!g_query.empty() && row) {
-        RECT in = { d.left, d.top, d.right, d.top + Sc(18) };
-        theme::Print(dc, Font::Caption, L"IN " + theme::Caps(g_pages[page].caption), in,
-                     theme::TextMute, DT_LEFT | DT_VCENTER | DT_SINGLELINE, Sc(2));
-        d.top += Sc(22);
+        RECT in = { d.left, y, d.right, y + Sc(18) };
+        theme::Print(dc, Font::Small, L"In " + std::wstring(g_pages[page].caption), in, theme::TextMute,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        y += Sc(24);
     }
-
-    RECT tr = { d.left, d.top, d.right, d.top + Sc(64) };
-    const int th = theme::PrintWrapped(dc, row && row->raw ? Font::BodyBold : Font::Title, title,
-                                       tr, 0, true);
-    tr.bottom = tr.top + (std::min)(th, Sc(64));
-    theme::PrintWrapped(dc, row && row->raw ? Font::BodyBold : Font::Title, title, tr, theme::Text);
-    RECT rule = { d.left, tr.bottom + Sc(10), d.left + Sc(44), tr.bottom + Sc(10) + (std::max)(2, Sc(2)) };
-    theme::Wash(dc, rule, theme::Amber, 255);
-
-    int y = rule.bottom + Sc(16);
     if (row && row->modified && row->modified()) {
         RECT m = { d.left, y, d.right, y + Sc(18) };
-        theme::Diamond(dc, (float)d.left + theme::ScaleF(3.0f), (float)(y + Sc(9)), theme::ScaleF(2.6f), theme::Amber);
-        m.left += Sc(14);
-        theme::Print(dc, Font::Caption, L"CHANGED  \x00B7  NOT APPLIED YET", m, theme::Amber,
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE, Sc(1));
-        y += Sc(28);
+        theme::Print(dc, Font::Small, L"Changed, not applied yet", m, theme::TextDim,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        y += Sc(24);
     }
     if (row && !row->Enabled()) {
         RECT m = { d.left, y, d.right, y + Sc(18) };
-        theme::Print(dc, Font::Caption, L"NOT AVAILABLE RIGHT NOW", m, theme::TextMute,
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE, Sc(1));
-        y += Sc(28);
+        theme::Print(dc, Font::Small, L"Not available right now", m, theme::TextMute,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        y += Sc(24);
     }
-    RECT br = { d.left, y, d.right, d.bottom };
-    theme::PrintWrapped(dc, Font::Body, body, br, RGB(190, 195, 202));
+    // What the right column carries below the text: the picture, 16:9, and
+    // the category's meters under it.
+    struct MeterRow { std::wstring label; std::wstring value; float used, other; };
+    std::vector<MeterRow> meters;
+    if (page == PAGE_GENERAL) {
+        meters.push_back({ L"Memory usage", std::to_wstring(g_meters.memMB) + L" / 64 MB",
+                           g_meters.memMB / 64.0f, 0.0f });
+        const int tot = (std::max)(g_meters.managed, g_meters.topLevel);
+        meters.push_back({ L"Windows arranged", std::to_wstring(g_meters.managed) + L" of " + std::to_wstring(tot),
+                           tot ? (float)g_meters.managed / tot : 0.0f,
+                           tot ? (float)(tot - g_meters.managed) / tot : 0.0f });
+    } else if (page == PAGE_SEARCH) {
+        const int cap = (std::max)(1, Saved().searchMaxEntries);
+        meters.push_back({ L"File index", std::to_wstring(g_meters.index) + L" / " + std::to_wstring(cap),
+                           (float)g_meters.index / cap, 0.0f });
+        meters.push_back({ L"Icon cache", std::to_wstring(g_meters.icons) + L" / 512",
+                           g_meters.icons / 512.0f, 0.0f });
+    } else if (page == PAGE_MONITOR) {
+        const int every = (std::max)(100, Saved().monitorInterval);
+        if (g_meters.cost < 0)
+            meters.push_back({ L"Sampling cost", L"not sampling", 0.0f, 0.0f });
+        else
+            meters.push_back({ L"Sampling cost",
+                               std::to_wstring(g_meters.cost / 10) + L"." + std::to_wstring(g_meters.cost % 10) +
+                               L" ms / " + std::to_wstring(every) + L" ms",
+                               g_meters.cost / (every * 10.0f), 0.0f });
+    }
+    const int meterPitch = Sc(32);
+    const int metersH = (int)meters.size() * meterPitch;
+
+    const int w = d.right - d.left;
+    const int pw = (std::min)(w, (int)Sc(468)), ph = pw * 9 / 16;
+    int top = d.top + Sc(186);
+    top = (std::min)(top, (int)d.bottom - metersH - (meters.empty() ? 0 : Sc(14)) - ph);
+    top = (std::max)(top, y + Sc(40));
+
+    // Description, then (Default: ...) under it.
+    const int avail = top - Sc(10) - y;
+    int used = 0;
+    {
+        const int saved = SaveDC(dc);
+        RECT br = { d.left, y, d.right, y + (std::max)(0, avail) };
+        used = (std::min)((int)avail, (int)theme::PrintWrapped(dc, Font::Desc, body, br, theme::TextBody, true));
+        IntersectClipRect(dc, br.left, br.top, br.right, br.bottom);
+        theme::PrintWrapped(dc, Font::Desc, body, br, theme::TextBody);
+        RestoreDC(dc, saved);
+    }
+    if (row && row->fallback && row->kind != ui::Kind::Action && row->kind != ui::Kind::Item &&
+        used + Sc(34) <= avail + Sc(8)) {
+        const std::wstring def = row->fallback();
+        if (!def.empty()) {
+            RECT fr = { d.left, y + used + Sc(8), d.right, y + used + Sc(34) };
+            theme::Print(dc, Font::Desc, L"(Default: " + def + L")", fr, theme::TextBody,
+                         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+    }
+
+    // The picture: the category's preview, or the mark, large and dim.
+    {
+        RECT box = { d.left, top, d.left + pw, top + ph };
+        theme::Wash(dc, box, RGB(0, 0, 0), 255);
+        const int saved = SaveDC(dc);
+        IntersectClipRect(dc, box.left, box.top, box.right, box.bottom);
+        if (g_pages[page].preview) {
+            g_pages[page].preview(dc, box);
+        } else {
+            const int s = (std::min)(Sc(200), ph - Sc(8));
+            const int cx = (box.left + box.right) / 2, cy = (box.top + box.bottom) / 2;
+            RECT mark = { cx - s / 2, cy - s / 2, cx + s / 2, cy + s / 2 };
+            theme::Mark(dc, mark, theme::TextMute, theme::TextMute);
+        }
+        RestoreDC(dc, saved);
+    }
+
+    // The meters: label and figure on the left, the bar on the right.
+    int my = top + ph + Sc(14);
+    for (const MeterRow& m : meters) {
+        const int barW = Sc(180), barH = Sc(10);
+        RECT lr = { d.left, my, d.right - barW - Sc(14), my + meterPitch - Sc(6) };
+        RECT bar = { d.right - barW, my + (lr.bottom - lr.top - barH) / 2, d.right,
+                     my + (lr.bottom - lr.top - barH) / 2 + barH };
+        theme::Print(dc, Font::Desc, m.label, lr, theme::TextBody, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        RECT vr = lr;
+        vr.left += Sc(140);
+        theme::Print(dc, Font::Desc, m.value, vr, theme::TextDim, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        theme::Meter(dc, bar, m.used, m.other);
+        my += meterPitch;
+    }
 }
 
 void PaintFooter(HDC dc) {
     const Geometry& g = g_geo;
-    RECT rule = { Sc(36), g.footerY - Sc(18), g.client.right - Sc(36), g.footerY - Sc(17) };
-    theme::Wash(dc, rule, theme::Line, 255);
 
-    auto button = [&](const RECT& r, int hot, int foot, const wchar_t* label, bool enabled, bool primary) {
-        theme::ButtonLook look;
-        look.enabled = enabled;
-        look.primary = primary;
-        look.hot     = (g_hot == hot);
-        look.pressed = (g_pressed == hot && look.hot);
-        look.focused = (g_zone == Zone::Footer && g_footFocus == foot);
-        theme::DrawButton(dc, r, label, nullptr, look);
-    };
-    button(g.apply, HOT_APPLY, 0, L"Apply", g_dirty, g_dirty);
-    button(g.reset, HOT_RESET, 1, L"Reset to defaults", g_query.empty(), false);
-    button(g.back,  HOT_BACK,  2, L"Close", true, false);
-
-    // Prompts for whatever has focus, from the right.
+    // What the keys do right now: the row's own first, then the window's.
     std::vector<std::pair<std::wstring, std::wstring>> prompts;
     std::vector<UINT> keys;
     if (g_captureRow >= 0) {
@@ -824,53 +967,33 @@ void PaintFooter(HDC dc) {
                 else if (p.first.size() == 2 && p.first[0] == L'F') vk = VK_F1 + (p.first[1] - L'1');
                 keys.push_back(vk);
             }
-        } else if (g_zone == Zone::Nav) {
-            prompts.push_back({ L"\x2191 \x2193", L"Category" });
-            keys.push_back(0);
+        } else {
             prompts.push_back({ L"Enter", L"Select" });
             keys.push_back(VK_RETURN);
         }
         if (g_dirty) { prompts.push_back({ L"Ctrl+S", L"Apply" }); keys.push_back('S' | 0x10000); }
-        prompts.push_back({ L"Esc", g_zone == Zone::Nav ? L"Close" : L"Back" });
+        if (!g_searching) { prompts.push_back({ L"R", L"Reset category" }); keys.push_back('R'); }
+        prompts.push_back({ L"Tab", L"Reset all" });
+        keys.push_back(VK_TAB);
+        prompts.push_back({ L"Esc", (g_zone == Zone::Nav && !g_searching) ? L"Close" : L"Back" });
         keys.push_back(VK_ESCAPE);
     }
-    g_promptHits.clear();
-    const int cy = (g.apply.top + g.apply.bottom) / 2;
-    int x = g.client.right - Sc(36);
-    int promptsLeft = x;
-    const int floor = g.back.right + Sc(24);
-    for (int i = (int)prompts.size() - 1; i >= 0; --i) {
-        const int w = theme::Prompt(dc, 0, cy, prompts[(size_t)i].first, prompts[(size_t)i].second,
-                                    theme::TextDim, true);
-        if (x - w < floor) break;
-        x -= w;
-        const bool hot = (g_hot == HOT_PROMPT + (int)g_promptHits.size());
-        theme::Prompt(dc, x, cy, prompts[(size_t)i].first, prompts[(size_t)i].second,
-                      hot ? theme::Amber : theme::TextDim);
-        g_promptHits.push_back({ RECT{ x, cy - Sc(14), x + w, cy + Sc(14) }, keys[(size_t)i] });
-        promptsLeft = x;
-        x -= Sc(22);
-    }
 
-    // A message, or the reminder that there is something to apply.
-    const ULONGLONG age = GetTickCount64() - g_toastAt;
-    const RECT msg = { g.back.right + Sc(28), g.apply.top, promptsLeft - Sc(24), g.apply.bottom };
-    if (!g_toast.empty() && age < 2600) {
-        const float fade = age < 2100 ? 1.0f : 1.0f - (float)(age - 2100) / 500.0f;
-        theme::Diamond(dc, (float)msg.left + theme::ScaleF(4.0f), (float)(msg.top + msg.bottom) / 2.0f,
-                       theme::ScaleF(2.6f), theme::Mix(theme::Bg, theme::Good, fade));
-        RECT t = { msg.left + Sc(16), msg.top, msg.right, msg.bottom };
-        theme::Print(dc, Font::Caption, theme::Caps(g_toast), t, theme::Mix(theme::Bg, theme::Text, fade),
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, Sc(1));
-    } else if (g_dirty) {
-        const int n = ChangeCount();
-        theme::Diamond(dc, (float)msg.left + theme::ScaleF(4.0f), (float)(msg.top + msg.bottom) / 2.0f,
-                       theme::ScaleF(2.6f), theme::Amber);
-        RECT t = { msg.left + Sc(16), msg.top, msg.right, msg.bottom };
-        std::wstring text = std::to_wstring(n) + (n == 1 ? L" CHANGE" : L" CHANGES") +
-                            L" NOT APPLIED YET";
-        theme::Print(dc, Font::Caption, text, t, theme::Amber,
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, Sc(1));
+    const int cy = g.footerCy;
+    const int gap = Sc(28);
+    int total = 0;
+    std::vector<int> widths;
+    for (const auto& p : prompts) {
+        widths.push_back(theme::Prompt(dc, 0, cy, p.first, p.second, theme::Text, true));
+        total += widths.back() + (total ? gap : 0);
+    }
+    g_promptHits.clear();
+    int x = (std::max)(Sc(20), (int)(g.client.right - total) / 2);
+    for (size_t i = 0; i < prompts.size(); ++i) {
+        const bool hot = (g_hot == HOT_PROMPT + (int)g_promptHits.size());
+        theme::Prompt(dc, x, cy, prompts[i].first, prompts[i].second, hot ? theme::TextHi : theme::Text);
+        g_promptHits.push_back({ RECT{ x, cy - Sc(14), x + widths[i], cy + Sc(14) }, keys[i] });
+        x += widths[i] + gap;
     }
 }
 
@@ -878,23 +1001,16 @@ void PaintAll(HDC dc) {
     const Geometry& g = g_geo;
     theme::SetDpi(DpiForWindow(g_wnd));
 
-    // The backdrop is rendered at the size of the monitor rather than of the
-    // window, so resizing shows more or less of one picture instead of
-    // rendering a new one for every frame of the drag.
-    SIZE canvas = { g.client.right, g.client.bottom };
-    MONITORINFO mi = { sizeof(mi) };
-    if (GetMonitorInfoW(MonitorFromWindow(g_wnd, MONITOR_DEFAULTTONEAREST), &mi)) {
-        canvas.cx = (std::max)(canvas.cx, (LONG)(mi.rcMonitor.right - mi.rcMonitor.left));
-        canvas.cy = (std::max)(canvas.cy, (LONG)(mi.rcMonitor.bottom - mi.rcMonitor.top));
+    // The screen is flat black.
+    {
+        HBRUSH black = CreateSolidBrush(theme::Bg);
+        FillRect(dc, &g.client, black);
+        DeleteObject(black);
     }
-    theme::PaintBackdrop(dc, g.client, canvas);
 
     PaintHeader(dc);
-    PaintNav(dc);
-
-    // The panel.
-    theme::Wash(dc, g.frame, theme::Panel, 140);
-    theme::PanelFrame(dc, g.frame, theme::Edge, 235, theme::ScaleF(2.0f), theme::PanelNotch());
+    PaintTabs(dc);
+    PaintSubTabs(dc);
 
     // After a category change the rows fade in and settle from a little
     // below, as the game's do.
@@ -906,8 +1022,7 @@ void PaintAll(HDC dc) {
     } else {
         // Draw the rows onto a copy of what is behind them and blend the copy
         // in, so they fade without anything under them fading too.
-        const RECT& f = g.frame;
-        RECT area = { f.left - Sc(30), f.top, g.track.right + Sc(4), f.bottom };
+        RECT area = { g.rows.left - Sc(30), g.rows.top, g.track.right + Sc(4), g.rows.bottom };
         const int w = area.right - area.left, h = area.bottom - area.top;
         HDC mem = CreateCompatibleDC(dc);
         HBITMAP bmp = mem ? CreateCompatibleBitmap(dc, w, h) : nullptr;
@@ -925,7 +1040,7 @@ void PaintAll(HDC dc) {
         if (mem) DeleteDC(mem);
     }
 
-    PaintDescription(dc);
+    PaintRight(dc);
     PaintFooter(dc);
 
     // Behind a modal screen the window steps back.
@@ -957,6 +1072,8 @@ void ShowPage(int index, bool focusList) {
     const bool changed = (index != g_page) || !g_query.empty();
     g_page = index;
     g_query.clear();
+    g_searching = false;
+    if (changed) g_pageId.clear();
     if (changed) {
         BuildRows(false);
         g_pageShownAt = GetTickCount64();
@@ -1069,20 +1186,41 @@ void Close() {
     SettingsHide();
 }
 
+// Everything in every category back to how it shipped; asks first.
+void ResetAll() {
+    if (!ui::Confirm(g_wnd, L"Reset everything?",
+                     L"Every setting in every category goes back to how it shipped. "
+                     L"Nothing is saved until you apply.",
+                     L"Reset all", L"Cancel"))
+        return;
+    for (int p = 0; p < PAGE_COUNT; ++p) g_pages[p].reset();
+    BuildRows(true);
+    UpdateDirty();
+    Toast(L"Everything reset to defaults - apply to keep it");
+}
+
+// Steps the tab bar, wrapping at the ends; the keyboard stays where it was.
+void StepTab(int delta) {
+    const int t = ((TabOf(g_page) + delta) % PAGE_COUNT + PAGE_COUNT) % PAGE_COUNT;
+    ShowPage(kTabOrder[t], g_zone == Zone::List);
+}
+
+// Steps the pages of the category (PLAN-1.6 2.6); stops at the ends.
+void StepSub(int delta) {
+    if (!HasPages() || !g_query.empty()) return;
+    const int n = (int)g_pageTabs.size();
+    const int i = (std::max)(0, (std::min)(n - 1, PageIndex(CurrentPage()) + delta));
+    SetPage(g_pageTabs[(size_t)i].id);
+}
+
 void PressButton(int hot) {
     switch (hot) {
-        case HOT_MIN:    ShowWindow(g_wnd, SW_MINIMIZE); break;
-        case HOT_CLOSE:  Close(); break;
-        case HOT_RETILE: AppRetileNow(); SettingsRefreshStatus(); Toast(L"Windows re-arranged"); break;
-        case HOT_PAUSE:
-            AppWm().ActToggleTiling();
-            AppUpdateTray();
-            SettingsRefreshStatus();
-            DoLayout();
-            break;
-        case HOT_APPLY:  ApplyNow(); break;
-        case HOT_RESET:  ResetPage(); break;
-        case HOT_BACK:   Close(); break;
+        case HOT_MIN:     ShowWindow(g_wnd, SW_MINIMIZE); break;
+        case HOT_CLOSE:   Close(); break;
+        case HOT_KEYQ:    StepTab(-1); break;
+        case HOT_KEYE:    StepTab(+1); break;
+        case HOT_SUBKEY1: StepSub(-1); break;
+        case HOT_SUBKEY3: StepSub(+1); break;
         default: break;
     }
     Invalidate();
@@ -1197,14 +1335,16 @@ int HitTest(POINT pt) {
     const Geometry& g = g_geo;
     if (PtInRect(&g.winClose, pt)) return HOT_CLOSE;
     if (PtInRect(&g.winMin, pt))   return HOT_MIN;
-    if (PtInRect(&g.retile, pt))   return HOT_RETILE;
-    if (PtInRect(&g.pause, pt))    return HOT_PAUSE;
-    if (PtInRect(&g.search, pt))   return HOT_SEARCH;
-    for (int i = 0; i < PAGE_COUNT; ++i)
-        if (PtInRect(&g.nav[i], pt)) return HOT_NAV + i;
-    if (PtInRect(&g.apply, pt)) return HOT_APPLY;
-    if (PtInRect(&g.reset, pt)) return HOT_RESET;
-    if (PtInRect(&g.back, pt))  return HOT_BACK;
+    if (PtInRect(&g.keyQ, pt))     return HOT_KEYQ;
+    if (PtInRect(&g.keyE, pt))     return HOT_KEYE;
+    for (int t = 0; t < PAGE_COUNT; ++t)
+        if (PtInRect(&g.tab[t], pt)) return HOT_TAB + t;
+    if (g.subRow) {
+        if (PtInRect(&g.key1, pt)) return HOT_SUBKEY1;
+        if (PtInRect(&g.key3, pt)) return HOT_SUBKEY3;
+        for (int i = 0; i < g.subCount; ++i)
+            if (PtInRect(&g.sub[i], pt)) return HOT_SUB + i;
+    }
     for (size_t i = 0; i < g_promptHits.size(); ++i)
         if (PtInRect(&g_promptHits[i].first, pt)) return HOT_PROMPT + (int)i;
     return HOT_NONE;
@@ -1228,6 +1368,19 @@ void SearchChanged() {
     Invalidate();
 }
 
+void StartSearch() {
+    g_searching = true;
+    Invalidate();
+}
+
+void StopSearch() {
+    const bool had = !g_query.empty();
+    g_searching = false;
+    g_query.clear();
+    if (had) BuildRows(false);
+    SetZone(Zone::Nav);
+}
+
 void KeyDown(UINT vk) {
     const bool ctrl  = GetKeyState(VK_CONTROL) < 0;
     const bool shift = GetKeyState(VK_SHIFT) < 0;
@@ -1247,43 +1400,47 @@ void KeyDown(UINT vk) {
     }
 
     if (ctrl && (vk == VK_TAB || vk == VK_NEXT || vk == VK_PRIOR)) {
-        const int delta = (vk == VK_PRIOR || (vk == VK_TAB && shift)) ? -1 : +1;
-        ShowPage(((g_page + delta) % PAGE_COUNT + PAGE_COUNT) % PAGE_COUNT, false);
+        StepTab((vk == VK_PRIOR || (vk == VK_TAB && shift)) ? -1 : +1);
         return;
     }
     if (ctrl && vk == 'S') { ApplyNow(); return; }
-    if (ctrl && vk == 'F') { SetZone(Zone::Nav); return; }
+    if (ctrl && vk == 'F') { StartSearch(); return; }
 
     if (vk == VK_ESCAPE) {
-        if (!g_query.empty()) { g_query.clear(); BuildRows(false); SetZone(Zone::Nav); return; }
-        if (g_zone == Zone::List || g_zone == Zone::Footer) { SetZone(Zone::Nav); return; }
+        if (g_searching) { StopSearch(); return; }
+        if (g_zone == Zone::List) { SetZone(Zone::Nav); return; }
         Close();
         return;
     }
-    if (vk == VK_TAB) {
-        const Zone next = shift ? (g_zone == Zone::Nav ? Zone::Footer : g_zone == Zone::List ? Zone::Nav : Zone::List)
-                                : (g_zone == Zone::Nav ? Zone::List : g_zone == Zone::List ? Zone::Footer : Zone::Nav);
-        SetZone(next);
+    if (vk == VK_TAB) { ResetAll(); return; }
+    if (vk == VK_BACK && g_searching) {
+        if (g_query.empty()) { StopSearch(); return; }
+        g_query.pop_back();
+        SearchChanged();
         return;
     }
-    if (vk == VK_BACK && !g_query.empty()) {
-        g_query.pop_back();
-        if (g_query.empty()) { BuildRows(false); SetZone(Zone::Nav); }
-        else SearchChanged();
-        return;
+
+    // Bare letters step and reset only when they are not being typed into a search.
+    if (!ctrl && !g_searching) {
+        switch (vk) {
+            case 'Q': StepTab(-1); return;
+            case 'E': StepTab(+1); return;
+            case 'R': ResetPage(); return;
+            case '1': StepSub(-1); return;
+            case '3': StepSub(+1); return;
+            default: break;
+        }
     }
 
     switch (g_zone) {
         case Zone::Nav:
-            if (vk == VK_UP || vk == VK_DOWN) {
-                const int d = (vk == VK_UP) ? -1 : +1;
-                ShowPage(((g_page + d) % PAGE_COUNT + PAGE_COUNT) % PAGE_COUNT, false);
+            if (vk == VK_LEFT || vk == VK_RIGHT) {
+                StepTab(vk == VK_LEFT ? -1 : +1);
             } else if (vk == VK_HOME) {
-                ShowPage(0, false);
+                ShowPage(kTabOrder[0], false);
             } else if (vk == VK_END) {
-                ShowPage(PAGE_COUNT - 1, false);
-            } else if (vk == VK_RIGHT || vk == VK_RETURN || vk == VK_SPACE) {
-                if (!g_query.empty()) { SetZone(Zone::List); break; }
+                ShowPage(kTabOrder[PAGE_COUNT - 1], false);
+            } else if (vk == VK_DOWN || vk == VK_RETURN || vk == VK_SPACE) {
                 SetZone(Zone::List);
                 if (!g_list.FocusedRow()) g_list.FocusFirst();
             }
@@ -1296,13 +1453,6 @@ void KeyDown(UINT vk) {
                 SetZone(Zone::Nav);
             }
             break;
-        case Zone::Footer:
-            if (vk == VK_LEFT)  { g_footFocus = (std::max)(0, g_footFocus - 1); Invalidate(); }
-            if (vk == VK_RIGHT) { g_footFocus = (std::min)(2, g_footFocus + 1); Invalidate(); }
-            if (vk == VK_UP)    SetZone(Zone::List);
-            if (vk == VK_RETURN || vk == VK_SPACE)
-                PressButton(g_footFocus == 0 ? HOT_APPLY : g_footFocus == 1 ? HOT_RESET : HOT_BACK);
-            break;
     }
 }
 
@@ -1310,8 +1460,13 @@ void Char(wchar_t ch) {
     if (g_captureRow >= 0) return;
     if (ch < 32 || ch == 127) return;
     if (GetKeyState(VK_CONTROL) < 0 && GetKeyState(VK_MENU) >= 0) return;
-    // Typing anywhere starts a search; a space only continues one, since on
-    // its own it presses the row that has focus.
+    // Letters are the game's own keys now (Q, E, R, 1, 3); a search is opened
+    // with / or Ctrl+F and only then does typing go into it.
+    if (!g_searching) {
+        if (ch == L'/') StartSearch();
+        return;
+    }
+    // A space only continues a query, since on its own it presses the row.
     if (ch == L' ' && g_query.empty()) return;
     if (g_query.size() >= 60) return;
     g_query += ch;
@@ -1353,12 +1508,16 @@ void MouseDown(POINT pt) {
     }
     SetCapture(g_wnd);
     const int hot = HitTest(pt);
-    if (hot >= HOT_NAV && hot < HOT_NAV + PAGE_COUNT) {
+    if (hot >= HOT_TAB && hot < HOT_TAB + PAGE_COUNT) {
         SetZone(Zone::Nav);
-        ShowPage(hot - HOT_NAV, false);
+        ShowPage(kTabOrder[hot - HOT_TAB], false);
         return;
     }
-    if (hot == HOT_SEARCH) { SetZone(Zone::Nav); return; }
+    if (hot >= HOT_SUB && hot < HOT_SUB + kMaxSub) {
+        const int i = hot - HOT_SUB;
+        if (i < (int)g_pageTabs.size()) SetPage(g_pageTabs[(size_t)i].id);
+        return;
+    }
     if (hot != HOT_NONE) { g_pressed = hot; Invalidate(); return; }
     if (g_list.MouseDown(pt)) {
         SetZone(Zone::List);
@@ -1422,8 +1581,8 @@ void PlaceInitially() {
     const UINT dpi = DpiForWindow(g_wnd);
     const RECT& wa = mi.rcWork;
     const int waW = wa.right - wa.left, waH = wa.bottom - wa.top;
-    const int w = (std::min)(MulDiv(1220, (int)dpi, 96), waW * 96 / 100);
-    const int h = (std::min)(MulDiv(820, (int)dpi, 96), waH * 94 / 100);
+    const int w = (std::min)(MulDiv(1280, (int)dpi, 96), waW * 96 / 100);
+    const int h = (std::min)(MulDiv(720, (int)dpi, 96), waH * 94 / 100);
     SetWindowPos(g_wnd, nullptr, wa.left + (waW - w) / 2, wa.top + (waH - h) / 2, w, h,
                  SWP_NOZORDER | SWP_NOACTIVATE);
 }
@@ -1504,7 +1663,14 @@ LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == kTimerStatus) {
                 if (IsWindowVisible(wnd)) SettingsRefreshStatus();
                 // The search caret blinks.
-                if (!g_query.empty()) InvalidateRect(wnd, &g_geo.search, FALSE);
+                if (g_searching) InvalidateRect(wnd, &g_geo.search, FALSE);
+                return 0;
+            }
+            if (wp == kTimerMeters) {
+                if (IsWindowVisible(wnd) && GetForegroundWindow() == wnd) {
+                    ReadMeters(true);
+                    InvalidateRect(wnd, &g_geo.right, FALSE);
+                }
                 return 0;
             }
             if (wp == kTimerAnim) {
@@ -1624,6 +1790,12 @@ void Register(HINSTANCE inst) {
 
 } // namespace
 
+RECT SettingsPromptRect(UINT key) {
+    for (const auto& p : g_promptHits)
+        if (p.second == key) return p.first;
+    return RECT{};
+}
+
 // ================================================================ for the pages
 HWND SettingsHwnd() { return g_wnd; }
 
@@ -1678,6 +1850,9 @@ HWND SettingsOpen(HINSTANCE inst) {
         LoadEdit();
         ReadStatus(&g_status);
         g_query.clear();
+        g_searching = false;
+        g_pageId.clear();
+        g_pageTabs.clear();
         g_zone = Zone::Nav;
         GetCursorPos(&g_mouseAnchor);
         g_mouseIdle = true;
@@ -1703,6 +1878,8 @@ HWND SettingsOpen(HINSTANCE inst) {
         BuildRows(false);
         g_list.SetActive(false);
         SetTimer(wnd, kTimerStatus, 700, nullptr);
+        SetTimer(wnd, kTimerMeters, 1000, nullptr);
+        ReadMeters(true);
         g_pageShownAt = GetTickCount64();
         Animate();
     } else {
@@ -1731,7 +1908,6 @@ void SettingsHide() {
     if (!g_wnd) return;
     ShowWindow(g_wnd, SW_HIDE);
     SettingsDestroy();
-    theme::TrimSurfaces();
     AppScheduleTrim(5 * 1000);
     if (!g_toldAboutTray) {
         g_toldAboutTray = true;

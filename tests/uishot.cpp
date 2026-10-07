@@ -65,6 +65,11 @@ bool AppAutostartEnabled()    { return false; }
 void AppSetAutostart(bool)    {}
 void AppGameModeChanged(bool) {}
 int  AppHotkeyConflicts()     { return 0; }
+int  AppMemoryMB()            { return 38; }
+int  AppManagedWindows()      { return 7; }
+int  AppIndexEntries()        { return 12400; }
+int  AppIconCacheCount()      { return 140; }
+int  AppSamplerCostTenths()   { return 12; }
 void AppOpenConfigFolder()    {}
 void AppWriteDiagnostics()    {}
 void AppReloadFromDisk()      {}
@@ -161,19 +166,35 @@ void Check(bool ok, const wchar_t* what) {
     if (!ok) ++g_failures;
 }
 
-// How much of a region is lit amber: the share of its pixels that are
-// strongly orange.
-double AmberShare(HWND wnd, RECT r) {
+// The focused row is a brushed-metal bar (PLAN-1.6 2.5); nothing else on the
+// screen is that bright. Reads a column of pixels just inside the list's left
+// edge, where no label or control is drawn, and returns the length in pixels
+// of the longest run with luma >= 30 and how many such runs there are. The
+// section plates (luma <= 30 at their very top) and the 1 px hairlines
+// (luma 40) are far too short to count as a run.
+struct MetalBar { int longest = 0; int runs = 0; int minLumaInRun = 255; };
+
+MetalBar FindMetalBar(HWND wnd, const RECT& client) {
+    const int dpi = (int)GetDpiForWindow(wnd);
+    const int x = MulDiv(70 + 8, dpi, 96);
+    const int y0 = MulDiv(118, dpi, 96), y1 = client.bottom - MulDiv(64, dpi, 96);
+    const int minRun = MulDiv(20, dpi, 96);
+    MetalBar out;
     HDC dc = GetDC(wnd);
-    int amber = 0, all = 0;
-    for (int y = r.top; y < r.bottom; y += 2)
-        for (int x = r.left; x < r.right; x += 2) {
-            const COLORREF c = GetPixel(dc, x, y);
-            ++all;
-            if (GetRValue(c) > 200 && GetGValue(c) > 110 && GetGValue(c) < 220 && GetBValue(c) < 90) ++amber;
-        }
+    int run = 0, runMin = 255;
+    auto end = [&]() {
+        if (run >= minRun) { ++out.runs; if (run > out.longest) { out.longest = run; out.minLumaInRun = runMin; } }
+        run = 0; runMin = 255;
+    };
+    for (int y = y0; y < y1; ++y) {
+        const COLORREF c = GetPixel(dc, x, y);
+        const int luma = (GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114) / 1000;
+        if (luma >= 30) { ++run; runMin = min(runMin, luma); }
+        else end();
+    }
+    end();
     ReleaseDC(wnd, dc);
-    return all ? (double)amber / all : 0.0;
+    return out;
 }
 
 // A modal screen takes over the message loop; this timer photographs it and
@@ -243,11 +264,11 @@ int wmain(int argc, wchar_t** argv) {
     SettingsOpenTab(PAGE_LAYOUT);
     Pump(300);
     Key(wnd, VK_ESCAPE);                      // back to the column
-    Key(wnd, VK_DOWN);                        // Layout -> Behaviour
+    Key(wnd, 'E');                            // Layout -> Behaviour
     Pump(300);
     Capture(wnd, L"ui-nav-focus.png");
     Hold(VK_CONTROL, true);
-    Key(wnd, VK_TAB);                         // Behaviour -> Shortcuts
+    Key(wnd, VK_TAB);                         // Behaviour -> General (the tab bar's order)
     Hold(VK_CONTROL, false);
     Pump(300);
     Capture(wnd, L"ui-ctrl-tab.png");
@@ -257,13 +278,15 @@ int wmain(int argc, wchar_t** argv) {
     Pump(300);
     Key(wnd, VK_ESCAPE);                      // the keyboard back on the categories
     Pump(300);
-    const RECT middle = { client.right / 4, 150, client.right * 3 / 4, client.bottom - 120 };
-    const double idle = AmberShare(wnd, middle);
-    Key(wnd, VK_RIGHT);                       // into the list: its first row lights
+    const MetalBar idle = FindMetalBar(wnd, client);
+    Key(wnd, VK_DOWN);                        // into the list: its first row lights
     Key(wnd, VK_DOWN, 1);                     // the second row
     Pump(300);
-    const double lit = AmberShare(wnd, middle);
-    Check(idle < 0.002 && lit > 0.01, L"only the row with the keyboard is lit amber");
+    const MetalBar lit = FindMetalBar(wnd, client);
+    Check(idle.runs == 0, L"no row is a metal bar while the keyboard is on the tabs");
+    Check(lit.runs == 1 && lit.longest >= MulDiv(30, (int)GetDpiForWindow(wnd), 96) &&
+          lit.minLumaInRun >= 30,
+          L"only the focused row is a metal bar (luma >= 30, the rest dark)");
     Key(wnd, VK_RIGHT);                       // Pointer follows the focus -> Off (it is off) ...
     Key(wnd, VK_LEFT);                        // ... -> On
     Pump(300);
@@ -325,7 +348,7 @@ int wmain(int argc, wchar_t** argv) {
     Pump(200);
 
     // ---- search across every category
-    Type(wnd, L"gap");
+    Type(wnd, L"/gap");                       // / opens the search
     Pump(350);
     Capture(wnd, L"ui-search-results.png");
     Key(wnd, VK_ESCAPE);
@@ -336,9 +359,7 @@ int wmain(int argc, wchar_t** argv) {
     Pump(250);
     g_modalShot = L"ui-modal.png";
     SetTimer(nullptr, 0, 700, ShootModal);
-    Key(wnd, VK_TAB);                         // the list -> the footer
-    Key(wnd, VK_RIGHT);                       // Apply -> Reset to defaults
-    Key(wnd, VK_RETURN);                      // runs the modal loop until the timer answers it
+    Key(wnd, 'R');                            // reset this category: asks first, and runs the modal loop until the timer answers it
     Pump(300);
 
     // ---- the smallest the window goes

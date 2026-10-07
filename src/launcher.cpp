@@ -42,7 +42,7 @@ constexpr int kPad      = 14;
 constexpr int kIconPx   = 28;      // the shell icon beside each result
 // The key hints along the bottom. Present only when there is a list to act on,
 // so an empty bar stays an empty bar.
-constexpr int kFooterH  = 26;
+constexpr int kFooterH  = 34;
 
 HINSTANCE g_inst = nullptr;
 Config*   g_cfg  = nullptr;
@@ -402,30 +402,21 @@ bool WantsIcon(HitKind kind) {
            kind == HitKind::File || kind == HitKind::Folder;
 }
 
-// The size of the bar at its tallest. The backdrop is rendered at this size
-// and the bar shows the top of it, so the picture stays put as rows come and
-// go instead of being re-rendered, and re-framed, on every keystroke.
-SIZE CanvasSize() {
-    SIZE s;
-    s.cx = (int)(kWidth * g_scale);
-    s.cy = (int)((kInputH + kPad) * g_scale) + kMaxRows * (int)(kRowH * g_scale) +
-           (int)(kFooterH * g_scale);
-    return s;
-}
-
 // ------------------------------------------------------------------ painting
 // Drawn the way the settings window is: black, a hairline frame, a hairline
-// between every row, the selected row lit amber - frame, glow and name - and
-// the keys along the bottom as the game's button prompts.
+// between every row, the selected row on the brushed-metal bar with the
+// open-in mark at its right, and the keys along the bottom as prompts - the
+// same ones the settings window has, centred and clickable.
+enum PromptId : int { P_SELECT, P_OPEN, P_ADMIN, P_CLOSE };
+std::vector<std::pair<RECT, int>> g_promptHits;   // where each prompt is, and what it does
+int g_hotPrompt = -1;
+
 void PaintInto(HDC dc, const SIZE& size) {
     using theme::Font;
     const float s = g_scale;
     RECT all = { 0, 0, size.cx, size.cy };
-    theme::PaintBackdrop(dc, all, CanvasSize());
-    theme::Frame(dc, all, theme::Edge, 150, (std::max)(1, (int)s));
-    // A short amber rule at the top left: where the eye starts.
-    RECT mark = { (int)(18 * s), 0, (int)(74 * s), (std::max)(2, (int)(2 * s)) };
-    theme::Wash(dc, mark, theme::Amber, 255);
+    theme::Wash(dc, all, theme::Bg, 255);
+    theme::Frame(dc, all, theme::Rule, 255, (std::max)(1, (int)s));
 
     const int pad    = (int)(kPad * s);
     const int inputH = (int)(kInputH * s);
@@ -437,7 +428,7 @@ void PaintInto(HDC dc, const SIZE& size) {
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         const float cx = (float)pad + 13.0f * s, cy = (float)inputH / 2.0f - 1.5f * s;
         const float r = 6.5f * s;
-        const COLORREF ink = typing ? theme::Amber : theme::TextDim;
+        const COLORREF ink = typing ? theme::TextHi : theme::TextDim;
         Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(ink), GetGValue(ink), GetBValue(ink)), 1.7f * s);
         pen.SetStartCap(Gdiplus::LineCapRound);
         pen.SetEndCap(Gdiplus::LineCapRound);
@@ -446,22 +437,22 @@ void PaintInto(HDC dc, const SIZE& size) {
     }
     RECT text = { pad + (int)(34 * s), 0, size.cx - pad, inputH };
     if (!typing) {
-        theme::Print(dc, Font::Nav, L"SEARCH APPS, FILES AND SETTINGS", text, theme::TextDim,
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE, (int)(2 * s));
+        theme::Print(dc, Font::Query, L"Search apps, files and settings", text, theme::TextMute,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         if (g_caretOn) {
             RECT caret = { text.left - (int)(6 * s), inputH / 2 - (int)(10 * s),
                            text.left - (int)(6 * s) + (std::max)(2, (int)(2 * s)), inputH / 2 + (int)(10 * s) };
-            theme::Wash(dc, caret, theme::Amber, 255);
+            theme::Wash(dc, caret, theme::TextHi, 255);
         }
     } else {
-        theme::Print(dc, Font::Query, g_query, text, theme::Text,
+        theme::Print(dc, Font::Query, g_query, text, theme::TextHi,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         if (g_caretOn) {
             const int w = theme::Measure(dc, Font::Query, g_query);
             const int caretX = (std::min)((int)text.right, (int)text.left + w + (int)(2 * s));
             RECT caret = { caretX, inputH / 2 - (int)(11 * s),
                            caretX + (std::max)(2, (int)(2 * s)), inputH / 2 + (int)(11 * s) };
-            theme::Wash(dc, caret, theme::Amber, 255);
+            theme::Wash(dc, caret, theme::TextHi, 255);
         }
     }
 
@@ -510,8 +501,8 @@ void PaintInto(HDC dc, const SIZE& size) {
         if (icon) {
             AppIconDraw(dc, icon, badge);
         } else {
-            theme::Wash(dc, badge, RGB(24, 26, 30), 255);
-            theme::Frame(dc, badge, active ? theme::Amber : theme::Line, 255, 1);
+            theme::Gradient(dc, badge, theme::Plate, theme::PlateLow);
+            theme::Frame(dc, badge, active ? theme::TextDim : theme::Line, 255, 1);
             // A symbol for the sources that are not apps, the initial for the
             // ones that are. All BMP characters.
             wchar_t glyph[2] = { L'?', 0 };
@@ -525,29 +516,38 @@ void PaintInto(HDC dc, const SIZE& size) {
                     glyph[0] = name.empty() ? L'?' : (wchar_t)towupper(name[0]);
                     break;
             }
-            theme::Print(dc, Font::Value, glyph, badge, active ? theme::Amber : theme::TextDim,
+            theme::Print(dc, Font::Row, glyph, badge, active ? theme::TextHi : theme::TextDim,
                          DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
 
-        // What kind of thing it is, on the right - only where that says
+        // The open-in mark on the focused result, at the right edge.
+        int right = row.right - (int)(14 * s);
+        if (active) {
+            const int iw = (int)(18 * s);
+            RECT mark = { right - iw, row.top, right, row.bottom };
+            theme::Look look;
+            look.lit = 1.0f;
+            theme::DrawAction(dc, mark, L"", look);
+            right -= iw + (int)(10 * s);
+        }
+
+        // What kind of thing it is, to the left of that - only where that says
         // something the icon does not.
         const wchar_t* tag = KindTag(hit.kind);
-        RECT tagBox = { row.right - (int)(14 * s), row.top, row.right - (int)(14 * s), row.bottom };
+        RECT tagBox = { right, row.top, right, row.bottom };
         if (tag) {
-            const std::wstring caps = theme::Caps(tag);
-            const int track = (int)(2 * s);
-            tagBox.left -= theme::Measure(dc, Font::Caption, caps, track) + (int)(4 * s);
-            theme::Print(dc, Font::Caption, caps, tagBox, active ? theme::Amber : theme::TextMute,
-                         DT_RIGHT | DT_VCENTER | DT_SINGLELINE, track);
+            tagBox.left -= theme::Measure(dc, Font::Small, tag) + (int)(4 * s);
+            theme::Print(dc, Font::Small, tag, tagBox, active ? theme::Text : theme::TextMute,
+                         DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
         }
 
         const int labelLeft  = badge.right + (int)(14 * s);
         const int labelRight = tagBox.left - (int)(12 * s);
         if (labelRight <= labelLeft) continue;
-        const COLORREF nameInk = active ? theme::Amber : theme::Text;
+        const COLORREF nameInk = active ? theme::TextHi : theme::Text;
         if (hit.detail.empty()) {
             RECT label = { labelLeft, row.top, labelRight, row.bottom };
-            theme::Print(dc, Font::BodyBold, name, label, nameInk,
+            theme::Print(dc, Font::Row, name, label, nameInk,
                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         } else {
             // Two lines: the name, and under it where it lives or what Enter
@@ -555,38 +555,44 @@ void PaintInto(HDC dc, const SIZE& size) {
             // the part that tells three "notes.txt" apart.
             const int mid = (row.top + row.bottom) / 2;
             RECT label = { labelLeft, row.top + (int)(3 * s), labelRight, mid + (int)(1 * s) };
-            theme::Print(dc, Font::BodyBold, name, label, nameInk,
+            theme::Print(dc, Font::Row, name, label, nameInk,
                          DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS);
             RECT sub = { labelLeft, mid + (int)(1 * s), labelRight, row.bottom - (int)(2 * s) };
             theme::Print(dc, Font::Small, hit.detail, sub,
-                         active ? theme::AmberDeep : theme::TextDim,
+                         active ? theme::Text : theme::TextDim,
                          DT_LEFT | DT_TOP | DT_SINGLELINE | DT_PATH_ELLIPSIS);
         }
     }
     RestoreDC(dc, saved);
 
     // ---- the prompts ----
-    // Every one of these was already bound and none of them was discoverable.
-    // The bar is the one place somebody is looking when they would want to
-    // know, so they are shown the way the game shows its button prompts.
+    // Every one of these is bound, and each can be clicked as well as pressed.
+    g_promptHits.clear();
     if (Rows() > 0) {
         RECT line = { pad, footerTop, size.cx - pad, footerTop + 1 };
         theme::Wash(dc, line, theme::Line, 255);
-        struct PromptText { const wchar_t* key; const wchar_t* word; };
+        struct PromptText { const wchar_t* key; const wchar_t* word; int id; };
         static const PromptText kPrompts[] = {
-            { L"\x2191 \x2193",       L"Select" },
-            { L"Enter",               L"Open" },
-            { L"Ctrl+Shift+Enter",    L"As administrator" },
-            { L"Esc",                 L"Close" },
+            { L"\x2191 \x2193",       L"Select",           P_SELECT },
+            { L"Enter",               L"Open",             P_OPEN },
+            { L"Ctrl+Shift+Enter",    L"As administrator", P_ADMIN },
+            { L"Esc",                 L"Close",            P_CLOSE },
         };
         const int cy = footerTop + (size.cy - footerTop) / 2;
-        int x = size.cx - pad;
-        for (int i = (int)ARRAYSIZE(kPrompts) - 1; i >= 0; --i) {
-            const int w = theme::Prompt(dc, 0, cy, kPrompts[i].key, kPrompts[i].word, theme::TextDim, true);
-            x -= w;
-            if (x < pad) break;
-            theme::Prompt(dc, x, cy, kPrompts[i].key, kPrompts[i].word, theme::TextDim);
-            x -= (int)(18 * s);
+        const int gap = (int)(24 * s);
+        int widths[ARRAYSIZE(kPrompts)];
+        int total = 0;
+        for (int i = 0; i < (int)ARRAYSIZE(kPrompts); ++i) {
+            widths[i] = theme::Prompt(dc, 0, cy, kPrompts[i].key, kPrompts[i].word, theme::TextDim, true);
+            total += widths[i] + (i ? gap : 0);
+        }
+        int x = (std::max)(pad, (int)(size.cx - total) / 2);
+        for (int i = 0; i < (int)ARRAYSIZE(kPrompts); ++i) {
+            const bool hot = (g_hotPrompt == i);
+            theme::Prompt(dc, x, cy, kPrompts[i].key, kPrompts[i].word, hot ? theme::TextHi : theme::TextDim);
+            g_promptHits.push_back({ RECT{ x, cy - (int)(14 * s), x + widths[i], cy + (int)(14 * s) },
+                                     kPrompts[i].id });
+            x += widths[i] + gap;
         }
     }
 }
@@ -858,6 +864,29 @@ int RowAt(int y) {
     return (row >= 0 && row < Rows()) ? row : -1;
 }
 
+// Which footer prompt a client point is on, or -1.
+int PromptAt(POINT pt) {
+    for (size_t i = 0; i < g_promptHits.size(); ++i)
+        if (PtInRect(&g_promptHits[i].first, pt)) return (int)i;
+    return -1;
+}
+
+// A click on a prompt does what its key does.
+void RunPrompt(HWND wnd, int index) {
+    if (index < 0 || index >= (int)g_promptHits.size()) return;
+    switch (g_promptHits[(size_t)index].second) {
+        case P_SELECT:
+            if (Rows() > 0) {
+                g_selected = (g_selected + 1) % Rows();
+                InvalidateRect(wnd, nullptr, FALSE);
+            }
+            break;
+        case P_OPEN:  LaunchSelected(); break;
+        case P_ADMIN: RunRowCommand(IDM_RUNAS); break;
+        case P_CLOSE: LauncherHide(); break;
+    }
+}
+
 std::wstring ClipboardText() {
     if (!OpenClipboard(g_wnd)) return L"";
     std::wstring out;
@@ -987,6 +1016,9 @@ LRESULT CALLBACK LauncherProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
 
         case WM_LBUTTONUP: {
+            const POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            const int prompt = PromptAt(pt);
+            if (prompt >= 0) { RunPrompt(wnd, prompt); return 0; }
             const int row = RowAt(GET_Y_LPARAM(lp));
             if (row >= 0) {
                 g_selected = row;
@@ -1017,6 +1049,14 @@ LRESULT CALLBACK LauncherProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                     return 0;
                 g_mouseIdle = false;
             }
+            const POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            const int hotPrompt = PromptAt(pt);
+            if (hotPrompt != g_hotPrompt) {
+                g_hotPrompt = hotPrompt;
+                InvalidateRect(wnd, nullptr, FALSE);
+            }
+            TRACKMOUSEEVENT track = { sizeof(track), TME_LEAVE, wnd, 0 };
+            TrackMouseEvent(&track);
             const int row = RowAt(GET_Y_LPARAM(lp));
             if (row >= 0 && row != g_selected) {
                 g_selected = row;
@@ -1024,6 +1064,13 @@ LRESULT CALLBACK LauncherProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+
+        case WM_MOUSELEAVE:
+            if (g_hotPrompt != -1) {
+                g_hotPrompt = -1;
+                InvalidateRect(wnd, nullptr, FALSE);
+            }
+            return 0;
 
         case WM_DESTROY:
             g_wnd = nullptr;

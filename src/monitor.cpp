@@ -97,6 +97,7 @@ HANDLE g_sampleQuit   = nullptr;   // manual-reset: exit
 HANDLE g_sampleWake   = nullptr;   // auto-reset: state changed, or read now
 LONG   g_sampleOn     = 0;         // 1 while the panel wants readings
 LONG   g_sampleEvery  = 1000;      // ms between readings
+LONG   g_sampleCost   = 0;         // the last Sample(), in 0.1 ms
 // The finished reading, handed from the thread to the UI thread.
 CRITICAL_SECTION g_loadLock;
 bool       g_loadLockReady = false;
@@ -150,7 +151,12 @@ DWORD WINAPI SampleThread(LPVOID) {
         if (InterlockedCompareExchange(&g_sampleOn, 0, 0) == 0) continue;
 
         SystemLoad load;
+        LARGE_INTEGER t0, t1, fq;
+        QueryPerformanceCounter(&t0);
         g_sampler.Sample(&load);
+        QueryPerformanceCounter(&t1);
+        QueryPerformanceFrequency(&fq);
+        InterlockedExchange(&g_sampleCost, (LONG)((t1.QuadPart - t0.QuadPart) * 10000 / (fq.QuadPart ? fq.QuadPart : 1)));
         open = true;
 
         EnterCriticalSection(&g_loadLock);
@@ -1403,6 +1409,11 @@ std::wstring MonitorReadingsText() {
         out += L"\r\n";
     }
     return out;
+}
+
+int MonitorSampleCostTenths() {
+    if (InterlockedCompareExchange(&g_sampleOn, 0, 0) == 0) return -1;
+    return (int)InterlockedCompareExchange(&g_sampleCost, 0, 0);
 }
 
 void MonitorApplyConfig() {
