@@ -14,11 +14,11 @@ Order: Phase 0 → Phase 1 runs in parallel with Phase 2 → Phase 3 → Phase 4
 - [ ] **0.1 (ask the user first)** Commit the uncommitted 1.5 work as its own commit before 1.6
   begins, so the reskin diff is reviewable on its own. Message: `ProWindows 1.5: options-screen
   rework, one window and no controls, modal screens, rows, three-way Apply`.
-- [ ] **0.2** Delete regenerable build output: `tests/build/` (40 MB, includes stale
+- [x] **0.2** Delete regenerable build output: `tests/build/` (40 MB, includes stale
   `rowdragshot.exe` whose source is gone), `tests/shots/` (11 MB), `build/app.res`. All gitignored.
-- [ ] **0.3** Check `git ls-files` for anything that should not be tracked (binaries, PNGs, `.res`).
+- [x] **0.3** Check `git ls-files` for anything that should not be tracked (binaries, PNGs, `.res`).
   Report; delete only build output.
-- [ ] **0.4** Move `docs/REVIEW-1.1.md` … `REVIEW-1.3.md`, `REVIEW-icons-and-idle.md`,
+- [x] **0.4** Move `docs/REVIEW-1.1.md` … `REVIEW-1.3.md`, `REVIEW-icons-and-idle.md`,
   `REVIEW-startup-and-input.md` to `docs/archive/` with `git mv`; fix links (`grep -rn REVIEW-1.[123]`).
   Keeps `docs/` to the current pass and stops agents from opening old reviews.
 - [ ] **0.5** Stale references: `grep -rn "Battlefront\|DOOM" src res README.md MAP.md` (9 hits).
@@ -28,11 +28,11 @@ Order: Phase 0 → Phase 1 runs in parallel with Phase 2 → Phase 3 → Phase 4
 
 ## Phase 1 — pre-release review (O)
 
-- [ ] **1.1** Review the 1.5 diff (`git diff HEAD --stat`, then by file) against the invariants.
+- [x] **1.1** Review the 1.5 diff (`git diff HEAD --stat`, then by file) against the invariants.
   Focus: `modal.cpp` (own message loop, inv. 82), `rowlist.cpp` (inv. 79), `settings.cpp`
   capture hook (inv. 81, 85), the merge (inv. 78), GDI handle balance in `theme.cpp` painters.
   Output: `docs/REVIEW-1.6.md` §A, findings P1–P3 with file:line.
-- [ ] **1.2** S fixes every P1/P2 from 1.1; each fix ticked in REVIEW-1.6 with ✔.
+- [x] **1.2** S fixes every P1/P2 from 1.1; each fix ticked in REVIEW-1.6 with ✔.
 - [ ] **1.3** H runs `tests\analyze.bat` (all sources) and `tests\run.bat`; report new warnings.
 
 ---
@@ -216,7 +216,30 @@ Launchers*; Monitor → *Display · Readouts · Colours*; Clock → *Display · 
 
 ### Decisions
 
-*(O writes here.)*
+- **Keys (user, 2026-10-07): option (a).** Q/E step tabs, 1/3 step pages, search moves to
+  Ctrl+F or `/`. 1.5 is committed (0.1 done).
+- **Pages, 2.6 (O, 2026-10-07): split by the existing section headings, with one change.**
+  Shortcuts → *Windows* (Modifier, Focus, Move windows, Resize, Windows) · *Workspaces*
+  (Workspaces, Layout) · *ProWindows* (ProWindows, All shortcuts). The proposed *Launchers* page
+  is dropped: launchers live in the **Apps** category, which stays one page. Monitor → *Display*
+  (Overlay, Look) · *Readouts* (Readouts, in order) · *Colours*. Clock → *Display* (Clock, What it
+  shows) · *Look*. Search → *Sources* (What to search, Programs) · *Index* (File index, Folders to
+  index). Layout, Behaviour, General, Apps: one page. Why: each page is a run of whole sections
+  the builders already emit, so `Kind::Page` rows go in front of existing `Section`s and no row
+  moves. The current page is held by the Page row's **id**, not its index (inv. 79 - a rebuild
+  must not change page), and `ResetPage` still resets the whole category.
+- **Focus follows the mouse, 3.4 (O, 2026-10-07): `EVENT_OBJECT_LOCATIONCHANGE`, not a mouse
+  hook.** A hook instance of its own (`SetWinEventHook(LOCATIONCHANGE, LOCATIONCHANGE, …,
+  WINEVENT_OUTOFCONTEXT)`, with its own callback - never `WinEventProc`, whose placement logic
+  relies on that event *not* being hooked, `wm.cpp:1800`), installed only while
+  `focusFollowsMouse` is on and game mode is off, removed otherwise. The callback ignores
+  everything but `idObject == OBJID_CURSOR` and only arms a one-shot `TIMER_MOUSE` (~60 ms) if
+  none is pending; the timer does today's `WindowFromPoint` / `lastUnder` check once and kills
+  itself. Why: with the feature on, a `WH_MOUSE_LL` hook would have to stay installed the whole
+  time - every pointer move on the machine a synchronous round trip into the UI thread, stalling
+  the pointer whenever that thread is busy, the very cost `moddrag.cpp` was rebuilt to avoid.
+  Out-of-context WinEvents are queued, never block input, and a still pointer costs nothing.
+  Check with the probe in Phase 3 that the event's chatter (window and caret moves) stays cheap.
 
 ---
 

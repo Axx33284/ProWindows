@@ -1,7 +1,7 @@
 # ProWindows 1.4 — the Battlefront II rework, and what the review turned up
 
-A fifth pass over `src/`, after [REVIEW-1.3.md](REVIEW-1.3.md) and
-[REVIEW-icons-and-idle.md](REVIEW-icons-and-idle.md). Asked three things: review the app; rework
+A fifth pass over `src/`, after [REVIEW-1.3.md](archive/REVIEW-1.3.md) and
+[REVIEW-icons-and-idle.md](archive/REVIEW-icons-and-idle.md). Asked three things: review the app; rework
 its look, structure and icons after the menus of *Star Wars Battlefront II* (2017); and renew
 [MAP.md](../MAP.md). Findings first, then the rework, then verification.
 

@@ -107,9 +107,18 @@ std::function<std::wstring()> TagFor(const Keybind& kb) {
 // Gives the chord to binding `index` (or to a new binding for `action`/`arg`
 // when index is -1), taking it from whatever else had it once the user agrees.
 void Assign(int index, Action action, int arg, const std::wstring& command, UINT mods, UINT vk) {
+    // The question below runs its own loop, and a reload while it is up (tray,
+    // control channel, an overlay's menu) can replace the list the indices
+    // point into; if it did, the answer is about a list that is gone.
+    const std::vector<Keybind> before = Edit().binds;
     std::vector<int> clashes;
     if (!ConfirmChordFree(mods, vk, index, &clashes)) return;
     auto& binds = Edit().binds;
+    bool same = binds.size() == before.size();
+    for (size_t i = 0; same && i < binds.size(); ++i)
+        same = binds[i].mods == before[i].mods && binds[i].vk == before[i].vk &&
+               binds[i].action == before[i].action && binds[i].arg == before[i].arg;
+    if (!same) return;
     std::sort(clashes.rbegin(), clashes.rend());
     for (int j : clashes) {
         binds.erase(binds.begin() + j);

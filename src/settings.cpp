@@ -831,7 +831,7 @@ void PaintFooter(HDC dc) {
             keys.push_back(VK_RETURN);
         }
         if (g_dirty) { prompts.push_back({ L"Ctrl+S", L"Apply" }); keys.push_back('S' | 0x10000); }
-        prompts.push_back({ L"Esc", g_zone == Zone::List ? L"Back" : L"Close" });
+        prompts.push_back({ L"Esc", g_zone == Zone::Nav ? L"Close" : L"Back" });
         keys.push_back(VK_ESCAPE);
     }
     g_promptHits.clear();
@@ -1036,13 +1036,16 @@ void ApplyNow() {
 
 void ResetPage() {
     if (!g_query.empty()) return;
-    const std::wstring name = g_pages[g_page].caption;
+    // Held across the question: the tray or an overlay can switch category
+    // while it is up, and the one that was named is the one to reset.
+    const int page = g_page;
+    const std::wstring name = g_pages[page].caption;
     if (!ui::Confirm(g_wnd, L"Reset " + name + L"?",
                      L"Every setting on the " + name + L" page goes back to how it shipped. "
                      L"Nothing is saved until you apply.",
                      L"Reset", L"Cancel"))
         return;
-    g_pages[g_page].reset();
+    g_pages[page].reset();
     BuildRows(true);
     UpdateDirty();
     Toast(name + L" reset to defaults - apply to keep it");
@@ -1341,8 +1344,12 @@ void MouseMove(POINT pt, bool down) {
 
 void MouseDown(POINT pt) {
     if (g_captureRow >= 0) {
-        // A click anywhere but on the row itself gives up waiting.
+        // A click gives up waiting. If that took a keyless launcher's row away,
+        // or the click was on the Esc prompt, it has done its job: the rows
+        // under the pointer have moved, and Esc would press again.
+        const size_t before = g_list.Rows().size();
         CancelCapture();
+        if (g_list.Rows().size() != before || HitTest(pt) >= HOT_PROMPT) { Invalidate(); return; }
     }
     SetCapture(g_wnd);
     const int hot = HitTest(pt);
@@ -1574,6 +1581,13 @@ LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_SETCURSOR:
             if (LOWORD(lp) == HTCLIENT) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
+            break;
+
+        case WM_SYSCOMMAND:
+            // A bare Alt tap (or the Alt of a chord the capture hook swallowed
+            // the key of) would start the system menu's keyboard loop, unseen,
+            // and the next arrow key would open the window menu. Alt+Space still does.
+            if ((wp & 0xFFF0) == SC_KEYMENU && lp == 0) return 0;
             break;
 
         case WM_CLOSE:

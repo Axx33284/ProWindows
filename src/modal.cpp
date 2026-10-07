@@ -225,7 +225,7 @@ void PaintInto(Modal* m, HDC dc, const RECT& c) {
 
     std::vector<std::pair<std::wstring, std::wstring>> prompts;
     if (m->type == Type::Pick) {
-        prompts = { { L"\x2191 \x2193", L"Choose" }, { L"Enter", m->verb }, { L"Esc", L"Cancel" } };
+        prompts = { { L"\x2191 \x2193", L"Choose" }, { L"Enter", m->verb }, { L"Esc", m->filter.empty() ? L"Cancel" : L"Clear" } };
     } else if (m->type == Type::Confirm) {
         prompts = { { L"Enter", L"Select" }, { L"Esc", L"Cancel" } };
     } else {
