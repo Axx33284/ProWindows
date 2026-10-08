@@ -809,3 +809,74 @@ machine's WinMetadata was not needed. Not supported: `explorerFrameContainerHeig
   `IsWow64Process2` (an emulated x64 ProWindows on ARM64 must not start threads in native
   Explorer); quit waits up to 5 s for the worker so an injection in flight is stopped; Reload
   says when styling is off.
+
+## Phase 9 — glass, the Start menu, a Timer page (user, 2026-10-08)
+
+The user: more of the Explorer styler should be settable in Settings, File Explorer **and the
+Start menu** should be able to look translucent / glassy, and Settings gets a **Timer** page.
+Sources: `ramensoftware/windhawk-mods/mods/windows-11-file-explorer-styler.wh.cpp` (v1.7, what
+`src/explorer/styler.cpp` already is) and `windows-11-start-menu-styler.wh.cpp` (m417z, GPL-3.0,
+v1.7, ~16k lines, includes `StartMenuExperienceHost.exe`, `SearchHost.exe`, `SearchApp.exe`).
+
+### 9.A File Explorer: more settings, a glass theme
+- **Theme** gains **ProWindows Glass** (second entry, after ProWindows): the ProWindows theme
+  with transparent backgrounds over a tint, so the background effect shows through; default
+  effect acrylic. The ProWindows themes read **style constants**, so the rows below drive them.
+- New page **Look** (rows enabled only while a ProWindows theme is chosen; say so in the help):
+  **Tint** (Colour row: black, graphite, steel, the accent colour, …), **Tint opacity** (Slider
+  0–100 %, Glass only), **Highlight** (Choice: metal gradient / accent / tint), **Corner radius**
+  (Slider 0–12 px), **Text** (Choice: white / light grey). Written as `styleConstants[N]` in the
+  part of `explorer-styler.ini` ProWindows owns.
+- **Effect region** (Choice: entire window / frame only → `backgroundTranslucentEffectRegion`).
+- **Other XAML diagnostics users** (Choice: ask / block / allow → `xamlDiagnosticsHandling`),
+  on the Custom styles page.
+- Each new config field: default in `config.h`, parse + `SaveToFile`, `AWA_EDITED_FIELDS`
+  (inv. 78), `ResetExplorerPage`.
+
+### 9.B The Start menu
+- `src/startmenu/styler.cpp`: the Start Menu Styler **as close to verbatim as possible**, changes
+  marked `// ProWindows:`, GPL header and credit kept, stats / URL telemetry removed (as 8.B).
+  It uses `Windows.UI.Xaml` (system XAML, SDK projection) - not the WinUI 3 headers.
+- **One shim for both DLLs**: `windhawk_shim.*` takes the styler's name at compile time
+  (`/DPW_STYLER=L"startmenu"`) for its ini, log, storage dir and event names. Add what the
+  Start menu mod needs: `Wh_SetFunctionHook`, `Wh_Get/SetIntValue`, `Wh_Get/SetBinaryValue`.
+- `build.bat` (via `build_explorer.bat` or a sibling) builds **`ProWindows_startmenu.dll`**; a
+  failure is a warning, as for the Explorer DLL.
+- **AppContainer.** StartMenuExperienceHost and SearchHost are packaged, low-privilege processes:
+  - the DLL, the ini and the log dir need read (+execute for the DLL) for **ALL APPLICATION
+    PACKAGES** (`S-1-15-2-1`) and **ALL RESTRICTED APPLICATION PACKAGES** (`S-1-15-2-2`); set
+    the ACL from ProWindows before injecting (keep files in a dedicated folder,
+    `%APPDATA%\ProWindows\startmenu-styler\`, not all of `%APPDATA%\ProWindows`);
+  - the DLL's log writes go to that folder (grant write there);
+  - named events created inside the container live in its own namespace: the **DLL creates**
+    its Reload / Stop events with a DACL that lets the user's medium-integrity ProWindows open
+    them, or ProWindows creates them first in the global session namespace with a DACL for the
+    package SIDs and passes the names to `StylerStart`. Reviewer decides (9.T4).
+- `src/startmenustyler.*` (ProWindows side): same worker-thread model as `explorerstyler.*`, ideally
+  sharing code (a common injector parameterised by process names, DLL, ini). Inject into every
+  `StartMenuExperienceHost.exe` and `SearchHost.exe` of this session on start, on TaskbarCreated,
+  and when the WinEvent path sees a window of an unstyled one of those processes come to the
+  foreground - never poll. Stop on quit; crash guard (two host restarts within 90 s of an
+  injection → off, saved, balloon).
+- Settings: new category **Start** after Explorer in `kTabOrder`. Page Styling: **Start menu
+  styling** toggle (`startmenu_styler`, default **true**), **Theme** (every theme of the mod plus
+  **ProWindows** and **ProWindows Glass**, default ProWindows Glass), **Layout** (the mod's
+  `disableNewStartMenuLayout` options), Status info. Page Look: the same Tint / opacity /
+  highlight / radius rows as 9.A (own fields). Page Custom styles: Edit / Reload, as Explorer.
+- Welcome: one line for it beside File Explorer styling.
+
+### 9.C Timer page in Settings
+- New category **Timer**, after Clock in `kTabOrder`: the timers and the stopwatch live in the
+  Settings window as rows, driven by the existing `timer.h` API (no second copy of the state):
+  each timer a row with its label, remaining time (ticks on the 1 s settings timer only while
+  visible, as the meters), Start / Pause / Reset actions; New timer; Stopwatch row with Start /
+  Stop / Lap / Reset. Changes here show at once in the overlay and the Win+W panel and vice versa.
+- Footer keys only for keys that work (inv. 74). Inv. 79 for the row callbacks.
+
+### 9.T Tasks
+- [ ] **9.T1 (S)** 9.A. Green: build (exe + dll), run, uishot, styler_test.
+- [ ] **9.T2 (S)** 9.B. Green: build (exe + both dlls), run, uishot, styler_test (extend it for
+  the shim's new APIs and the Start theme table). Never inject into the real Start menu.
+- [ ] **9.T3 (S)** 9.C. Green: build, run, uishot, timershot.
+- [ ] **9.T4 (O)** Review 9.B: AppContainer ACLs, event namespace, crash guard, Stop on quit.
+- [ ] **9.T5 (user OK needed)** Live check with 8.2: Explorer glass, Start menu glass, quit.
