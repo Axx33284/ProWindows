@@ -878,8 +878,30 @@ v1.7, ~16k lines, includes `StartMenuExperienceHost.exe`, `SearchHost.exe`, `Sea
 - [x] **9.T2 (S)** 9.B. Green: build (exe + both dlls), run, uishot, styler_test (extend it for
   the shim's new APIs and the Start theme table). Never inject into the real Start menu.
 - [x] **9.T3 (S)** 9.C. Green: build, run, uishot, timershot.
-- [ ] **9.T4 (O)** Review 9.B: AppContainer ACLs, event namespace, crash guard, Stop on quit.
+- [x] **9.T4 (O)** Review 9.B: AppContainer ACLs, event namespace, crash guard, Stop on quit.
 - [ ] **9.T5 (user OK needed)** Live check with 8.2: Explorer glass, Start menu glass, quit.
+
+**9.T4 review** (reviewer; fixed in place, styler_test 740 checks green):
+- **P1 fixed: the hosts could not write the folder.** AppContainer processes are low integrity,
+  and an unlabelled folder counts as medium with no-write-up, so the DACL alone let them read the
+  ini and load the DLL but not make `alive.<pid>`, the log or stored values, nor delete a signal:
+  every StylerStart would have failed. `GrantPackages` on the folder now also sets an inheritable
+  low mandatory label (`S:(ML;OICI;NW;;;LW)`), on that folder only; styler_test checks from a
+  thread lowered to low integrity that it can create / delete there and cannot one level up.
+  Side effect, accepted: any low-IL process of the user may now write the styler's ini.
+- **P2 fixed: the crash guard used the time an exit was noticed** (the next Sync, i.e. the next
+  Start open), so a layout-loop exit seen after 90 s never counted. The worker keeps a
+  SYNCHRONIZE handle per injected host and uses its real exit time (`GetProcessTimes`); the
+  handle also stops pid reuse; two early exits count when within 3 min of each other, however
+  late they are noticed; a host that could not be opened is not counted.
+- P3 fixed: the shim starts its directory watch before making `alive.<pid>`.
+- Decision on the event namespace: keep the files (9.T2's reasons hold). Settled and sound: ACEs
+  minimal (RX on the DLL file only, nothing above the folder), stale signals cleared on both
+  sides, Stop on quit reaches a suspended host when it thaws, nothing blocks the UI thread but
+  the bounded 5 s quit wait (as Explorer), `start_styler=false` saved on the UI thread, the
+  Explorer DLL unchanged (ini, log, storage dir, events).
+- For 9.T5 live: the DLL loads in both hosts from the build folder (traverse), `alive.<pid>`
+  appears, Reload / Stop / quit work, and a non-default layout trips the guard after one round.
 
 **9.T2 done - what differs from 9.B** (for the 9.T4 review):
 - **Signals are files, not events.** Inside a container `Local\` is the package's own namespace

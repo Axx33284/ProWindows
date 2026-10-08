@@ -316,6 +316,39 @@ static void Access(const std::wstring& dir) {
     CHECK(HasAce(dll, L"S-1-15-2-2", FILE_GENERIC_READ | FILE_GENERIC_EXECUTE));
     CHECK(!HasAce(dll, L"S-1-15-2-1", FILE_WRITE_DATA));
     CHECK(!StartMenuStylerGrantPackages(dir + L"\\no such file", false));
+
+    // The hosts run at low integrity: a thread of ours lowered to it can make
+    // and delete files in the folder (its low label), but not one level up.
+    HANDLE token = nullptr, low = nullptr;
+    PSID lowSid = nullptr;
+    CHECK(OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &token));
+    CHECK(DuplicateTokenEx(token, TOKEN_ALL_ACCESS, nullptr, SecurityImpersonation, TokenImpersonation, &low));
+    CHECK(ConvertStringSidToSidW(L"S-1-16-4096", &lowSid));
+    TOKEN_MANDATORY_LABEL tml = {};
+    tml.Label.Attributes = SE_GROUP_INTEGRITY;
+    tml.Label.Sid = lowSid;
+    CHECK(SetTokenInformation(low, TokenIntegrityLevel, &tml, sizeof(tml) + GetLengthSid(lowSid)));
+    CHECK(SetThreadToken(nullptr, low));
+    const std::wstring inside = folder + L"\\alive.lowtest";
+    const std::wstring above = folder + L"\\..\\lowtest.bin";
+    HANDLE f = CreateFileW(inside.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    CHECK(f != INVALID_HANDLE_VALUE);
+    if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+    CHECK(GetFileAttributesW(inside.c_str()) == INVALID_FILE_ATTRIBUTES);   // deleted on close
+    RevertToSelf();
+    WriteAll(folder + L"\\stop.lowtest", L"");   // ProWindows makes the signal at medium...
+    CHECK(SetThreadToken(nullptr, low));
+    CHECK(DeleteFileW((folder + L"\\stop.lowtest").c_str()));   // ...the host deletes it
+    HANDLE g = CreateFileW(above.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    CHECK(g == INVALID_HANDLE_VALUE);
+    if (g != INVALID_HANDLE_VALUE) CloseHandle(g);
+    RevertToSelf();
+    DeleteFileW(above.c_str());
+    if (lowSid) LocalFree(lowSid);
+    if (low) CloseHandle(low);
+    if (token) CloseHandle(token);
 }
 
 static void Lifecycle() {

@@ -154,8 +154,17 @@ Wanted g_wanted;
 std::wstring g_status = L"Not started";
 std::set<DWORD> g_styled;      // host pids known to carry the styler
 std::map<DWORD, ULONGLONG> g_failed;      // ...that could not be opened or started, and when
-std::map<DWORD, ULONGLONG> g_injectedAt;  // crash guard: when each pid was injected
+// Crash guard: when each pid was injected, and a handle to it. The handle
+// tells when the host really exited (it is noticed only at the next Sync, which
+// may be minutes later) and keeps its pid from being reused meanwhile.
+struct Injected { ULONGLONG at; HANDLE proc; };
+std::map<DWORD, Injected> g_injectedAt;
 std::vector<ULONGLONG> g_earlyExits;      // crash guard: when a host went within the window
+
+void ForgetInjected() {   // under g_mutex
+    for (auto& e : g_injectedAt) if (e.second.proc) CloseHandle(e.second.proc);
+    g_injectedAt.clear();
+}
 
 enum : unsigned { REQ_SYNC = 1, REQ_RELOAD = 2, REQ_STOP = 4, REQ_QUIT = 8, REQ_DELAYED = 16 };
 std::atomic<unsigned> g_requests{0};
@@ -197,6 +206,23 @@ bool GrantPackages(const std::wstring& path, bool isDir) {
         ok = SetNamedSecurityInfoW(const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
                                    DACL_SECURITY_INFORMATION, nullptr, nullptr, newDacl,
                                    nullptr) == ERROR_SUCCESS;
+    }
+    if (ok && isDir) {
+        // The hosts run at low integrity, and a file or folder without a label
+        // counts as medium with no-write-up: whatever the DACL says, a host could
+        // not make alive.<pid>, its log or its stored values, nor delete a signal.
+        // A low label, inherited by everything made in here, opens this folder
+        // and nothing above it.
+        PSECURITY_DESCRIPTOR label = nullptr;
+        PACL sacl = nullptr;
+        BOOL present = FALSE, defaulted = FALSE;
+        ok = ConvertStringSecurityDescriptorToSecurityDescriptorW(L"S:(ML;OICI;NW;;;LW)", SDDL_REVISION_1,
+                                                                  &label, nullptr) &&
+             GetSecurityDescriptorSacl(label, &present, &sacl, &defaulted) && present && sacl &&
+             SetNamedSecurityInfoW(const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+                                   LABEL_SECURITY_INFORMATION, nullptr, nullptr, nullptr,
+                                   sacl) == ERROR_SUCCESS;
+        if (label) LocalFree(label);
     }
     if (!ok) AWA_LOG(L"start menu styler: cannot give the app packages access to %s (error %lu)",
                      path.c_str(), GetLastError());
@@ -597,7 +623,7 @@ void StopAll() {
         pids.assign(g_styled.begin(), g_styled.end());
         g_styled.clear();
         g_failed.clear();
-        g_injectedAt.clear();   // a host that goes after this was not hurt by us
+        ForgetInjected();   // a host that goes after this was not hurt by us
     }
     // Also any process styled by an earlier ProWindows that left it behind.
     for (DWORD pid : HostPids())
@@ -609,9 +635,23 @@ void StopAll() {
 // window trip the guard. Under g_mutex.
 bool NoteGoneHosts(const std::vector<DWORD>& pids) {
     const ULONGLONG now = GetTickCount64();
+    FILETIME nowFt;
+    GetSystemTimeAsFileTime(&nowFt);
     for (auto it = g_injectedAt.begin(); it != g_injectedAt.end();) {
-        if (std::find(pids.begin(), pids.end(), it->first) != pids.end()) { ++it; continue; }
-        if (now - it->second < kCrashWindowMs) g_earlyExits.push_back(now);
+        HANDLE proc = it->second.proc;
+        const bool gone = proc ? WaitForSingleObject(proc, 0) == WAIT_OBJECT_0
+                               : std::find(pids.begin(), pids.end(), it->first) == pids.end();
+        if (!gone) { ++it; continue; }
+        ULONGLONG exitedAt = now;   // without a handle: when it was noticed
+        FILETIME created, exited, kernel, user;
+        if (proc && GetProcessTimes(proc, &created, &exited, &kernel, &user)) {
+            const ULONGLONG a = ((ULONGLONG)nowFt.dwHighDateTime << 32) | nowFt.dwLowDateTime;
+            const ULONGLONG b = ((ULONGLONG)exited.dwHighDateTime << 32) | exited.dwLowDateTime;
+            const ULONGLONG ago = a > b ? (a - b) / 10000 : 0;
+            exitedAt = now - std::min(ago, now);
+        }
+        if (proc) CloseHandle(proc);
+        if (exitedAt - std::min(exitedAt, it->second.at) < kCrashWindowMs) g_earlyExits.push_back(exitedAt);
         g_styled.erase(it->first);
         g_failed.erase(it->first);
         it = g_injectedAt.erase(it);
@@ -620,9 +660,15 @@ bool NoteGoneHosts(const std::vector<DWORD>& pids) {
         it = std::find(pids.begin(), pids.end(), *it) == pids.end() ? g_styled.erase(it) : std::next(it);
     for (auto it = g_failed.begin(); it != g_failed.end();)
         it = std::find(pids.begin(), pids.end(), it->first) == pids.end() ? g_failed.erase(it) : std::next(it);
-    g_earlyExits.erase(std::remove_if(g_earlyExits.begin(), g_earlyExits.end(),
-                                      [&](ULONGLONG t) { return now - t > kCrashMemoryMs; }),
-                       g_earlyExits.end());
+    // Two early exits count when they were close to each other, however late
+    // they were noticed.
+    std::sort(g_earlyExits.begin(), g_earlyExits.end());
+    if (!g_earlyExits.empty()) {
+        const ULONGLONG last = g_earlyExits.back();
+        g_earlyExits.erase(std::remove_if(g_earlyExits.begin(), g_earlyExits.end(),
+                                          [&](ULONGLONG t) { return last - t > kCrashMemoryMs; }),
+                           g_earlyExits.end());
+    }
     return g_earlyExits.size() >= 2;
 }
 
@@ -691,8 +737,11 @@ void Sync(bool reload) {
         // Stamped before, not after: the crash the guard is for happens while
         // StylerStart runs, and then the injection never reports Ok.
         {
+            HANDLE proc = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
             std::lock_guard<std::mutex> lock(g_mutex);
-            g_injectedAt[pid] = GetTickCount64();
+            Injected& e = g_injectedAt[pid];
+            if (e.proc) CloseHandle(e.proc);
+            e = { GetTickCount64(), proc };
         }
         const Inject r = InjectInto(pid, dll);
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -702,6 +751,11 @@ void Sync(bool reload) {
         } else {
             g_failed[pid] = GetTickCount64();
             if (r == Inject::NoAccess) ++denied; else ++failed;
+            // Not opened, so nothing ran in it: its exit is not ours.
+            if (r == Inject::NoAccess) {
+                if (HANDLE p = g_injectedAt[pid].proc) CloseHandle(p);
+                g_injectedAt.erase(pid);
+            }
         }
     }
 

@@ -511,12 +511,14 @@ bool OpenSignals() {
     // after the worker had already gone): not for us.
     DeleteFileW(SignalPath(L"stop").c_str());
     DeleteFileW(SignalPath(L"reload").c_str());
+    // The watch before alive.<pid>: ProWindows signals only once that exists,
+    // and a signal made in between would otherwise wait for an unrelated change.
+    g_watch = FindFirstChangeNotificationW(
+        g_configDir.c_str(), FALSE, FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE);
     g_aliveFile = CreateFileW(SignalPath(L"alive").c_str(), GENERIC_WRITE | DELETE,
                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                               nullptr, CREATE_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
-    g_watch = FindFirstChangeNotificationW(
-        g_configDir.c_str(), FALSE, FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE);
     if (g_aliveFile == INVALID_HANDLE_VALUE || g_watch == INVALID_HANDLE_VALUE) {
         Wh_Log(L"cannot open the signal files in %s (error %lu)", g_configDir.c_str(),
                GetLastError());
