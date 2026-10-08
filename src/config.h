@@ -279,6 +279,19 @@ struct Config {
     bool         explorerStyler = true;
     std::wstring explorerTheme  = L"ProWindows";
     std::wstring explorerEffect;
+    // The Look page: read by the two ProWindows themes only. Tint is the
+    // fill colour, its opacity counts for ProWindows Glass only; highlight is
+    // 0 metal gradient, 1 accent colour, 2 tint; text is 0 white, 1 light grey.
+    COLORREF     explorerTint        = RGB(0, 0, 0);
+    int          explorerTintOpacity = 60;
+    int          explorerHighlight   = 0;
+    int          explorerRadius      = 4;
+    int          explorerText        = 0;
+    // Where the background effect reaches: 0 the whole window, 1 the frame
+    // only. What to do about other XAML diagnostics users: 0 ask, 1 block,
+    // 2 allow (block: a prompt inside Explorer is not something to answer).
+    int          explorerRegion      = 0;
+    int          explorerXamlDiag    = 1;
 
     // search bar
     // Which sources the search bar draws on besides installed apps. Files are

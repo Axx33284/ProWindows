@@ -277,7 +277,20 @@ bool Config::SaveToFile(const std::wstring& path) const {
     fwprintf(f, L"# (Matter, TintedGlass, Minimal Explorer11 ...); empty for none.\n");
     fwprintf(f, L"explorer_theme   = %s\n", explorerTheme.c_str());
     fwprintf(f, L"# explorer_effect: empty (the theme's own), blur, acrylic, mica, micaalt, none.\n");
-    fwprintf(f, L"explorer_effect  = %s\n\n", explorerEffect.c_str());
+    fwprintf(f, L"explorer_effect  = %s\n", explorerEffect.c_str());
+    fwprintf(f, L"# The ProWindows themes only: explorer_tint (#RRGGBB), explorer_tint_opacity (0-100,\n");
+    fwprintf(f, L"# Glass only), explorer_highlight (0 metal, 1 accent, 2 tint), explorer_radius (0-12),\n");
+    fwprintf(f, L"# explorer_text (0 white, 1 light grey).\n");
+    fwprintf(f, L"explorer_tint    = #%02X%02X%02X\n", GetRValue(explorerTint), GetGValue(explorerTint),
+             GetBValue(explorerTint));
+    fwprintf(f, L"explorer_tint_opacity = %d\n", explorerTintOpacity);
+    fwprintf(f, L"explorer_highlight = %d\n", explorerHighlight);
+    fwprintf(f, L"explorer_radius  = %d\n", explorerRadius);
+    fwprintf(f, L"explorer_text    = %d\n", explorerText);
+    fwprintf(f, L"# explorer_region: 0 effect over the whole window, 1 the frame only.\n");
+    fwprintf(f, L"# explorer_xaml: other programs using XAML diagnostics - 0 ask, 1 block, 2 allow.\n");
+    fwprintf(f, L"explorer_region  = %d\n", explorerRegion);
+    fwprintf(f, L"explorer_xaml    = %d\n\n", explorerXamlDiag);
 
     fwprintf(f, L"# ------------------------------------------------------------ search bar\n");
     fwprintf(f, L"# What the search bar looks through besides installed apps.\n");

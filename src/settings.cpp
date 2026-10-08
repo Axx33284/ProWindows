@@ -178,6 +178,8 @@ bool BindsEqual(const std::vector<Keybind>& a, const std::vector<Keybind>& b) {
     X(clockScale) X(timerTick) X(timerAlarm)                                        \
     X(timerShown) X(timerPinned)                                                    \
     X(explorerStyler) X(explorerTheme) X(explorerEffect)                            \
+    X(explorerTint) X(explorerTintOpacity) X(explorerHighlight) X(explorerRadius)   \
+    X(explorerText) X(explorerRegion) X(explorerXamlDiag)                           \
     X(startMinimized) X(debug)
 
 bool ArraysEqual(const Config& a, const Config& b) {

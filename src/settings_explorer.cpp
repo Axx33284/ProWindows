@@ -31,6 +31,10 @@ std::wstring ThemeBlurb(int i) {
         return L"Black window, navigation pane and command bar, a dark-to-light metal gradient "
                L"on the item under the pointer and on the selected tab, light hairline borders "
                L"and no accent colour. The same look as the rest of ProWindows.";
+    if (id == L"ProWindows Glass")
+        return L"The ProWindows look with a translucent tint over a blurred background: you see "
+               L"the desktop and the windows behind through the Explorer window. Set the tint and "
+               L"its opacity on the Look page. The background effect defaults to Acrylic.";
     if (id.empty())
         return L"No theme: File Explorer keeps its own look, apart from any custom styles you "
                L"add on the Custom styles page.";
@@ -81,14 +85,58 @@ void BuildExplorerPage(std::vector<Row>& rows) {
         r.fallback = []() { return std::wstring(ExplorerEffectName(0)); };
         add(r);
     }
+    add(ui::ChoiceOf(L"region", L"Effect region",
+        L"How far the background effect reaches. Entire window puts it behind everything, the "
+        L"title bar included; Frame only keeps it to Explorer's own frame (the address bar, "
+        L"command bar and navigation pane).",
+        &e.explorerRegion, &s.explorerRegion, { 0, 1 },
+        { L"Entire window", L"Frame only" }));
     rows.push_back(ui::Info(L"status", L"Status",
         L"How many File Explorer processes are styled right now, or why none is. A folder "
         L"window that opens in its own process is styled when it appears. Explorer running as "
         L"administrator cannot be styled.",
         []() { return ExplorerStylerStatus(); }));
 
+    // The Look page drives the two ProWindows themes; the rows say so and sit
+    // idle under any other theme.
+    rows.push_back(ui::Page(L"Look"));
+    rows.push_back(ui::Section(L"ProWindows themes"));
+    auto look = [&](Row r, bool glassOnly) {
+        r.enabled = [glassOnly]() {
+            if (!On() || !ExplorerThemeIsProWindows(Edit().explorerTheme)) return false;
+            return !glassOnly || Edit().explorerTheme == L"ProWindows Glass";
+        };
+        rows.push_back(r);
+    };
+    const std::wstring only = L"\r\n\r\nUsed only while the theme is ProWindows or ProWindows Glass.";
+    look(ColourRow(L"tint", L"Tint",
+        L"The colour of the window, navigation pane and command bar. Black by default." + only,
+        &e.explorerTint, &s.explorerTint, CLR_INVALID, 0), false);
+    look(ui::Slider(L"tintopacity", L"Tint opacity",
+        L"How much of the tint covers the background effect. 0 shows the effect alone, 100 is "
+        L"a solid colour. ProWindows Glass only - the plain ProWindows theme is always solid.",
+        &e.explorerTintOpacity, &s.explorerTintOpacity, 0, 100, 5, 10, L"%"), true);
+    look(ui::ChoiceOf(L"highlight", L"Highlight",
+        L"What the item under the pointer and the selected tab are filled with: the dark-to-light "
+        L"metal gradient, the Windows accent colour, or a lighter shade of the tint." + only,
+        &e.explorerHighlight, &s.explorerHighlight, { 0, 1, 2 },
+        { L"Metal gradient", L"Accent colour", L"Tint" }), false);
+    look(ui::Slider(L"radius", L"Corner radius",
+        L"How round the corners of the address bar and of the highlighted buttons are." + only,
+        &e.explorerRadius, &s.explorerRadius, 0, 12, 1, 2, L" px"), false);
+    look(ui::ChoiceOf(L"text", L"Text",
+        L"The colour of the text in File Explorer's bars." + only,
+        &e.explorerText, &s.explorerText, { 0, 1 }, { L"White", L"Light grey" }), false);
+
     rows.push_back(ui::Page(L"Custom styles"));
     rows.push_back(ui::Section(L"Your own styles"));
+    add(ui::ChoiceOf(L"xaml", L"Other XAML diagnostics users",
+        L"Styling uses the XAML diagnostics channel, which only one program can hold. Block "
+        L"keeps it for ProWindows (and stops other tools that restyle Explorer, like Windhawk "
+        L"mods, from taking it). Allow lets them in, which can make styling fail. Ask shows "
+        L"a prompt inside File Explorer when another program wants it.",
+        &e.explorerXamlDiag, &s.explorerXamlDiag, { 1, 2, 0 },
+        { L"Block", L"Allow", L"Ask" }));
     rows.push_back(ui::Action(L"edit", L"Custom styles",
         L"Opens explorer-styler.ini. Below the part ProWindows writes you can add styles of "
         L"your own, one target per line pair: controlStyles[0].target=Grid#CommandBarControlRootGrid "
@@ -122,6 +170,13 @@ void ResetExplorerPage() {
     e.explorerStyler = d.explorerStyler;
     e.explorerTheme  = d.explorerTheme;
     e.explorerEffect = d.explorerEffect;
+    e.explorerTint        = d.explorerTint;
+    e.explorerTintOpacity = d.explorerTintOpacity;
+    e.explorerHighlight   = d.explorerHighlight;
+    e.explorerRadius      = d.explorerRadius;
+    e.explorerText        = d.explorerText;
+    e.explorerRegion      = d.explorerRegion;
+    e.explorerXamlDiag    = d.explorerXamlDiag;
 }
 
 } // namespace awa

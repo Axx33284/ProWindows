@@ -1710,42 +1710,70 @@ const Theme g_themeFloat = {{
 }, /*explorerFrameContainerHeight=*/160};
 
 
-// ProWindows: the theme ProWindows ships, in the mod's own format. Black
+// ProWindows: the themes ProWindows ships, in the mod's own format. Black
 // window, navigation pane and command bar, a dark-to-light metal gradient on
-// hovered and selected items, hairline light borders, no accent colour.
-const Theme g_themeProWindows = {{
+// hovered and selected items, hairline light borders, no accent colour. The
+// two themes share their targets and differ in the defaults of the style
+// constants they read: ProWindows Glass fills with a translucent tint instead
+// of black, over an acrylic background. The Settings Look page overrides the
+// constants through styleConstants[N] in the ini (src/explorerstyler.cpp), so
+// the names below are an interface:
+//   pwFill       the background fill, #RRGGBB or #AARRGGBB
+//   pwHighlight  the brush of the hovered / selected item
+//   pwRadius     corner radius in px
+//   pwText       the text colour
+const std::vector<ThemeTargetStyles> g_proWindowsTargets = {
     ThemeTargetStyles{L"FileExplorerExtensions.CommandBarControl_Wave1 > Grid, Grid#CommandBarControlRootGrid", {
-        L"Background=#000000",
+        L"Background=$pwFill",
         L"BorderThickness=0,0,0,1",
         L"BorderBrush=#E0E0E0"}},
     ThemeTargetStyles{L"CommandBar#FileExplorerCommandBar", {
         L"Background=Transparent"}},
     ThemeTargetStyles{L"Grid#NavigationBarControlGrid", {
-        L"Background=#000000"}},
+        L"Background=$pwFill",
+        L"CornerRadius=$pwRadius"}},
     ThemeTargetStyles{L"Grid#TabContainerGrid", {
-        L"Background=#000000"}},
+        L"Background=$pwFill"}},
     ThemeTargetStyles{L"TabViewItem > Grid#LayoutRoot > Canvas > Microsoft.UI.Xaml.Shapes.Path#SelectedBackgroundPath", {
-        L"Fill:=$metal"}},
+        L"Fill:=$pwHighlight"}},
     ThemeTargetStyles{L"AppBarButton > Grid#Root@CommonStates > Border#AppBarButtonInnerBorder", {
-        L"Background@PointerOver:=$metal",
-        L"Background@Pressed:=$metal"}},
+        L"Background@PointerOver:=$pwHighlight",
+        L"Background@Pressed:=$pwHighlight",
+        L"CornerRadius=$pwRadius"}},
     ThemeTargetStyles{L"Grid#HomeViewRootGrid", {
-        L"Background=#000000"}},
+        L"Background=$pwFill"}},
     ThemeTargetStyles{L"FileExplorerExtensions.GalleryViewControl#GalleryViewControl > Grid", {
-        L"Background=#000000"}},
+        L"Background=$pwFill"}},
     ThemeTargetStyles{L"Microsoft.UI.Xaml.Controls.Grid#GalleryRootGrid", {
-        L"Background=#000000"}},
+        L"Background=$pwFill"}},
     ThemeTargetStyles{L"Grid#DetailsViewControlRootGrid", {
-        L"Background=#000000"}},
+        L"Background=$pwFill"}},
     ThemeTargetStyles{L"StackPanel#DetailsViewThumbnail > Grid", {
-        L"Background=#000000"}},
+        L"Background=$pwFill"}},
     ThemeTargetStyles{L"ToolTip", {
         L"Background=#000000",
         L"BorderBrush=#E0E0E0",
         L"BorderThickness=1"}},
-}, {
-    L"metal=<LinearGradientBrush StartPoint=\"0,0\" EndPoint=\"0,1\"><GradientStop Color=\"#1A1A1A\" Offset=\"0\"/><GradientStop Color=\"#3A3A3A\" Offset=\"1\"/></LinearGradientBrush>",
-}, {}, /*explorerFrameContainerHeight=*/0, BackgroundTranslucentEffect::kNone};
+};
+
+const std::vector<PCWSTR> g_proWindowsTextVariables = {
+    L"TextFillColorPrimary=$pwText",
+    L"TextFillColorPrimaryBrush:=<SolidColorBrush Color=\"$pwText\"/>",
+};
+
+const Theme g_themeProWindows = {g_proWindowsTargets, {
+    L"pwFill=#000000",
+    L"pwHighlight=<LinearGradientBrush StartPoint=\"0,0\" EndPoint=\"0,1\"><GradientStop Color=\"#1A1A1A\" Offset=\"0\"/><GradientStop Color=\"#3A3A3A\" Offset=\"1\"/></LinearGradientBrush>",
+    L"pwRadius=4",
+    L"pwText=#FFFFFF",
+}, g_proWindowsTextVariables, /*explorerFrameContainerHeight=*/0, BackgroundTranslucentEffect::kNone};
+
+const Theme g_themeProWindowsGlass = {g_proWindowsTargets, {
+    L"pwFill=#99000000",
+    L"pwHighlight=<LinearGradientBrush StartPoint=\"0,0\" EndPoint=\"0,1\"><GradientStop Color=\"#1A1A1A\" Offset=\"0\"/><GradientStop Color=\"#3A3A3A\" Offset=\"1\"/></LinearGradientBrush>",
+    L"pwRadius=4",
+    L"pwText=#FFFFFF",
+}, g_proWindowsTextVariables, /*explorerFrameContainerHeight=*/0, BackgroundTranslucentEffect::kAcrylic};
 
 // clang-format on
 
@@ -9803,6 +9831,8 @@ const Theme* GetSelectedTheme() {
         theme = &g_themeFloat;
     } else if (wcscmp(themeName, L"ProWindows") == 0) {
         theme = &g_themeProWindows;
+    } else if (wcscmp(themeName, L"ProWindows Glass") == 0) {
+        theme = &g_themeProWindowsGlass;
     }
     Wh_FreeStringSetting(themeName);
     return theme;

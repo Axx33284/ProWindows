@@ -128,11 +128,12 @@ static bool SetNamed(const wchar_t* what) {
 // ---------------------------------------------------------------- tests
 static void Choices() {
     wprintf(L"the choices the settings page offers\n");
-    CHECK(ExplorerThemeCount() == 18);
+    CHECK(ExplorerThemeCount() == 19);
     CHECK(std::wstring(ExplorerThemeId(0)) == L"ProWindows");
     CHECK(ExplorerThemeIndexOf(L"ProWindows") == 0);
-    CHECK(ExplorerThemeIndexOf(L"") == 1);
-    CHECK(ExplorerThemeIndexOf(L"Matter") > 1);
+    CHECK(ExplorerThemeIndexOf(L"ProWindows Glass") == 1);
+    CHECK(ExplorerThemeIndexOf(L"") == 2);
+    CHECK(ExplorerThemeIndexOf(L"Matter") > 2);
     CHECK(ExplorerThemeIndexOf(L"no such theme") == -1);
     for (int i = 0; i < ExplorerThemeCount(); ++i)
         for (int j = i + 1; j < ExplorerThemeCount(); ++j)
@@ -158,19 +159,31 @@ static void ThemeTable(const std::wstring& root) {
         CHECK(known);
     }
 
-    const size_t b = src.find(L"const Theme g_themeProWindows = {{");
+    // Both ProWindows themes: shared targets that read the style constants, each
+    // with its own defaults and effect.
+    const size_t b = src.find(L"const std::vector<ThemeTargetStyles> g_proWindowsTargets = {");
     CHECK(b != std::wstring::npos);
     const size_t e = b == std::wstring::npos ? b : src.find(L"BackgroundTranslucentEffect::kNone};", b);
     CHECK(e != std::wstring::npos);
     if (b != std::wstring::npos && e != std::wstring::npos) {
         const std::wstring theme = src.substr(b, e - b);
-        CHECK(theme.find(L"#000000") != std::wstring::npos);
+        CHECK(theme.find(L"pwFill=#000000") != std::wstring::npos);
         CHECK(theme.find(L"#1A1A1A") != std::wstring::npos);
         CHECK(theme.find(L"#3A3A3A") != std::wstring::npos);
         CHECK(theme.find(L"#E0E0E0") != std::wstring::npos);
         CHECK(theme.find(L"SystemAccentColor") == std::wstring::npos);   // no accent colour
         CHECK(theme.find(L"CommandBarControlRootGrid") != std::wstring::npos);
         CHECK(theme.find(L"NavigationBarControlGrid") != std::wstring::npos);
+        for (const wchar_t* c : { L"$pwFill", L"$pwHighlight", L"$pwRadius", L"$pwText" })
+            CHECK(theme.find(c) != std::wstring::npos);
+    }
+    const size_t g = src.find(L"const Theme g_themeProWindowsGlass = {g_proWindowsTargets, {");
+    CHECK(g != std::wstring::npos);
+    const size_t ge = g == std::wstring::npos ? g : src.find(L"BackgroundTranslucentEffect::kAcrylic};", g);
+    CHECK(ge != std::wstring::npos);
+    if (g != std::wstring::npos && ge != std::wstring::npos) {
+        const std::wstring glass = src.substr(g, ge - g);
+        CHECK(glass.find(L"pwFill=#99000000") != std::wstring::npos);   // translucent
     }
     // No telemetry survives the port.
     CHECK(src.find(L"StatsTimer") == std::wstring::npos);
@@ -212,6 +225,44 @@ static void IniFile(const std::wstring& dir) {
     CHECK(text.find(L"theme=ProWindows") != std::wstring::npos);
     CHECK(text.find(L"backgroundTranslucentEffect=\r\n") != std::wstring::npos);
     CHECK(Count(text, L"Background=#112233") == 1);
+
+    // The Look page: constants for the ProWindows themes, the region and the
+    // diagnostics choice.
+    CHECK(text.find(L"backgroundTranslucentEffectRegion=entireWindow") != std::wstring::npos);
+    CHECK(text.find(L"xamlDiagnosticsHandling=block") != std::wstring::npos);
+    CHECK(text.find(L"styleConstants[0]=pwFill=#000000") != std::wstring::npos);   // opaque, not Glass
+    CHECK(text.find(L"styleConstants[1]=pwHighlight=<LinearGradientBrush") != std::wstring::npos);
+    CHECK(text.find(L"styleConstants[2]=pwRadius=4") != std::wstring::npos);
+    CHECK(text.find(L"styleConstants[3]=pwText=#FFFFFF") != std::wstring::npos);
+    CHECK(ExplorerThemeIsProWindows(L"ProWindows") && ExplorerThemeIsProWindows(L"ProWindows Glass"));
+    CHECK(!ExplorerThemeIsProWindows(L"Matter"));
+
+    ExplorerLook look;
+    look.tint = RGB(0x20, 0x30, 0x40);
+    look.tintOpacity = 50;       // 127 = 0x7F
+    look.highlight = 2;
+    look.radius = 9;
+    look.text = 1;
+    look.region = 1;
+    look.xaml = 0;
+    CHECK(ExplorerStylerWriteIni(L"ProWindows Glass", L"acrylic", false, look));
+    text = ReadAll(path);
+    CHECK(text.find(L"theme=ProWindows Glass") != std::wstring::npos);
+    CHECK(text.find(L"styleConstants[0]=pwFill=#7F203040") != std::wstring::npos);
+    CHECK(text.find(L"styleConstants[2]=pwRadius=9") != std::wstring::npos);
+    CHECK(text.find(L"styleConstants[3]=pwText=#D0D0D0") != std::wstring::npos);
+    CHECK(text.find(L"styleConstants[1]=pwHighlight=<LinearGradientBrush") != std::wstring::npos);
+    CHECK(text.find(L"backgroundTranslucentEffectRegion=explorerFrame") != std::wstring::npos);
+    CHECK(text.find(L"xamlDiagnosticsHandling=alert") != std::wstring::npos);
+    CHECK(Count(text, L"styleConstants[0]=") == 1);
+    CHECK(Count(text, L"Background=#112233") == 1);          // the user's lines still survive
+    look.highlight = 1;
+    look.xaml = 2;
+    ExplorerStylerWriteIni(L"ProWindows", L"", false, look);
+    text = ReadAll(path);
+    CHECK(text.find(L"styleConstants[0]=pwFill=#203040") != std::wstring::npos);   // Glass alpha dropped
+    CHECK(text.find(L"styleConstants[1]=pwHighlight=<SolidColorBrush") != std::wstring::npos);
+    CHECK(text.find(L"xamlDiagnosticsHandling=allow") != std::wstring::npos);
 }
 
 static void Lifecycle(const std::wstring& dir) {
