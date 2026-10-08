@@ -167,8 +167,13 @@ HBITMAP MakeDib(int w, int h, uint32_t** bits) {
 
 // A premultiplied 32-bit layer the size of `r`, filled by `alphaAt`, blended
 // onto `dc`. The glows are all this shape: a colour, and a per-pixel alpha.
+//
+// `hole` (layer coordinates, optional) is a span the caller knows is fully
+// transparent; the DIB starts zeroed, so those pixels are skipped, not asked.
+// A glow around a wide row is mostly such a span.
 template <typename AlphaAt>
-void BlendLayer(HDC dc, const RECT& r, COLORREF color, AlphaAt alphaAt) {
+void BlendLayer(HDC dc, const RECT& r, COLORREF color, AlphaAt alphaAt,
+                RECT hole = { 0, 0, 0, 0 }) {
     const int w = r.right - r.left, h = r.bottom - r.top;
     if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return;
     uint32_t* bits = nullptr;
@@ -178,7 +183,9 @@ void BlendLayer(HDC dc, const RECT& r, COLORREF color, AlphaAt alphaAt) {
                 cb = (float)GetBValue(color);
     bool any = false;
     for (int y = 0; y < h; ++y) {
+        const bool inHole = y >= hole.top && y < hole.bottom;
         for (int x = 0; x < w; ++x) {
+            if (inHole && x == hole.left) { x = hole.right - 1; continue; }
             float a = alphaAt(x, y);
             if (a <= 0.0f) { bits[(size_t)y * w + x] = 0; continue; }
             if (a > 255.0f) a = 255.0f;
@@ -424,6 +431,10 @@ void Glow(HDC dc, const RECT& r, COLORREF color, int spread, BYTE peak) {
     const float right = left + (float)(r.right - r.left) - 1.0f;
     const float bottom = top + (float)(r.bottom - r.top) - 1.0f;
     const float p = (float)peak;
+    // Deeper than `inner` from every edge the alpha is zero: skip it.
+    RECT hole = { (int)std::ceil(left + inner), (int)std::ceil(top + inner),
+                  (int)std::floor(right - inner) + 1, (int)std::floor(bottom - inner) + 1 };
+    if (hole.right <= hole.left || hole.bottom <= hole.top) hole = { 0, 0, 0, 0 };
     BlendLayer(dc, o, color, [&](int x, int y) -> float {
         const float fx = (float)x, fy = (float)y;
         const float dx = fx < left ? left - fx : (fx > right ? fx - right : 0.0f);
@@ -440,7 +451,7 @@ void Glow(HDC dc, const RECT& r, COLORREF color, int spread, BYTE peak) {
         if (d >= 1.0f) return 0.0f;
         const float k = 1.0f - d;
         return p * 0.55f * k * k;
-    });
+    }, hole);
 }
 
 void Haze(HDC dc, const RECT& r, COLORREF color, BYTE peak) {
