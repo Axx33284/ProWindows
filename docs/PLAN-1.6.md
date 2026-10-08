@@ -261,6 +261,11 @@ Measure before and after each change: private bytes and GDI/USER objects of the 
 - [ ] **3.4** **Focus-follows-mouse polls** every 120 ms (`main.cpp` `TIMER_MOUSE`), against the
   "never polls" rule. Replace with the `WM_MOUSE`-hook-only-while-needed pattern `moddrag.cpp`
   already uses, or `EVENT_OBJECT_LOCATIONCHANGE` on the cursor — O to choose; S implements.
+  **O chose (2026-10-08):** `EVENT_OBJECT_LOCATIONCHANGE` / `OBJID_CURSOR` through an
+  out-of-context `SetWinEventHook`, installed only while focus-follows-mouse is on; each event
+  arms the one coalescing timer. No `WH_MOUSE_LL`: it adds latency to every mouse move on the
+  machine. If `main.cpp` already does this (grep "the cursor arms one timer"), only remove
+  what still polls.
 - [ ] **3.5** **Meters must not cost.** The 1 s meter timer runs only while the settings window
   is visible and in front; getters read cached numbers, never walk anything.
 - [ ] **3.6** **Binary size.** `dumpbin /headers` and a map file (`/MAP`) on `ProWindows.exe`
@@ -540,3 +545,124 @@ here whenever a shortcut slips your mind."
 - [x] **6.2 (O)** Review 6.1 and 5.D1 together. Passes inv. 67/74/78/79; Show actions rebase
   through `SettingsRefresh` (78). Fixed: a stale comment, and the first-run balloon that said
   "click the tray icon to set it up" over a settings window already open.
+
+## Phase 7 — the Clock panel: Win+W, a mouse-first design, alarms (user, 2026-10-08)
+
+The user: open the timer/clock with **Win+W**; the panel is "too keyboard focused" - model it
+on the most popular desktop clock app, in the app's theme; and add **alarms** - once (this
+hour, this day), every hour, daily, weekly, monthly, limited to chosen weeks and months, named,
+"and everything else".
+
+**Model: the Windows 11 Clock app**, in Requiem tokens (`theme.h`: `Bg` black, `Metal1..3`
+gradients for the selected/pressed thing, `MetalEdge` frames, `TextHi/Text/TextDim/TextMute`,
+`Warn` for ringing; `Font::Heading/Row/Small/Tab`; spaced caps via `Caps` + `SpacedWidth` /
+`DrawSpaced`, inv. 77). Everything is clickable; every button has a hover and pressed state;
+the mouse wheel changes any number under the pointer. Keys keep working (Tab/Ctrl+Tab pages,
+Space, Esc, Enter, Del, digits) but the two-line footer of key prompts goes - no prompt is
+shown that is not a real key (inv. 74 still holds trivially).
+
+### 7.A Window and navigation
+- One overlay window (the 5.D overlay: drag, pin = layered + click-through, `timerX/Y`,
+  `timerShown`, game mode / display-off hiding). The tray "Timer" submenu is renamed
+  **"Clock panel"**. Default size 880 × 560 DIP; DPI as 5.D (R2).
+- **Left rail** (196 DIP): four pages with a drawn glyph + label: **Clock**, **Alarm**,
+  **Timer**, **Stopwatch**. Selected = metal gradient pill + `TextHi`; hover = `Metal1` wash.
+  The page is remembered in `timers.ini`. The empty rail area and the top 40 DIP strip drag the
+  window (unpinned).
+- **Top-right buttons** (drawn, 32 DIP square): a pushpin (toggles `timerPinned`) and × (hide,
+  as Esc). A pinned panel is click-through, so unpinning stays in the tray / Settings, as for
+  the monitor.
+- Split painting out of `timer.cpp` (e.g. `src/clockpanel_paint.cpp`) once it passes ~400
+  lines.
+
+### 7.B Pages
+- **Clock.** The local time very large (follows `clockHours24` / `clockSeconds`), the date
+  under it, then two cards: "Next alarm" (name, when, "in 3 h 12 min") and "Running" (each
+  running timer and the stopwatch with its live reading). Clicking a card opens its page.
+- **Timer.** A grid of cards (2-3 columns by width, wheel scrolls). Each card: name, a
+  **progress ring** (GDI+ anti-aliased arc, bright while running, `Warn` when done) with the
+  remaining time large in its centre, and round **Play/Pause** and **Reset** buttons; hovering
+  shows **Edit** (pencil) and **Delete** (bin). A round **+** bottom-right adds one.
+  Quick-start chips above the grid: 1, 3, 5, 10, 15, 30 min, 1 h (click = new timer of that
+  length, started). Max 8 timers stays.
+- **Stopwatch.** The reading very large, centred (tenths while visible); three round buttons
+  under it: **Start/Pause** (largest), **Lap** (flag), **Reset**. Laps table: Lap, Time,
+  Total; the fastest lap `TextHi` with a "fastest" tag, the slowest `TextDim` with "slowest".
+- **Alarm.** A scrolling list of alarm cards: time large, name, repeat summary ("Mon, Wed,
+  Fri" / "Every hour at :15, 09-17" / "1st, 15th and last day · Jan, Jun" / "Once · Thu 9
+  Oct"), "Rings in 3 h 12 min" on the next one, and a **toggle switch** on the right
+  (enabled). Click a card to edit; hover shows Delete. **+** adds. Max 32 alarms.
+
+### 7.C Editors
+Drawn in-panel as a sheet over the page (`Bg`, `MetalEdge` frame); Esc / Cancel close, Enter /
+Save commit.
+- **Number spinners** for every time field: the value large, ▲ above and ▼ below; wheel and
+  digits work; minutes and hours wrap.
+- **Name**: a single-line text field (caret, select-all on focus, Backspace, Ctrl+A,
+  Ctrl+Backspace, Ctrl+V, max 40 chars). Reuse the search bar's edit handling in
+  `launcher.cpp` if it factors out cleanly; otherwise a small local one.
+- **Timer editor**: name, days / hours / minutes / seconds spinners (days 0-9999), Save, Cancel.
+- **Alarm editor**: name; time (hour, minute; AM/PM chip when 12-hour); a **Repeat** segmented
+  control **Once · Hourly · Daily · Weekly · Monthly**; then, by repeat:
+  - Once: the date (day / month / year spinners) with **Today** and **Tomorrow** chips. "Just
+    this hour" = Once today at the chosen minute. A new alarm defaults to Once at the next
+    whole hour (today, or tomorrow if that has passed).
+  - Hourly: minute of the hour; optional **between** hour-from and hour-to (inclusive;
+    default all day).
+  - Daily: nothing more.
+  - Weekly: seven weekday chips (Monday first), at least one.
+  - Monthly: a 31-day grid + a **Last day** chip, at least one.
+  - Every repeating kind has a **Limit to** section, collapsed by default: **Weeks of the
+    month** chips (1st-5th, Last; none = all), **Months** chips (Jan-Dec; none = all),
+    **Weekdays** chips for Hourly and Daily (none = all), and an optional **Until** date.
+  - **Sound** toggle (off: banner + balloon only); **Snooze** 5 / 10 / 15 / 30 min; **Delete**
+    (existing alarms only), Cancel, Save.
+
+### 7.D The alarm model (`src/alarm.h/.cpp`, pure functions, tested)
+- `struct Alarm { label; enabled; hour, minute; kind {Once,Hourly,Daily,Weekly,Monthly};
+  date y/m/d (Once); hourFrom, hourTo (Hourly); weekdays (7 bits, Mon = bit 0); monthDays
+  (bits 0-30 = days 1-31, bit 31 = last day); weeks (bits 0-4 = 1st-5th, bit 5 = last;
+  0 = all); months (12 bits; 0 = all); until date (0 = none); sound; snoozeMin;
+  snoozeUntilUtc; lastFiredUtc }`.
+- Alarms are **local wall time** (timers stay UTC, inv. 88). `NextFire(alarm, nowUtc, conv)`
+  returns the next UTC instant strictly after `max(nowUtc, lastFiredUtc)`, walking days (give up
+  after ~5 years = never). `conv` is an injected local<->UTC converter: the app passes one built
+  on `TzSpecificLocalTimeToSystemTime` / `SystemTimeToTzSpecificLocalTime`; tests pass fakes
+  with a DST gap and a repeated hour, so they do not depend on the machine's zone. A local time
+  inside a spring-forward gap rings at the first minute after the gap; a repeated hour rings
+  once. Week of the month = `(day - 1) / 7 + 1`; "last" = `day + 7 > daysInMonth`. Days 29-31
+  skip months without them; Last day always matches.
+- A Once alarm disables itself after it fires (kept, so it can be re-armed). An alarm past its
+  until date disables itself.
+- **Waking** joins 5.B's single `SetTimer`: the next deadline is the earliest of timers, alarms
+  and snoozes, clamped as before (inv. 90). `WM_TIMECHANGE` and resume recompute (alarms follow
+  the local clock, so a moved clock matters to them).
+- **Missed** (due more than 10 s ago when looked at: the PC was off or asleep): no ringing; one
+  balloon "Missed while you were away" listing them, as the timers do.
+- **Ringing**: the `StartAlarm` loop if `sound`; a tray balloon with the name; the panel shows
+  (not activated, R3) on the Alarm page with a **ringing banner**: name, time, large **Snooze
+  (N min)** and **Dismiss** buttons. The tray "Clock panel" submenu shows Snooze / Dismiss
+  while an alarm rings (a timer's ring keeps "Stop alarm"). 60 s unanswered = dismissed.
+- Storage: `timers.ini`, `a<i>.*` keys, the same `.new` + `MoveFileExW` rule (inv. 89).
+
+### 7.E Win+W
+- Default `{ L"win+w", ACT_TIMER, 0 }`; `DescribeAction` "Open the clock panel". Win+W is the
+  shell's **Widgets** chord, so it only works through the keyboard hook, as Win+S does
+  (`overrideReserved`); check the log says `chord busy, hooking: win+w`.
+- Migration: a config written by a dev build may already be at version 5 (5.D note), so
+  `kConfigVersion` → **6** and `kAdded` gets `{ L"win+w", ACT_TIMER, true }` "added in
+  version 6".
+- Win+W toggles: shows the panel (on the Clock page) if hidden, hides it if shown.
+- Wording sweep: Welcome page (Keys → the clock panel row; Start here → "Clock panel" try-row),
+  settings_keys help, ipc help, README What's new, MAP "Timer" heading → "Clock panel", tray.
+
+### 7.F Tasks
+- [ ] **7.1 (S)** `alarm.h/.cpp` model, alarms in `timers.ini`, `tests\alarm_test.cpp` (run by
+  `tests\run.bat`): every kind; weekdays, weeks of the month (incl. last), months, until; day 31
+  in short months; last day of a leap February; DST gap and repeated hour with the fake
+  converter; missed alarms reported once; Once disables after firing; snooze.
+- [ ] **7.2 (S)** The panel redesign (7.A-7.C), alarm firing / banner / tray (7.D), Win+W
+  (7.E). `tests\timershot` shoots every page, both editors (the alarm editor once per repeat
+  kind), the ringing banner, pinned and unpinned. Green: build, run, timershot, uishot.
+- [ ] **7.3 (O)** Review 7.1-7.2 against inv. 67/74/77/78/79/88-90 and "the UI thread never
+  waits".
