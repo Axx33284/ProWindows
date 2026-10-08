@@ -875,14 +875,17 @@ bool Config::LoadFromFile(const std::wstring& path) {
         // does not want a second one imposed on it. Win+S is the exception -
         // it is a second, more familiar way to reach a launcher that most
         // existing configs already have on $mod+r, so it is added regardless.
-        struct AddedBind { const wchar_t* spec; Action act; bool onlyIfUnbound; };
+        // `version` is the release that added it: a file already at or past it
+        // has seen it once, and a user who removed it meant to.
+        struct AddedBind { const wchar_t* spec; Action act; bool onlyIfUnbound; int version; };
         static const AddedBind kAdded[] = {
-            { L"$mod+r", ACT_LAUNCHER, true  },   // added in version 2
-            { L"win+s",  ACT_LAUNCHER, false },   // added in version 3
-            { L"win+w",  ACT_TIMER,    true  },   // added in version 6
+            { L"$mod+r", ACT_LAUNCHER, true,  2 },
+            { L"win+s",  ACT_LAUNCHER, false, 3 },
+            { L"win+w",  ACT_TIMER,    true,  6 },
         };
 
         for (const auto& add : kAdded) {
+            if (fileVersion >= add.version) continue;
             if (add.onlyIfUnbound) {
                 bool haveAction = false;
                 for (const auto& b : binds)

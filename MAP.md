@@ -84,6 +84,9 @@ build.bat
 | `src\clocktheme.*` | The clock's colour schemes, typefaces and layouts. Tables of plain data; a skin names its face too. |
 | `src\clockpaint.*` | The clock's twelve layouts. Each is one function that lays itself out and, when asked, paints — so the measure and the drawing cannot disagree. |
 | `src\clock.*` | The clock window: the monitor's drag, pin, desktop mode, snap points and menu, with a timer that wakes on the next second or minute boundary. |
+| `src\timer.*` | The clock panel: timers, stopwatch and alarms state, timers.ini, keys, commands, ringing and the one wake-up (inv. 88-91). |
+| `src\clockpanel_paint.cpp`, `clockpanel.h` | The clock panel painted from a `Model` into a `View` of hit rects: rail, pages, sheets, ringing banner. |
+| `src\alarm.*` | The alarm model: pure schedule maths over an injected time zone, summaries, the `a<i>.*` keys (inv. 91). |
 | `src\launcher.*` | The search bar's window: query, ranking, painting, the row menu and the app catalogue scan. |
 | `src\search.*` | What the search bar finds: the file and program index and its walk thread, the ms-settings table, the calculator, and the fuzzy scorer every source shares. No Win32 UI. |
 | `src\appicon.*` | The shell icons the search bar draws, fetched on a thread of their own and cached in `icons.cache`. |
@@ -503,8 +506,23 @@ appended at the end of the numbering.
     game mode and display-off through `UpdateOverlayVisibility`; the alarm shows it the same way
     and never takes the keyboard. A visible panel
     aligns to the next whole second (100 ms while the stopwatch shows tenths). A hidden panel uses
-    one `SetTimer` for `min(next deadline, 60 s)`, or 1 s only while the tick is on. `SetTimer`
-    caps at about 24.8 days, so always clamp. No thread and no resident DIB while hidden (67).
+    one `SetTimer` for `min(next deadline, 1 h)`, or 1 s only while the tick is on. The hour is
+    not what catches a moved clock or zone (`WM_TIMECHANGE`, which the hidden top-level popup
+    receives) nor sleep (resume and display-on call `TimerCheckNow`); it bounds the drift between
+    SetTimer's tick clock and the NTP-slewed wall clock far below the 10 s "missed" threshold, so
+    do not raise it to the deadline. `SetTimer` caps at about 24.8 days, so always clamp. No
+    thread and no resident DIB while hidden (67).
+
+91. **Alarms are local wall time, through an injected zone; timers stay UTC.** `src\alarm.*` is
+    pure: `NextAfter` / `TakeDue` take `now` and an `alarm::Zone` (the app passes `SystemZone()`,
+    tests pass fakes with a DST gap and a repeated hour). A gap time rings at the first minute
+    after it, a repeated hour once. `lastFiredUtc` is also the baseline: saving, editing or
+    re-enabling an alarm calls `Arm(now)`, so nothing rings for the past; `TakeDue` collapses
+    every ring since the baseline into one report, and one due over 10 s ago is *missed*
+    (balloon), not rung. A Once alarm disables itself after firing; a snooze still rings. Ring
+    and ring-queue entries hold alarm indices, so `DeleteAlarm` renumbers them. Painting is
+    `src\clockpanel_paint.cpp` (`clockpanel.h`: `Model`, `View`, hits); state, keys and waking
+    stay in `src\timer.cpp`. Fonts are cached per DIP size and DPI and freed on hide.
 
 ### The search bar
 

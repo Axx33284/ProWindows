@@ -459,14 +459,17 @@ void Relayout() {
 // Nothing polls. With nothing to wake for there is no OS timer at all; otherwise
 // exactly one SetTimer sleeps until the earliest of: a timer's end, an alarm's
 // next ring or snooze, the next change the panel would show (only while it is
-// up), the next tick sound, and a minute (a ceiling that also covers the clock
-// being moved under us).
+// up), the next tick sound, and an hour. A moved clock or zone is WM_TIMECHANGE
+// and sleep is the resume call, so the ceiling is not what catches those; it
+// bounds the drift between SetTimer's tick clock and the wall clock (NTP slews
+// the wall clock) to well under the 10 s after which a ring counts as missed.
 void Reschedule() {
     if (!g_wnd) return;
 
     const Ticks now = NowUtc();
     const bool shown = Visible();
-    Ticks delay = 60 * kSecond;
+    constexpr Ticks kCeiling = 3600 * kSecond;
+    Ticks delay = kCeiling;
     bool need = false;
     auto sooner = [&](Ticks d) { need = true; if (d < delay) delay = d; };
     auto toSecond = [&] { sooner(kSecond - now % kSecond); };
@@ -515,7 +518,7 @@ void Reschedule() {
     // A few ms past the boundary, so the timer does not land just before it.
     long long ms = delay / 10000 + 8;
     if (ms < 10) ms = 10;
-    if (ms > 60000) ms = 60000;       // SetTimer's own cap is ~24.8 days
+    if (ms > kCeiling / 10000) ms = kCeiling / 10000;    // also under SetTimer's ~24.8-day cap
     SetTimer(g_wnd, kTimerTick, (UINT)ms, nullptr);
 }
 

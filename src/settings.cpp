@@ -1662,6 +1662,10 @@ LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_SIZE:
+            // Restored from the taskbar or Alt+Tab, the activation can arrive while
+            // still iconic, and WM_ACTIVATE then left the meter tick off.
+            if (wp == SIZE_MINIMIZED) KillTimer(wnd, kTimerMeters);
+            else if (GetForegroundWindow() == wnd) SetTimer(wnd, kTimerMeters, 1000, nullptr);
             theme::SetDpi(DpiForWindow(wnd));
             DoLayout();
             Invalidate();

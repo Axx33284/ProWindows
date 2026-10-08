@@ -664,5 +664,13 @@ Save commit.
 - [x] **7.2 (S)** The panel redesign (7.A-7.C), alarm firing / banner / tray (7.D), Win+W
   (7.E). `tests\timershot` shoots every page, both editors (the alarm editor once per repeat
   kind), the ringing banner, pinned and unpinned. Green: build, run, timershot, uishot.
-- [ ] **7.3 (O)** Review 7.1-7.2 against inv. 67/74/77/78/79/88-90 and "the UI thread never
+- [x] **7.3 (O)** Review 7.1-7.2 against inv. 67/74/77/78/79/88-90 and "the UI thread never
   waits".
+
+### 7.G Decisions
+- **Idle wake ceiling: 1 h, not the deadline (7.3).** A moved clock or zone arrives as
+  `WM_TIMECHANGE` (the hidden panel is a top-level popup, so the broadcast reaches it) and sleep
+  as the resume call, plus display-on now calls `TimerCheckNow` for modern standby; so the
+  ceiling is only there for drift between SetTimer's tick clock and the NTP-slewed wall clock.
+  Over 24 days that drift can pass the 10 s "missed" line and turn a ring into a balloon; over
+  an hour it is a fraction of a second. 24 wakes a day instead of 1440 (inv. 90).

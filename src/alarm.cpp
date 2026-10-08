@@ -162,11 +162,15 @@ Ticks NextAfter(const Alarm& a, Ticks after, const Zone& zone) {
         CivilFromDay(day0 + i, &y, &m, &d);
         if (a.until && Ymd(y, m, d) > a.until) return 0;
         if (!DayMatches(a, y, m, d, (int)((day0 + i) % 7))) continue;
+        // Resolve never goes backwards as the hour grows (a gap moves forward, a
+        // repeat takes its first instant), so the first hour past `after` is the
+        // earliest: stop there. An hourly alarm walked over a week asleep would
+        // otherwise convert all 24 hours of every day, on the UI thread.
         Ticks best = 0;
-        for (int h = lo; h <= hi; ++h) {
+        for (int h = lo; h <= hi && !best; ++h) {
             LocalTime lt; lt.year = y; lt.month = m; lt.day = d; lt.hour = h; lt.minute = minute;
             const Ticks u = Resolve(zone, lt);
-            if (u > after && (best == 0 || u < best)) best = u;
+            if (u > after) best = u;
         }
         if (best) return best;
         if (a.kind == Kind::Once) return 0;       // its one day has passed
@@ -199,6 +203,9 @@ std::vector<Fired> TakeDue(std::vector<Alarm>& alarms, Ticks now, const Zone& zo
             any = true;
             a.snoozeUntilUtc = 0;
         }
+        // Never armed (a hand-written timers.ini): the walk would start in 1601 and
+        // find nothing, so it would never ring. It rings from now on instead.
+        if (a.enabled && a.lastFiredUtc <= 0) a.lastFiredUtc = now;
         if (a.enabled) {
             // Walk every ring since the last one; a week asleep is one report, not 168.
             Ticks cur = a.lastFiredUtc, last = 0;

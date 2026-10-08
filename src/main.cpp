@@ -758,6 +758,8 @@ static void SetDisplayOff(bool off) {
     if (off) SetTimer(g_wnd, TIMER_DISPLAY, 5 * 1000, nullptr);
     else     KillTimer(g_wnd, TIMER_DISPLAY);
     UpdateOverlayVisibility();
+    // Modern standby can end without a resume broadcast: what came due meanwhile fires now.
+    if (!off) TimerCheckNow();
 }
 void AppRefreshSettings() { SettingsRefresh(); }
 void AppOpenMonitorSettings() { SettingsOpenTab(PAGE_MONITOR); }
