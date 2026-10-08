@@ -1,7 +1,7 @@
-// ProWindows - the timer and stopwatch overlay.
+// ProWindows - the clock panel: clock, alarms, countdown timers and a stopwatch.
 //
-// A panel with two pages, countdown timers and a stopwatch, that stays where it
-// was put like the monitor and the clock: drag it, pin it, hide it.
+// An overlay that stays where it was put like the monitor and the clock: drag it,
+// pin it, hide it. (Painting is in clockpanel_paint.cpp, alarms in alarm.cpp.)
 // Everything is anchored to the system clock (UTC), never to tick counts, so a
 // running timer survives sleep, hibernate, shutdown and restart and is exactly
 // where the wall clock says it should be the next time anyone looks.
@@ -37,12 +37,23 @@ bool TimerPinned();
 bool TimerAlarming();
 void TimerStopAlarm();
 
+// An alarm (not a timer) is ringing: the panel shows its banner and the tray menu
+// offers Snooze and Dismiss, which also work with a pinned, click-through panel.
+bool TimerAlarmRinging();
+void TimerSnoozeAlarm();
+void TimerDismissAlarm();
+
 // Re-reads the config (pin, position, tick mode, alarm) and re-plans the wake-up.
 void TimerApplyConfig();
 
 // Where timers.ini lives; the default is ConfigDir(). Call before TimerInit.
 // Tests point it at a scratch file so they never touch the real one.
 void TimerSetStorePath(const std::wstring& path);
+
+// For tests: where the button for `cmd` / `arg` (clockpanel.h) was last painted, in
+// client coordinates; and ringing alarm `index` as if it had just come due.
+bool TimerHitRect(int cmd, int arg, RECT* clientRect);
+void TimerRingAlarm(int index);
 
 // Looks at the clock now: anything that finished while the PC slept fires.
 // Called on resume from sleep.
@@ -78,6 +89,7 @@ struct State {
     std::vector<Timer> timers;
     Stopwatch watch;
     std::vector<alarm::Alarm> alarms;   // stored in the same file, see alarm.h
+    int page = 0;                       // the clock panel's page, remembered
 };
 
 struct Finished {

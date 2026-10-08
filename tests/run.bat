@@ -62,7 +62,7 @@ REM The timer model: pure functions over a state, with the clock passed in.
 cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UNICODE ^
        /MT /GR- ^
        "%~dp0timer_test.cpp" ^
-       "%ROOT%src\timer.cpp" "%ROOT%src\alarm.cpp" "%ROOT%src\theme.cpp" ^
+       "%ROOT%src\timer.cpp" "%ROOT%src\clockpanel_paint.cpp" "%ROOT%src\alarm.cpp" "%ROOT%src\theme.cpp" ^
        "%ROOT%src\winutil.cpp" "%ROOT%src\common.cpp" "%ROOT%src\config.cpp" ^
        "%ROOT%src\defaults.cpp" "%ROOT%src\montheme.cpp" "%ROOT%src\clocktheme.cpp" ^
        /Fe:timer_test.exe ^
@@ -81,7 +81,7 @@ REM The alarm model: local-time schedules over a fake zone, no machine zone need
 cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UNICODE ^
        /MT /GR- ^
        "%~dp0alarm_test.cpp" ^
-       "%ROOT%src\timer.cpp" "%ROOT%src\alarm.cpp" "%ROOT%src\theme.cpp" ^
+       "%ROOT%src\timer.cpp" "%ROOT%src\clockpanel_paint.cpp" "%ROOT%src\alarm.cpp" "%ROOT%src\theme.cpp" ^
        "%ROOT%src\winutil.cpp" "%ROOT%src\common.cpp" "%ROOT%src\config.cpp" ^
        "%ROOT%src\defaults.cpp" "%ROOT%src\montheme.cpp" "%ROOT%src\clocktheme.cpp" ^
        /Fe:alarm_test.exe ^

@@ -42,13 +42,15 @@ out like the menus of *Resident Evil Requiem*, which opens when you launch it.
 - **A smaller icon cache**: only the size the search bar draws is kept, and
   icons unused for 30 days are dropped - 813 KB down to 92 KB on the machine it
   was measured on.
-- **A timer and stopwatch.** An overlay like the clock, shown from the tray's Timer
-  menu or the Clock page of the settings (no default key; bind the `timer` action
-  if you want one). Drag it, pin it in place. It has two pages, Timer and
-  Stopwatch: up to 8 countdowns, and laps on the stopwatch. Both are anchored to
-  the system clock, so they keep going through sleep, hibernation and restarts.
-  An alarm can be turned on, and a tick sound (`timer_tick` = `off`, `second` or
-  `minute`) can be heard while something runs.
+- **A clock panel on Win+W.** An overlay like the clock, in the style of the Windows
+  Clock app: four pages in a left rail, Clock, Alarm, Timer and Stopwatch. Alarms ring
+  once, hourly, daily, weekly or monthly, limited to weeks of the month, months and an
+  end date, with snooze; up to 8 countdowns with progress rings; laps on the
+  stopwatch. Shown from Win+W (the `timer` action; it works through the keyboard hook
+  because Win+W is the shell's Widgets chord) or the tray's Clock panel menu. Drag it,
+  pin it in place. Timers are anchored to the system clock and alarms to local time, so
+  they keep going through sleep, hibernation and restarts. A tick sound (`timer_tick` =
+  `off`, `second` or `minute`) can be heard while something runs.
 - **Fixes:** Apply no longer loses your changes when `config.ini` cannot be
   written; a window that dropped out of the layout is put back; "Reset to
   defaults" could reset the wrong category; a taken shortcut confirmed during a

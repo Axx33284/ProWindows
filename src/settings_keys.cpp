@@ -77,7 +77,7 @@ const wchar_t* HelpFor(Action a) {
         case ACT_CLOSE_WINDOW:      return L"Closes the focused window, as its own close button would.";
         case ACT_MINIMIZE:          return L"Minimises the focused window.";
         case ACT_LAUNCHER:          return L"Opens the search bar: apps, files, settings and sums.";
-        case ACT_TIMER:             return L"Shows the timer and stopwatch panel, or hides it. Timers keep running by the system clock.";
+        case ACT_TIMER:             return L"Shows the clock panel (clock, alarms, timers, stopwatch) or hides it. Alarms and timers keep running by the system clock.";
         case ACT_RELOAD_CONFIG:     return L"Reads config.ini again.";
         case ACT_QUIT:              return L"Quits ProWindows. Every hidden window is shown again first.";
         default:                    return L"";

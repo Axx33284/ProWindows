@@ -69,7 +69,7 @@ void BuildWelcomePage(std::vector<Row>& rows) {
         L"ProWindows arranges every window on your screen into a layout so nothing overlaps "
         L"and nothing is lost behind something else. Add workspaces to keep projects apart, "
         L"move around from the keyboard, and put a search bar, a system monitor, a clock and "
-        L"a timer on the desktop. Everything is in the tabs above.",
+        L"a clock panel with alarms and timers on the desktop. Everything is in the tabs above.",
         []() { return std::wstring(L"Layouts, workspaces, overlays"); }));
 
     rows.push_back(ui::Section(L"Try these"));
@@ -78,10 +78,11 @@ void BuildWelcomePage(std::vector<Row>& rows) {
         L"Opens the search bar: type to find apps, files, settings and sums. Press the "
         L"shortcut shown to open it any time.",
         L"Open", []() { LauncherToggle(); }));
-    rows.push_back(ui::Action(L"trytimer", L"Timer",
-        L"Shows the timer and stopwatch panel on your screen. Drag it anywhere; right-click "
-        L"it for more. Timers keep running while it is hidden.",
-        L"Show", []() { ShowOverlay(&Config::timerShown, L"The timer is on screen"); }));
+    rows.push_back(ui::Action(L"trytimer",
+        L"Clock panel  (" + ChordOf(ACT_TIMER, 0) + L")",
+        L"Opens the clock panel: the time, alarms, timers and a stopwatch. Drag it anywhere; "
+        L"alarms and timers keep running while it is hidden.",
+        L"Show", []() { ShowOverlay(&Config::timerShown, L"The clock panel is on screen"); }));
     rows.push_back(ui::Action(L"trymonitor", L"System monitor",
         L"Shows a small floating panel with processor, memory and network use, always up to "
         L"date. Choose what it shows on the Monitor tab.",
@@ -152,13 +153,13 @@ void BuildWelcomePage(std::vector<Row>& rows) {
         L"A clock on your screen in one of a dozen styles. Drag it anywhere; right-click it "
         L"for style, theme and size. \"Pin in place\" locks it and lets clicks pass through.",
         L"Show", []() { ShowOverlay(&Config::clockEnabled, L"The clock is on screen"); }));
-    rows.push_back(ui::Section(L"Timer"));
-    rows.push_back(ui::Action(L"ovtimer", L"Timer and stopwatch",
-        L"Countdown timers and a stopwatch that keep running by the system clock, even while "
-        L"hidden. Drag the panel anywhere; right-click it for more. \"Pin in place\" locks it "
-        L"and lets clicks pass through. The Timer item in the tray menu shows, pins and stops "
-        L"the alarm.",
-        L"Show", []() { ShowOverlay(&Config::timerShown, L"The timer is on screen"); }));
+    rows.push_back(ui::Section(L"Clock panel"));
+    rows.push_back(ui::Action(L"ovtimer", L"Clock, alarms, timers and stopwatch",
+        L"A Windows-style clock app: alarms that repeat by hour, day, week or month, countdown "
+        L"timers and a stopwatch, all kept by the system clock even while hidden. Drag the "
+        L"panel anywhere; the pin button locks it and lets clicks pass through. The Clock panel "
+        L"item in the tray menu shows, pins, snoozes and dismisses.",
+        L"Show", []() { ShowOverlay(&Config::timerShown, L"The clock panel is on screen"); }));
     rows.push_back(ui::Action(L"ovsettings", L"Look and behaviour",
         L"Styles, colours, size and what each overlay shows are on the Monitor and Clock tabs.",
         L"Clock tab", []() { SettingsOpenTab(PAGE_CLOCK); }));

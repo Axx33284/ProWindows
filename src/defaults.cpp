@@ -256,8 +256,8 @@ bool Config::SaveToFile(const std::wstring& path) const {
     fwprintf(f, L"clock_weekday    = %s\n\n", Bool(clockWeekday));
 
     fwprintf(f, L"# ------------------------------------------------------------ timer\n");
-    fwprintf(f, L"# The timer and stopwatch overlay: drag it, pin it. It has no default key;\n");
-    fwprintf(f, L"# bind the `timer` action to show or hide it.\n");
+    fwprintf(f, L"# The clock panel (clock, alarms, timers, stopwatch): drag it, pin it. Win+W\n");
+    fwprintf(f, L"# shows or hides it (the `timer` action).\n");
     fwprintf(f, L"timer_shown      = %s\n", Bool(timerShown));
     fwprintf(f, L"timer_pinned     = %s\n", Bool(timerPinned));
     fwprintf(f, L"timer_x          = %d\n", timerX);

@@ -30,7 +30,7 @@ if not exist "%ROOT%\tests\shots" mkdir "%ROOT%\tests\shots"
 
 cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UNICODE ^
     /O2 /MT /Fo:"%ROOT%\tests\build\ts\\" ^
-    "%ROOT%\tests\timershot.cpp" "%ROOT%\src\timer.cpp" "%ROOT%\src\alarm.cpp" ^
+    "%ROOT%\tests\timershot.cpp" "%ROOT%\src\timer.cpp" "%ROOT%\src\clockpanel_paint.cpp" "%ROOT%\src\alarm.cpp" ^
     "%ROOT%\src\theme.cpp" "%ROOT%\src\winutil.cpp" "%ROOT%\src\common.cpp" ^
     "%ROOT%\src\config.cpp" "%ROOT%\src\defaults.cpp" "%ROOT%\src\montheme.cpp" "%ROOT%\src\clocktheme.cpp" ^
     /Fe:"%ROOT%\tests\build\timershot.exe" ^

@@ -40,6 +40,7 @@ enum : UINT {
     IDM_SETTINGS, IDM_WELCOME, IDM_SHORTCUTS, IDM_MONITOR, IDM_MONITOR_PIN, IDM_ELEVATE,
     IDM_ELEVAUTO, IDM_DIAG, IDM_CLOCK, IDM_CLOCK_PIN, IDM_MONITOR_SETTINGS,
     IDM_CLOCK_SETTINGS, IDM_TIMER, IDM_TIMER_PIN, IDM_TIMER_STOP, IDM_TIMER_SETTINGS,
+    IDM_ALARM_SNOOZE, IDM_ALARM_DISMISS,
     IDM_LAYOUT_BASE = 200,
     IDM_WORKSPACE_BASE = 300,
 };
@@ -1000,11 +1001,16 @@ static void ShowTrayMenu() {
                            (g_cfg.timerShown ? 0 : MF_GRAYED),
                 IDM_TIMER_PIN, L"Pin in place");
     // A pinned panel cannot take a key, so this is how a ringing alarm is stopped.
-    if (TimerAlarming()) AppendMenuW(timerMenu, MF_STRING, IDM_TIMER_STOP, L"Stop alarm");
+    if (TimerAlarmRinging()) {
+        AppendMenuW(timerMenu, MF_STRING, IDM_ALARM_SNOOZE, L"Snooze alarm");
+        AppendMenuW(timerMenu, MF_STRING, IDM_ALARM_DISMISS, L"Dismiss alarm");
+    } else if (TimerAlarming()) {
+        AppendMenuW(timerMenu, MF_STRING, IDM_TIMER_STOP, L"Stop alarm");
+    }
     AppendMenuW(timerMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(timerMenu, MF_STRING, IDM_TIMER_SETTINGS, L"Timer settings...");
+    AppendMenuW(timerMenu, MF_STRING, IDM_TIMER_SETTINGS, L"Clock panel settings...");
     AppendMenuW(menu, MF_POPUP | (g_cfg.timerShown ? MF_CHECKED : 0),
-                (UINT_PTR)timerMenu, L"Timer");
+                (UINT_PTR)timerMenu, L"Clock panel");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     // ---- maintenance
@@ -1179,6 +1185,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 case IDM_TIMER_PIN:      TimerSetPinned(!g_cfg.timerPinned); break;
                 case IDM_TIMER_STOP:     TimerStopAlarm(); break;
+                case IDM_ALARM_SNOOZE:   TimerSnoozeAlarm(); break;
+                case IDM_ALARM_DISMISS:  TimerDismissAlarm(); break;
                 case IDM_TIMER_SETTINGS: SettingsOpenTab(PAGE_CLOCK); break;
                 case IDM_MONITOR_SETTINGS: SettingsOpenTab(PAGE_MONITOR); break;
                 case IDM_CLOCK_SETTINGS:   SettingsOpenTab(PAGE_CLOCK); break;

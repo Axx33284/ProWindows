@@ -348,7 +348,7 @@ std::wstring DescribeAction(const Keybind& kb) {
         case ACT_TOGGLE_TILING:     return L"Pause / resume arranging";
         case ACT_TOGGLE_GAPS:       return L"Show / hide the gaps";
         case ACT_LAUNCHER:          return L"Open the app launcher";
-        case ACT_TIMER:             return L"Open the timer and stopwatch";
+        case ACT_TIMER:             return L"Open the clock panel";
         case ACT_FOCUS_MONITOR:
             return kb.arg < 0 ? L"Focus the previous monitor" : L"Focus the next monitor";
         case ACT_MOVE_TO_MONITOR:
@@ -437,6 +437,9 @@ static const DefaultBind kDefaultBinds[] = {
     // chord, so it only works through the keyboard hook - see overrideReserved.
     { L"$mod+r",            ACT_LAUNCHER, 0 },
     { L"win+s",             ACT_LAUNCHER, 0 },
+    // The clock panel. Win+W is the shell's Widgets chord, so like Win+S it
+    // only works through the keyboard hook - see overrideReserved.
+    { L"win+w",             ACT_TIMER, 0 },
     { L"$mod+p",            ACT_TOGGLE_TILING, 0 },
     // F5 rather than R: R is commonly taken by other software, and F5 already
     // means "refresh" everywhere else.
@@ -876,6 +879,7 @@ bool Config::LoadFromFile(const std::wstring& path) {
         static const AddedBind kAdded[] = {
             { L"$mod+r", ACT_LAUNCHER, true  },   // added in version 2
             { L"win+s",  ACT_LAUNCHER, false },   // added in version 3
+            { L"win+w",  ACT_TIMER,    true  },   // added in version 6
         };
 
         for (const auto& add : kAdded) {

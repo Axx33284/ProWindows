@@ -101,7 +101,7 @@ cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UN
        "%ROOT%src\dragguide.cpp" ^
        "%ROOT%src\appicon.cpp" ^
        "%ROOT%src\launcher.cpp" ^
-       "%ROOT%src\timer.cpp" ^
+       "%ROOT%src\timer.cpp" "%ROOT%src\clockpanel_paint.cpp" ^
        "%ROOT%src\alarm.cpp" ^
        "%ROOT%src\search.cpp" ^
        "%ROOT%src\ipc.cpp" ^

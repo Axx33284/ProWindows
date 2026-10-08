@@ -487,7 +487,7 @@ appended at the end of the numbering.
     `nvmlShutdown` never returns; `NvApiSensor` reads the same sensor for 2.8 MB and unloads. NVML
     is the fallback only when NvAPI could not be *opened*. `tests\gputemp.bat` measures all three.
 
-### Timer
+### Clock panel (timer, alarms, stopwatch)
 
 88. **Timers are anchored to the wall clock, never to tick counts.** Times are `int64` 100-ns
     units from `GetSystemTimeAsFileTime` (UTC). Remaining is `endUtc - nowUtc`, clamped at 0;

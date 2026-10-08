@@ -661,7 +661,7 @@ Save commit.
   `tests\run.bat`): every kind; weekdays, weeks of the month (incl. last), months, until; day 31
   in short months; last day of a leap February; DST gap and repeated hour with the fake
   converter; missed alarms reported once; Once disables after firing; snooze.
-- [ ] **7.2 (S)** The panel redesign (7.A-7.C), alarm firing / banner / tray (7.D), Win+W
+- [x] **7.2 (S)** The panel redesign (7.A-7.C), alarm firing / banner / tray (7.D), Win+W
   (7.E). `tests\timershot` shoots every page, both editors (the alarm editor once per repeat
   kind), the ringing banner, pinned and unpinned. Green: build, run, timershot, uishot.
 - [ ] **7.3 (O)** Review 7.1-7.2 against inv. 67/74/77/78/79/88-90 and "the UI thread never

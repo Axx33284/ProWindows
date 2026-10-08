@@ -73,7 +73,7 @@ enum Action : int {
     ACT_SCRATCHPAD_MOVE,
     ACT_SCRATCHPAD_TOGGLE,
 
-    // The timer and stopwatch overlay: shows or hides it. No default key.
+    // The clock panel (clock, alarms, timers, stopwatch): shows or hides it. Win+W.
     ACT_TIMER,
 };
 
@@ -319,8 +319,8 @@ struct Config {
     // binding explicitly (see MAP.md invariant 6), so without this a newly
     // introduced action would never reach anyone who already had a config.
     // 4 adds togglesplit, swapsplit, focuslast and the two relative-workspace
-    // bindings.
-    static constexpr int kConfigVersion = 4;
+    // bindings. 6 adds win+w for the clock panel.
+    static constexpr int kConfigVersion = 6;
 
     // Rewrites `path` from the current values, every binding included - a bind
     // added by hand survives because it was parsed into `binds` on load, not

@@ -2,6 +2,7 @@
 #include "winutil.h"
 #include "theme.h"
 #include "app.h"
+#include "clockpanel.h"
 #include <mmsystem.h>
 #include <cmath>
 #include <cwchar>
@@ -168,6 +169,7 @@ std::wstring Serialize(const State& s) {
         out += std::to_wstring(s.watch.laps[i]);
     }
     out += L"\n";
+    out += L"page = " + std::to_wstring(s.page) + L"\n";
     alarm::AppendIni(out, s.alarms);
     return out;
 }
@@ -233,6 +235,7 @@ bool Deserialize(const std::wstring& text, State* out) {
             if (*p == L',') ++p;
         }
     }
+    s.page = (int)Int(kv, L"page", 0, 0, 3);
     alarm::ReadIni(kv, &s.alarms);       // absent keys = no alarms, so old files load
     *out = s;
     return true;
@@ -264,12 +267,15 @@ bool SaveFile(const std::wstring& path, const State& s) {
 
 } // namespace timer
 
+
 // =====================================================================
-// The panel.
+// The panel: the window, the actions, the wake-up. What is drawn lives in
+// clockpanel_paint.cpp; a click or a key arrives here as a Cmd.
 // =====================================================================
 namespace {
 
 using namespace timer;
+using namespace panel;
 
 constexpr wchar_t kClass[] = L"ProWindows_Timer";
 
@@ -282,16 +288,6 @@ constexpr UINT_PTR kTimerAlarm = 3;    // one-shot: the alarm gives up after a m
 constexpr UINT     kAlarmMs    = 60 * 1000;
 constexpr UINT_PTR kTimerAway  = 4;    // one-shot: say what finished while we were off
 
-// Unscaled layout, DIP.
-constexpr int kWidth   = 640;
-constexpr int kHeaderH = 56;
-constexpr int kRowH    = 64;
-constexpr int kPad     = 14;
-constexpr int kFootH   = 34;           // one line of prompts
-constexpr int kLapRows = 6;
-constexpr int kLapH    = 28;
-constexpr int kWatchH  = 150;          // the big stopwatch reading and its status line
-
 HINSTANCE g_inst = nullptr;
 Config*   g_cfg  = nullptr;
 HWND      g_wnd  = nullptr;
@@ -299,39 +295,29 @@ float     g_scale = 1.0f;
 
 State        g_state;
 std::wstring g_store;
+View         g_view;
 
-int  g_page = 0;                       // 0 timers, 1 stopwatch
-int  g_sel  = 0;
-
-// The duration editor: days : hh : mm : ss.
-bool g_edit = false;
-int  g_field = 2;
-int  g_fv[4] = {};                     // the values
-int  g_typed[4] = {};                  // digits typed into each since it got focus
-bool g_editIsNew = false;              // Esc on a brand-new timer takes it back out
-
-bool g_alarming = false;
+bool g_alarming = false;               // a sound is looping (a timer's, or an alarm's with sound on)
 long long g_lastTickIdx = -1;
 std::wstring g_awayText;
+bool g_awayHasAlarm = false;
+std::vector<Ring> g_ringQueue;         // alarms that rang while another was still ringing
 std::vector<BYTE> g_tickWav;
 
-struct PromptHit { RECT r; UINT vk; };
-std::vector<PromptHit> g_promptHits;
-int g_hotPrompt = -1;
-RECT g_tabRects[2] = {};
-
-bool  g_dragging = false;              // unpinned: a drag by the header
+bool  g_dragging = false;              // unpinned: a drag by the rail or the top strip
 POINT g_dragOrigin = {};
 RECT  g_dragStart = {};
 
 std::wstring StorePath() { return g_store.empty() ? ConfigDir() + L"\\timers.ini" : g_store; }
 
 void Save() {
+    g_state.page = g_view.page;
     if (!SaveFile(StorePath(), g_state)) AWA_LOG(L"timer: could not save %s", StorePath().c_str());
 }
 
 bool Visible() { return g_wnd && IsWindowVisible(g_wnd); }
 void Repaint() { if (Visible()) InvalidateRect(g_wnd, nullptr, FALSE); }
+bool H24() { return g_cfg && g_cfg->clockHours24; }
 
 // "14:32", or "7 Oct 14:32" when it is not today.
 std::wstring LocalStamp(Ticks t) {
@@ -380,7 +366,7 @@ void StopAlarm() {
     if (!g_alarming) return;
     g_alarming = false;
     PlaySoundW(nullptr, nullptr, 0);
-    if (g_wnd) KillTimer(g_wnd, kTimerAlarm);
+    if (g_wnd && !g_view.ringing) KillTimer(g_wnd, kTimerAlarm);
 }
 
 void StartAlarm() {
@@ -394,18 +380,11 @@ void StartAlarm() {
     if (g_wnd) SetTimer(g_wnd, kTimerAlarm, kAlarmMs, nullptr);
 }
 
-// ------------------------------------------------------------------ layout
-int Rows() { return (std::max)(1, (int)g_state.timers.size()); }
-
-int FootLines() { return (g_page == 0 && !g_edit) ? 2 : 1; }
-
+// ------------------------------------------------------------------ window geometry
 SIZE WindowSize() {
     SIZE s;
     s.cx = (int)(kWidth * g_scale);
-    int body;
-    if (g_page == 0) body = Rows() * kRowH + kPad;
-    else             body = kWatchH + kLapRows * kLapH + kPad;
-    s.cy = (int)((kHeaderH + body + FootLines() * kFootH) * g_scale);
+    s.cy = (int)(kHeight * g_scale);
     return s;
 }
 
@@ -461,8 +440,8 @@ void Place() {
     SetWindowPos(g_wnd, HWND_TOPMOST, x, y, size.cx, size.cy, SWP_NOACTIVATE);
 }
 
-// Same sizes after a page change, a new timer, a removed one; the top-left
-// corner stays where it is unless that would push the panel off the screen.
+// The size only changes with the DPI; the top-left corner stays unless that
+// would push the panel off the screen.
 void Relayout() {
     if (!g_wnd) return;
     if (Visible()) {
@@ -477,35 +456,61 @@ void Relayout() {
 }
 
 // ------------------------------------------------------------------ waking
-// Nothing polls. With nothing running there is no OS timer at all; otherwise
-// exactly one SetTimer sleeps until the earliest of: a timer's end, the next
-// change the panel would show (only while it is up), the next tick sound, and
-// a minute (a ceiling that also covers the clock being moved under us).
+// Nothing polls. With nothing to wake for there is no OS timer at all; otherwise
+// exactly one SetTimer sleeps until the earliest of: a timer's end, an alarm's
+// next ring or snooze, the next change the panel would show (only while it is
+// up), the next tick sound, and a minute (a ceiling that also covers the clock
+// being moved under us).
 void Reschedule() {
     if (!g_wnd) return;
-    if (!AnythingRunning(g_state)) { KillTimer(g_wnd, kTimerTick); return; }
 
     const Ticks now = NowUtc();
     const bool shown = Visible();
     Ticks delay = 60 * kSecond;
-    auto sooner = [&](Ticks d) { if (d < delay) delay = d; };
+    bool need = false;
+    auto sooner = [&](Ticks d) { need = true; if (d < delay) delay = d; };
+    auto toSecond = [&] { sooner(kSecond - now % kSecond); };
+    auto toMinute = [&] { sooner(60 * kSecond - now % (60 * kSecond)); };
 
+    bool timerRunning = false;
     for (const Timer& t : g_state.timers) {
         if (!t.running) continue;
+        timerRunning = true;
         const Ticks left = Remaining(t, now);
         sooner(left);
-        if (shown && g_page == 0) {
+        if (shown && (g_view.page == PageTimer || g_view.page == PageClock)) {
             const Ticks part = left % kSecond;       // the shown (rounded-up) second changes here
             sooner(part == 0 ? kSecond : part);
         }
     }
-    if (shown && g_page == 1 && g_state.watch.running) {
-        const Ticks step = kSecond / 10;             // the stopwatch shows tenths
-        sooner(step - Elapsed(g_state.watch, now) % step);
+    if (shown && g_state.watch.running) {
+        if (g_view.page == PageWatch) {
+            const Ticks step = kSecond / 10;         // the stopwatch shows tenths
+            sooner(step - Elapsed(g_state.watch, now) % step);
+        } else if (g_view.page == PageClock) {
+            toSecond();
+        }
     }
+
+    const alarm::Zone& zone = alarm::SystemZone();
+    for (const alarm::Alarm& a : g_state.alarms) {
+        const Ticks w = alarm::NextWake(a, now, zone);
+        if (w) sooner(w - now);
+    }
+
+    if (shown) {
+        if (g_view.page == PageClock) { if (g_cfg && g_cfg->clockSeconds) toSecond(); else toMinute(); }
+        else if (g_view.page == PageAlarm) toMinute();       // "rings in 12 min" counts down
+    }
+
     const int mode = g_cfg ? g_cfg->timerTick : 0;
-    if (mode == 1)      sooner(kSecond - now % kSecond);
-    else if (mode == 2) sooner(60 * kSecond - now % (60 * kSecond));
+    if (AnythingRunning(g_state)) {
+        if (mode == 1)      toSecond();
+        else if (mode == 2) toMinute();
+    }
+    (void)timerRunning;
+
+    if (!need) { KillTimer(g_wnd, kTimerTick); return; }
 
     // A few ms past the boundary, so the timer does not land just before it.
     long long ms = delay / 10000 + 8;
@@ -514,33 +519,109 @@ void Reschedule() {
     SetTimer(g_wnd, kTimerTick, (UINT)ms, nullptr);
 }
 
+// Shown, not toggled, and not activated (R3): the user may be typing in
+// something else. Game mode and a dark display still win.
+void ShowForAlarm() {
+    if (g_cfg && !g_cfg->timerShown) {
+        g_cfg->timerShown = true;
+        AppSaveConfig();
+        AppRefreshSettings();
+    }
+    if (!Visible()) AppUpdateOverlays();
+    else            Relayout();
+}
+
+void NoteAway(const std::wstring& line, bool alarmLine) {
+    if (!g_awayText.empty()) g_awayText += L"\n";
+    g_awayText += line;
+    if (alarmLine) g_awayHasAlarm = true;
+    if (g_wnd) SetTimer(g_wnd, kTimerAway, 1500, nullptr);
+}
+
 void Announce(const std::vector<Finished>& done, Ticks now) {
     for (const Finished& f : done) {
         const bool away = now - f.endUtc > 10 * kSecond;
         if (away) {
             // Finished while the PC was off or asleep: said once, a little later,
             // so a balloon at start-up finds the tray icon in place.
-            if (!g_awayText.empty()) g_awayText += L"\n";
-            g_awayText += f.label + L" - ended " + LocalStamp(f.endUtc);
-            if (g_wnd) SetTimer(g_wnd, kTimerAway, 1500, nullptr);
+            NoteAway(f.label + L" - ended " + LocalStamp(f.endUtc), false);
             continue;
         }
         AppTrayBalloon(L"Timer finished", f.label.c_str());
         if (g_cfg && g_cfg->timerAlarm) {
             StartAlarm();
-            g_page = 0;
-            g_sel = f.index;
-            g_edit = false;
-            // Shown, not toggled, and not activated (R3): the user may be typing in
-            // something else. Any key or click in the panel, or the tray, stops it.
-            if (!g_cfg->timerShown) {
-                g_cfg->timerShown = true;
-                AppSaveConfig();
-                AppRefreshSettings();
-            }
-            if (!Visible()) AppUpdateOverlays();     // game mode and a dark display still win
-            else            Relayout();
+            g_view.page = PageTimer;
+            g_view.sel = f.index;
+            g_view.sheet = SheetNone;
+            // Any key or click in the panel, or the tray, stops it.
+            ShowForAlarm();
         }
+    }
+}
+
+// ------------------------------------------------------------------ alarms ringing
+void BeginRing(const Ring& ring, bool sound) {
+    g_view.ringing = true;
+    g_view.ring = ring;
+    g_view.page = PageAlarm;
+    if (sound) StartAlarm(); else StopAlarm();
+    if (g_wnd) SetTimer(g_wnd, kTimerAlarm, kAlarmMs, nullptr);      // 60 s unanswered = dismissed
+    ShowForAlarm();
+    Repaint();
+}
+
+void StartRing(int index, Ticks dueUtc) {
+    if (index < 0 || index >= (int)g_state.alarms.size()) return;
+    const alarm::Alarm& a = g_state.alarms[(size_t)index];
+    const alarm::LocalTime l = alarm::SystemZone().ToLocal(dueUtc);
+    Ring r;
+    r.index = index;
+    r.name = a.label;
+    r.hour = l.hour;
+    r.minute = l.minute;
+    r.snoozeMin = a.snoozeMin;
+    std::wstring body = (a.label.empty() ? std::wstring(L"Alarm") : a.label);
+    wchar_t t[16];
+    swprintf_s(t, L" - %02d:%02d", l.hour, l.minute);
+    AppTrayBalloon(L"Alarm", (body + t).c_str());
+    if (g_view.ringing) { g_ringQueue.push_back(r); return; }
+    BeginRing(r, a.sound);
+}
+
+// Snooze or dismiss the one on screen, then the next that was waiting.
+void EndRing(bool snooze) {
+    if (!g_view.ringing) return;
+    const Ring done = g_view.ring;
+    if (done.index >= 0 && done.index < (int)g_state.alarms.size()) {
+        alarm::Alarm& a = g_state.alarms[(size_t)done.index];
+        if (snooze) alarm::Snooze(a, NowUtc());
+        else        alarm::Dismiss(a);
+        Save();
+    }
+    g_view.ringing = false;
+    g_alarming = true;               // StopAlarm only acts on a looping sound
+    StopAlarm();
+    if (g_wnd) KillTimer(g_wnd, kTimerAlarm);
+    if (!g_ringQueue.empty()) {
+        const Ring next = g_ringQueue.front();
+        g_ringQueue.erase(g_ringQueue.begin());
+        const bool sound = next.index >= 0 && next.index < (int)g_state.alarms.size() &&
+                           g_state.alarms[(size_t)next.index].sound;
+        BeginRing(next, sound);
+    }
+    Reschedule();
+    Repaint();
+}
+
+void AnnounceAlarms(const std::vector<alarm::Fired>& fired) {
+    for (const alarm::Fired& f : fired) {
+        if (f.index < 0 || f.index >= (int)g_state.alarms.size()) continue;
+        const alarm::Alarm& a = g_state.alarms[(size_t)f.index];
+        if (f.missed) {
+            NoteAway((a.label.empty() ? std::wstring(L"Alarm") : a.label) + L" - rang " + LocalStamp(f.dueUtc), true);
+            continue;
+        }
+        StartRing(f.index, f.dueUtc);
     }
 }
 
@@ -548,7 +629,10 @@ void Announce(const std::vector<Finished>& done, Ticks now) {
 void Tick(bool fromTimer) {
     const Ticks now = NowUtc();
     const std::vector<Finished> done = TakeFinished(g_state, now);
-    if (!done.empty()) { Save(); Announce(done, now); }
+    const std::vector<alarm::Fired> fired = alarm::TakeDue(g_state.alarms, now, alarm::SystemZone());
+    if (!done.empty() || !fired.empty()) Save();
+    if (!done.empty()) Announce(done, now);
+    if (!fired.empty()) AnnounceAlarms(fired);
 
     const int mode = g_cfg ? g_cfg->timerTick : 0;
     if (fromTimer && mode && !g_alarming && AnythingRunning(g_state)) {
@@ -559,9 +643,9 @@ void Tick(bool fromTimer) {
     Reschedule();
 }
 
-// ------------------------------------------------------------------ actions
+// ------------------------------------------------------------------ timer actions
 Timer* Selected() {
-    return (g_sel >= 0 && g_sel < (int)g_state.timers.size()) ? &g_state.timers[(size_t)g_sel] : nullptr;
+    return (g_view.sel >= 0 && g_view.sel < (int)g_state.timers.size()) ? &g_state.timers[(size_t)g_view.sel] : nullptr;
 }
 
 void StartPauseTimer(Timer& t) {
@@ -602,396 +686,575 @@ void Lap() {
     if ((int)w.laps.size() > kMaxLaps) w.laps.pop_back();
 }
 
-void SplitFields(Ticks d) {
-    const long long secs = d / kSecond;
-    g_fv[0] = (int)(secs / 86400);
-    g_fv[1] = (int)((secs / 3600) % 24);
-    g_fv[2] = (int)((secs / 60) % 60);
-    g_fv[3] = (int)(secs % 60);
-}
-
-void BeginEdit(bool isNew) {
-    Timer* t = Selected();
-    if (!t) return;
-    SplitFields(t->duration);
-    g_edit = true;
-    g_editIsNew = isNew;
-    g_field = 2;
-    for (int& n : g_typed) n = 0;
-    Relayout();
-}
-
-void EndEdit() {
-    g_edit = false;
-    if (g_editIsNew) {
-        // Cancelled before it was ever set: it was never wanted.
-        if (Selected()) g_state.timers.erase(g_state.timers.begin() + g_sel);
-        if (g_sel >= (int)g_state.timers.size()) g_sel = (int)g_state.timers.size() - 1;
-        if (g_sel < 0) g_sel = 0;
-        g_editIsNew = false;
-        Save();
-    }
-    Relayout();
-}
-
-void CommitEdit() {
-    Timer* t = Selected();
-    if (!t) { g_edit = false; return; }
-    Ticks d = ((Ticks)g_fv[0] * 86400 + g_fv[1] * 3600 + g_fv[2] * 60 + g_fv[3]) * kSecond;
-    if (d > kMaxDuration) d = kMaxDuration;
-    if (d <= 0) return;                  // a zero timer is nothing; keep editing
-    t->duration  = d;
-    t->remaining = d;                    // a new length restarts it, paused
-    t->running   = false;
-    g_edit = false;
-    g_editIsNew = false;
-    Save();
-    Reschedule();
-    Relayout();
-}
-
-void NewTimer() {
-    if ((int)g_state.timers.size() >= kMaxTimers) return;
+std::wstring NewTimerName() {
     int n = 1;
     for (;; ++n) {
         bool used = false;
         for (const Timer& t : g_state.timers) if (t.label == L"Timer " + std::to_wstring(n)) used = true;
         if (!used) break;
     }
+    return L"Timer " + std::to_wstring(n);
+}
+
+void AddQuickTimer(int minutes) {
+    if ((int)g_state.timers.size() >= kMaxTimers) return;
     Timer t;
-    t.label = L"Timer " + std::to_wstring(n);
-    t.duration = t.remaining = 5 * 60 * kSecond;
+    t.label = NewTimerName();
+    t.duration = t.remaining = (Ticks)minutes * 60 * kSecond;
     g_state.timers.push_back(t);
-    g_sel = (int)g_state.timers.size() - 1;
-    BeginEdit(true);
+    g_view.sel = (int)g_state.timers.size() - 1;
+    StartPauseTimer(g_state.timers.back());
+}
+
+// ------------------------------------------------------------------ the sheets
+void SelectAll(TextField& f) { f.anchor = 0; f.caret = (int)f.s.size(); }
+
+void FocusField(int field) {
+    g_view.focus = field;
+    g_view.typed = 0;
+    if (field == FieldName) SelectAll(g_view.sheet == SheetTimer ? g_view.td.name : g_view.ad.name);
+}
+
+TextField& NameFieldOf() { return g_view.sheet == SheetTimer ? g_view.td.name : g_view.ad.name; }
+
+void OpenTimerSheet(int index) {
+    TimerDraft d;
+    d.index = index;
+    Ticks len = 5 * 60 * kSecond;
+    if (index >= 0 && index < (int)g_state.timers.size()) {
+        const Timer& t = g_state.timers[(size_t)index];
+        len = t.duration;
+        d.name.s = t.label;
+    } else {
+        d.index = -1;
+        d.name.s = NewTimerName();
+    }
+    const long long secs = len / kSecond;
+    d.v[0] = (int)(secs / 86400);
+    d.v[1] = (int)((secs / 3600) % 24);
+    d.v[2] = (int)((secs / 60) % 60);
+    d.v[3] = (int)(secs % 60);
+    d.name.caret = d.name.anchor = (int)d.name.s.size();
+    g_view.td = d;
+    g_view.sheet = SheetTimer;
+    g_view.sheetScroll = 0;
+    g_view.focus = 2;
+    g_view.typed = 0;
+    Repaint();
+}
+
+void SetDate(alarm::Alarm& a, Ticks utc) {
+    const alarm::LocalTime l = alarm::SystemZone().ToLocal(utc);
+    a.year = l.year; a.month = l.month; a.day = l.day;
+}
+
+void OpenAlarmSheet(int index) {
+    AlarmDraft d;
+    if (index >= 0 && index < (int)g_state.alarms.size()) {
+        d.index = index;
+        d.a = g_state.alarms[(size_t)index];
+        const alarm::Alarm& a = d.a;
+        d.limitOpen = a.weeks || a.months || a.until ||
+                      (a.weekdays && (a.kind == alarm::Kind::Hourly || a.kind == alarm::Kind::Daily));
+    } else {
+        // A new alarm: once, at the next whole hour.
+        const Ticks now = NowUtc();
+        const alarm::LocalTime l = alarm::SystemZone().ToLocal(now);
+        const Ticks next = alarm::FromCivil(l.year, l.month, l.day, l.hour, 0) + 60 * 60 * kSecond;
+        const alarm::LocalTime n = alarm::ToCivil(next);
+        d.index = -1;
+        d.a.kind = alarm::Kind::Once;
+        d.a.hour = n.hour;
+        d.a.minute = 0;
+        d.a.year = n.year; d.a.month = n.month; d.a.day = n.day;
+        d.a.sound = true;
+        d.a.snoozeMin = 10;
+        d.a.enabled = true;
+    }
+    if (d.a.year < 2000) SetDate(d.a, NowUtc());
+    d.name.s = d.a.label;
+    d.name.caret = d.name.anchor = (int)d.name.s.size();
+    g_view.ad = d;
+    g_view.sheet = SheetAlarm;
+    g_view.sheetScroll = 0;
+    g_view.focus = d.a.kind == alarm::Kind::Hourly ? FieldMinute : FieldHour;
+    g_view.typed = 0;
+    Repaint();
+}
+
+void CloseSheet() {
+    if (g_view.sheet == SheetNone) return;
+    g_view.sheet = SheetNone;
+    g_view.typed = 0;
+    Repaint();
+}
+
+int Wrap(int v, int lo, int hi) {
+    const int n = hi - lo + 1;
+    return lo + (((v - lo) % n) + n) % n;
+}
+
+void FixOnceDay(alarm::Alarm& a) {
+    if (a.month < 1) a.month = 1;
+    if (a.month > 12) a.month = 12;
+    const int dim = alarm::DaysInMonth(a.year, a.month);
+    if (a.day > dim) a.day = dim;
+    if (a.day < 1) a.day = 1;
+}
+
+void SetUntil(alarm::Alarm& a, int y, int mo, int d) {
+    y = (std::max)(2000, (std::min)(2100, y));
+    mo = Wrap(mo, 1, 12);
+    const int dim = alarm::DaysInMonth(y, mo);
+    d = (std::max)(1, (std::min)(dim, d));
+    a.until = y * 10000 + mo * 100 + d;
+}
+
+// One step of a spinner (the arrows, the wheel, the Up and Down keys).
+void SpinField(int field, int delta) {
+    if (g_view.sheet == SheetTimer) {
+        if (field < 0 || field > 3) return;
+        int& v = g_view.td.v[field];
+        if (field == 0) v = (std::max)(0, (std::min)(9999, v + delta));
+        else            v = Wrap(v + delta, 0, field == 1 ? 23 : 59);
+    } else if (g_view.sheet == SheetAlarm) {
+        alarm::Alarm& a = g_view.ad.a;
+        switch (field) {
+            case FieldHour:
+                if (H24()) a.hour = Wrap(a.hour + delta, 0, 23);
+                else       a.hour = Wrap(a.hour % 12 + delta, 0, 11) + (a.hour >= 12 ? 12 : 0);
+                break;
+            case FieldMinute: a.minute = Wrap(a.minute + delta, 0, 59); break;
+            case FieldDay:    a.day = Wrap(a.day + delta, 1, alarm::DaysInMonth(a.year, a.month)); break;
+            case FieldMonth:  a.month = Wrap(a.month + delta, 1, 12); FixOnceDay(a); break;
+            case FieldYear:   a.year = (std::max)(2000, (std::min)(2100, a.year + delta)); FixOnceDay(a); break;
+            case FieldFrom:   a.hourFrom = Wrap(a.hourFrom + delta, 0, 23); break;
+            case FieldTo:     a.hourTo = Wrap(a.hourTo + delta, 0, 23); break;
+            case FieldUntilDay:   SetUntil(a, a.until / 10000, (a.until / 100) % 100,
+                                           Wrap(a.until % 100 + delta, 1, alarm::DaysInMonth(a.until / 10000, (a.until / 100) % 100))); break;
+            case FieldUntilMonth: SetUntil(a, a.until / 10000, (a.until / 100) % 100 + delta, a.until % 100); break;
+            case FieldUntilYear:  SetUntil(a, a.until / 10000 + delta, (a.until / 100) % 100, a.until % 100); break;
+            default: return;
+        }
+    }
+    g_view.focus = field;
+    g_view.typed = 0;
 }
 
 void TypeDigit(int d) {
-    const int f = g_field;
-    const int maxDigits = f == 0 ? 4 : 2;
-    if (g_typed[f] == 0 || g_typed[f] >= maxDigits) { g_fv[f] = d; g_typed[f] = 1; }
-    else { g_fv[f] = g_fv[f] * 10 + d; ++g_typed[f]; }
-    const int cap = f == 0 ? 9999 : (f == 1 ? 23 : 59);
-    if (g_fv[f] > cap) g_fv[f] = cap;
+    const int f = g_view.focus;
+    if (f == FieldName) return;
+    // `acc` is what was typed so far, not what is shown: a 12-hour "0" is shown as 12.
+    auto accumulate = [&](int /*shown*/, int maxDigits, int lo, int hi) {
+        const bool fresh = g_view.typed == 0 || g_view.typed >= maxDigits;
+        const int v = (std::max)(lo, (std::min)(hi, fresh ? d : g_view.acc * 10 + d));
+        g_view.acc = v;
+        g_view.typed = fresh ? 1 : g_view.typed + 1;
+        return v;
+    };
+    if (g_view.sheet == SheetTimer) {
+        if (f < 0 || f > 3) return;
+        g_view.td.v[f] = accumulate(g_view.td.v[f], f == 0 ? 4 : 2, 0, f == 0 ? 9999 : (f == 1 ? 23 : 59));
+    } else if (g_view.sheet == SheetAlarm) {
+        alarm::Alarm& a = g_view.ad.a;
+        switch (f) {
+            case FieldHour:
+                if (H24()) a.hour = accumulate(a.hour, 2, 0, 23);
+                else {
+                    const int v = accumulate(a.hour % 12 == 0 ? 12 : a.hour % 12, 2, 0, 12);
+                    a.hour = (v % 12) + (a.hour >= 12 ? 12 : 0);
+                }
+                break;
+            case FieldMinute: a.minute = accumulate(a.minute, 2, 0, 59); break;
+            case FieldDay:    a.day = accumulate(a.day, 2, 1, alarm::DaysInMonth(a.year, a.month)); break;
+            case FieldMonth:  a.month = accumulate(a.month, 2, 1, 12); FixOnceDay(a); break;
+            case FieldFrom:   a.hourFrom = accumulate(a.hourFrom, 2, 0, 23); break;
+            case FieldTo:     a.hourTo = accumulate(a.hourTo, 2, 0, 23); break;
+            case FieldUntilDay:
+                SetUntil(a, a.until / 10000, (a.until / 100) % 100, accumulate(a.until % 100, 2, 1, 31)); break;
+            case FieldUntilMonth:
+                SetUntil(a, a.until / 10000, accumulate((a.until / 100) % 100, 2, 1, 12), a.until % 100); break;
+            default: break;      // the years are changed with the arrows and the wheel
+        }
+    }
 }
 
-// One key, from the keyboard or from clicking its prompt (inv. 74).
+// Tab order of the open sheet.
+std::vector<int> FocusOrder() {
+    std::vector<int> o;
+    o.push_back(FieldName);
+    if (g_view.sheet == SheetTimer) { o.push_back(0); o.push_back(1); o.push_back(2); o.push_back(3); return o; }
+    const alarm::Alarm& a = g_view.ad.a;
+    if (a.kind != alarm::Kind::Hourly) o.push_back(FieldHour);
+    o.push_back(FieldMinute);
+    if (a.kind == alarm::Kind::Hourly) { o.push_back(FieldFrom); o.push_back(FieldTo); }
+    if (a.kind == alarm::Kind::Once) { o.push_back(FieldDay); o.push_back(FieldMonth); o.push_back(FieldYear); }
+    if (a.kind != alarm::Kind::Once && g_view.ad.limitOpen && a.until) {
+        o.push_back(FieldUntilDay); o.push_back(FieldUntilMonth); o.push_back(FieldUntilYear);
+    }
+    return o;
+}
+
+void MoveFocus(int step) {
+    const std::vector<int> o = FocusOrder();
+    size_t i = 0;
+    for (size_t k = 0; k < o.size(); ++k) if (o[k] == g_view.focus) i = k;
+    i = (i + o.size() + (size_t)(step < 0 ? o.size() - 1 : 1)) % o.size();
+    FocusField(o[i]);
+    Repaint();
+}
+
+void SaveSheet() {
+    const Ticks now = NowUtc();
+    if (g_view.sheet == SheetTimer) {
+        TimerDraft& d = g_view.td;
+        Ticks len = ((Ticks)d.v[0] * 86400 + d.v[1] * 3600 + d.v[2] * 60 + d.v[3]) * kSecond;
+        if (len > kMaxDuration) len = kMaxDuration;
+        if (len <= 0) return;                       // a zero timer is nothing; keep editing
+        std::wstring name = d.name.s;
+        if (name.empty()) name = NewTimerName();
+        if (d.index >= 0 && d.index < (int)g_state.timers.size()) {
+            Timer& t = g_state.timers[(size_t)d.index];
+            t.label = name;
+            t.duration = len;
+            t.remaining = len;                      // a new length restarts it, paused
+            t.running = false;
+        } else {
+            if ((int)g_state.timers.size() >= kMaxTimers) return;
+            Timer t;
+            t.label = name;
+            t.duration = t.remaining = len;
+            g_state.timers.push_back(t);
+            g_view.sel = (int)g_state.timers.size() - 1;
+        }
+    } else if (g_view.sheet == SheetAlarm) {
+        AlarmDraft& d = g_view.ad;
+        alarm::Alarm a = d.a;
+        if (a.kind == alarm::Kind::Weekly && !a.weekdays) return;
+        if (a.kind == alarm::Kind::Monthly && !a.monthDays) return;
+        a.label = d.name.s.substr(0, (size_t)alarm::kMaxLabel);
+        FixOnceDay(a);
+        if (a.hourFrom > a.hourTo) std::swap(a.hourFrom, a.hourTo);
+        a.enabled = true;
+        alarm::Arm(a, now);                         // the baseline: rings only for the future
+        if (d.index >= 0 && d.index < (int)g_state.alarms.size()) {
+            g_state.alarms[(size_t)d.index] = a;
+        } else {
+            if ((int)g_state.alarms.size() >= alarm::kMaxAlarms) return;
+            g_state.alarms.push_back(a);
+        }
+    }
+    g_view.sheet = SheetNone;
+    Save();
+    Reschedule();
+    Repaint();
+}
+
+// ------------------------------------------------------------------ text editing
+void DeleteSel(TextField& f) {
+    const int lo = (std::min)(f.caret, f.anchor), hi = (std::max)(f.caret, f.anchor);
+    if (hi > lo) f.s.erase((size_t)lo, (size_t)(hi - lo));
+    f.caret = f.anchor = lo;
+}
+
+void InsertText(TextField& f, const std::wstring& text) {
+    DeleteSel(f);
+    std::wstring clean;
+    for (wchar_t ch : text) if (ch >= 32 && ch != 127) clean += ch;
+    const int room = alarm::kMaxLabel - (int)f.s.size();
+    if (room <= 0) return;
+    if ((int)clean.size() > room) clean.resize((size_t)room);
+    f.s.insert((size_t)f.caret, clean);
+    f.caret = f.anchor = f.caret + (int)clean.size();
+}
+
+std::wstring ClipboardText() {
+    std::wstring out;
+    if (!OpenClipboard(g_wnd)) return out;
+    if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
+        if (const wchar_t* p = (const wchar_t*)GlobalLock(h)) {
+            out = p;
+            GlobalUnlock(h);
+        }
+    }
+    CloseClipboard();
+    return out;
+}
+
+void EditKey(TextField& f, UINT vk, bool ctrl, bool shift) {
+    const int n = (int)f.s.size();
+    auto moveTo = [&](int pos) {
+        f.caret = (std::max)(0, (std::min)(n, pos));
+        if (!shift) f.anchor = f.caret;
+    };
+    switch (vk) {
+        case VK_LEFT:
+            if (!shift && f.HasSel()) moveTo((std::min)(f.caret, f.anchor));
+            else moveTo(f.caret - 1);
+            break;
+        case VK_RIGHT:
+            if (!shift && f.HasSel()) moveTo((std::max)(f.caret, f.anchor));
+            else moveTo(f.caret + 1);
+            break;
+        case VK_HOME: moveTo(0); break;
+        case VK_END:  moveTo(n); break;
+        case VK_BACK:
+            if (f.HasSel()) DeleteSel(f);
+            else if (ctrl) {
+                int p = f.caret;
+                while (p > 0 && f.s[(size_t)p - 1] == L' ') --p;
+                while (p > 0 && f.s[(size_t)p - 1] != L' ') --p;
+                f.s.erase((size_t)p, (size_t)(f.caret - p));
+                f.caret = f.anchor = p;
+            } else if (f.caret > 0) {
+                f.s.erase((size_t)f.caret - 1, 1);
+                f.caret = f.anchor = f.caret - 1;
+            }
+            break;
+        case VK_DELETE:
+            if (f.HasSel()) DeleteSel(f);
+            else if (f.caret < n) f.s.erase((size_t)f.caret, 1);
+            break;
+        case 'A': if (ctrl) SelectAll(f); break;
+        case 'V': if (ctrl) InsertText(f, ClipboardText()); break;
+        default: break;
+    }
+}
+
+// ------------------------------------------------------------------ commands
+void GoPage(int p) {
+    if (p < 0 || p >= PageCount) return;
+    g_view.page = p;
+    Save();
+    Reschedule();
+    Repaint();
+}
+
+void ToggleBit(uint32_t& mask, int bit) { mask ^= (1u << bit); }
+
+void SetKind(int k) {
+    alarm::Alarm& a = g_view.ad.a;
+    const alarm::Kind old = a.kind;
+    a.kind = (alarm::Kind)k;
+    const alarm::LocalTime today = alarm::SystemZone().ToLocal(NowUtc());
+    if (a.kind == alarm::Kind::Once && a.year < 2000) SetDate(a, NowUtc());
+    if (a.kind == alarm::Kind::Weekly) {
+        if (!a.weekdays) a.weekdays = 1u << alarm::Weekday(today.year, today.month, today.day);
+    } else if (old == alarm::Kind::Weekly && (a.kind == alarm::Kind::Hourly || a.kind == alarm::Kind::Daily)) {
+        a.weekdays = 0;            // a weekly set of days would silently become a limit
+    }
+    if (a.kind == alarm::Kind::Monthly && !a.monthDays) a.monthDays = 1u << (today.day - 1);
+    if (g_view.focus == FieldHour && a.kind == alarm::Kind::Hourly) g_view.focus = FieldMinute;
+    g_view.sheetScroll = 0;
+}
+
+void Command(int cmd, int arg, int clickX = 0);
+
+void DeleteAlarm(int i) {
+    if (i < 0 || i >= (int)g_state.alarms.size()) return;
+    g_state.alarms.erase(g_state.alarms.begin() + i);
+    auto fix = [&](Ring& r) { if (r.index == i) r.index = -1; else if (r.index > i) --r.index; };
+    fix(g_view.ring);
+    for (Ring& r : g_ringQueue) fix(r);
+    Save();
+    Reschedule();
+}
+
+void Command(int cmd, int arg, int clickX) {
+    alarm::Alarm* ea = g_view.sheet == SheetAlarm ? &g_view.ad.a : nullptr;
+    const Ticks now = NowUtc();
+    switch (cmd) {
+        case CmdPage: GoPage(arg); return;
+        case CmdCard: GoPage(arg >= 10 ? arg - 10 : arg); return;
+        case CmdPin:  TimerSetPinned(!(g_cfg && g_cfg->timerPinned)); return;
+        case CmdClose: if (g_view.ringing) EndRing(false); TimerHide(); return;
+
+        case CmdQuick:
+            AddQuickTimer(arg);
+            Save(); Reschedule(); Repaint();
+            return;
+        case CmdTimerAdd:
+            if ((int)g_state.timers.size() < kMaxTimers) OpenTimerSheet(-1);
+            return;
+        case CmdTimerSel: g_view.sel = arg; Repaint(); return;
+        case CmdTimerPlay:
+            if (arg >= 0 && arg < (int)g_state.timers.size()) {
+                g_view.sel = arg;
+                StartPauseTimer(g_state.timers[(size_t)arg]);
+                Save(); Reschedule(); Repaint();
+            }
+            return;
+        case CmdTimerReset:
+            if (arg >= 0 && arg < (int)g_state.timers.size()) {
+                Timer& t = g_state.timers[(size_t)arg];
+                t.running = false;
+                t.remaining = t.duration;
+                Save(); Reschedule(); Repaint();
+            }
+            return;
+        case CmdTimerEdit:
+            if (arg >= 0 && arg < (int)g_state.timers.size()) { g_view.sel = arg; OpenTimerSheet(arg); }
+            return;
+        case CmdTimerDelete:
+            if (arg >= 0 && arg < (int)g_state.timers.size()) {
+                g_state.timers.erase(g_state.timers.begin() + arg);
+                if (g_view.sel >= (int)g_state.timers.size()) g_view.sel = (int)g_state.timers.size() - 1;
+                if (g_view.sel < 0) g_view.sel = 0;
+                Save(); Reschedule(); Repaint();
+            }
+            return;
+
+        case CmdWatchPlay:  StartPauseWatch(); Save(); Reschedule(); Repaint(); return;
+        case CmdWatchLap:   Lap(); Save(); Repaint(); return;
+        case CmdWatchReset: ResetWatch(); Save(); Reschedule(); Repaint(); return;
+
+        case CmdAlarmAdd:
+            if ((int)g_state.alarms.size() < alarm::kMaxAlarms) OpenAlarmSheet(-1);
+            return;
+        case CmdAlarmEdit: OpenAlarmSheet(arg); return;
+        case CmdAlarmToggle:
+            if (arg >= 0 && arg < (int)g_state.alarms.size()) {
+                alarm::Alarm& a = g_state.alarms[(size_t)arg];
+                a.enabled = !a.enabled;
+                if (a.enabled) alarm::Arm(a, now);       // turning one on rings only for the future
+                else           a.snoozeUntilUtc = 0;
+                Save(); Reschedule(); Repaint();
+            }
+            return;
+        case CmdAlarmDelete: DeleteAlarm(arg); Repaint(); return;
+        case CmdRingSnooze:  EndRing(true); return;
+        case CmdRingDismiss: EndRing(false); return;
+
+        case CmdSave:   SaveSheet(); return;
+        case CmdCancel: CloseSheet(); return;
+        case CmdDelete:
+            if (g_view.sheet == SheetAlarm) { DeleteAlarm(g_view.ad.index); CloseSheet(); }
+            return;
+        case CmdName: {
+            const bool was = g_view.focus == FieldName;
+            TextField& f = NameFieldOf();
+            if (!was) { FocusField(FieldName); }
+            else if (g_wnd) {
+                HDC dc = GetDC(g_wnd);
+                if (dc) {
+                    theme::SetDpi((UINT)(g_scale * 96.0f + 0.5f));
+                    f.caret = f.anchor = CaretAt(dc, f.s, clickX - g_view.nameRect.left);
+                    ReleaseDC(g_wnd, dc);
+                }
+            }
+            Repaint();
+            return;
+        }
+        case CmdSpinFocus: FocusField(arg); Repaint(); return;
+        case CmdSpinUp:    SpinField(arg, +1); Repaint(); return;
+        case CmdSpinDown:  SpinField(arg, -1); Repaint(); return;
+    }
+    if (!ea) return;
+    switch (cmd) {
+        case CmdKind:     SetKind(arg); break;
+        case CmdWeekday:  ToggleBit(ea->weekdays, arg); break;
+        case CmdLimitWd:  ToggleBit(ea->weekdays, arg); break;
+        case CmdMonthDay: ToggleBit(ea->monthDays, arg); break;
+        case CmdLastDay:  ea->monthDays ^= alarm::kLastDayBit; break;
+        case CmdWeek:     ToggleBit(ea->weeks, arg); break;
+        case CmdMonth:    ToggleBit(ea->months, arg); break;
+        case CmdLimitOpen: g_view.ad.limitOpen = !g_view.ad.limitOpen; break;
+        case CmdUntil:
+            if (ea->until) ea->until = 0;
+            else {
+                const alarm::LocalTime l = alarm::SystemZone().ToLocal(now + 31 * alarm::kSecond * 86400);
+                SetUntil(*ea, l.year, l.month, l.day);
+            }
+            break;
+        case CmdDay:      SetDate(*ea, now + (Ticks)arg * 86400 * kSecond); break;
+        case CmdSound:    ea->sound = !ea->sound; break;
+        case CmdSnoozeLen: ea->snoozeMin = arg; break;
+        case CmdAmPm:
+            if (arg == 0 && ea->hour >= 12) ea->hour -= 12;
+            else if (arg == 1 && ea->hour < 12) ea->hour += 12;
+            break;
+        default: return;
+    }
+    Repaint();
+}
+
+// ------------------------------------------------------------------ keys
 void HandleKey(UINT vk) {
-    if (g_edit) {
-        if (vk >= '0' && vk <= '9')                 TypeDigit((int)(vk - '0'));
-        else if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) TypeDigit((int)(vk - VK_NUMPAD0));
-        else if (vk == VK_BACK)  { g_fv[g_field] /= 10; g_typed[g_field] = 1; }
-        else if (vk == VK_LEFT)  { g_field = (g_field + 3) % 4; g_typed[g_field] = 0; }
-        else if (vk == VK_RIGHT) { g_field = (g_field + 1) % 4; g_typed[g_field] = 0; }
-        else if (vk == VK_RETURN) { CommitEdit(); return; }
-        else if (vk == VK_ESCAPE) { EndEdit(); return; }
+    const bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0;
+
+    if (g_view.sheet != SheetNone) {
+        if (vk == VK_ESCAPE) { CloseSheet(); return; }
+        if (vk == VK_RETURN) { SaveSheet(); return; }
+        if (vk == VK_TAB)    { MoveFocus(shift ? -1 : 1); return; }
+        if (g_view.focus == FieldName) {
+            if (vk == VK_DOWN) { MoveFocus(1); return; }
+            if (vk == VK_UP)   { MoveFocus(-1); return; }
+            EditKey(NameFieldOf(), vk, ctrl, shift);
+            Repaint();
+            return;
+        }
+        if (vk >= '0' && vk <= '9' && !ctrl)                 TypeDigit((int)(vk - '0'));
+        else if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9)      TypeDigit((int)(vk - VK_NUMPAD0));
+        else if (vk == VK_UP)    SpinField(g_view.focus, +1);
+        else if (vk == VK_DOWN)  SpinField(g_view.focus, -1);
+        else if (vk == VK_LEFT)  MoveFocus(-1);
+        else if (vk == VK_RIGHT) MoveFocus(1);
         Repaint();
         return;
+    }
+
+    if (g_view.ringing) {
+        if (vk == VK_RETURN) { EndRing(true); return; }
+        if (vk == VK_ESCAPE || vk == VK_SPACE) { EndRing(false); return; }
     }
 
     switch (vk) {
         case VK_ESCAPE: TimerHide(); return;
         case VK_TAB:
-            g_page ^= 1;
-            Relayout();
-            Reschedule();
+            GoPage((g_view.page + (shift ? PageCount - 1 : 1)) % PageCount);
             return;
     }
 
-    if (g_page == 0) {
+    if (g_view.page == PageTimer) {
         const int n = (int)g_state.timers.size();
         switch (vk) {
-            case VK_UP:   if (n) { g_sel = (g_sel + n - 1) % n; Repaint(); } return;
-            case VK_DOWN: if (n) { g_sel = (g_sel + 1) % n; Repaint(); } return;
-            case VK_RETURN: BeginEdit(false); return;
-            case VK_SPACE:
-                if (Timer* t = Selected()) { StartPauseTimer(*t); Save(); Reschedule(); Repaint(); }
-                return;
-            case 'R':
-                if (Timer* t = Selected()) {
-                    t->running = false;
-                    t->remaining = t->duration;
-                    Save(); Reschedule(); Repaint();
-                }
-                return;
-            case 'N': NewTimer(); return;
-            case VK_DELETE:
-                if (Selected()) {
-                    g_state.timers.erase(g_state.timers.begin() + g_sel);
-                    if (g_sel >= (int)g_state.timers.size()) g_sel = (int)g_state.timers.size() - 1;
-                    if (g_sel < 0) g_sel = 0;
-                    Save(); Reschedule(); Relayout();
-                }
-                return;
+            case VK_LEFT:  if (n) { g_view.sel = (g_view.sel + n - 1) % n; Repaint(); } return;
+            case VK_RIGHT: if (n) { g_view.sel = (g_view.sel + 1) % n; Repaint(); } return;
+            case VK_UP:    if (g_view.sel >= 3) { g_view.sel -= 3; Repaint(); } return;
+            case VK_DOWN:  if (g_view.sel + 3 < n) { g_view.sel += 3; Repaint(); } return;
+            case VK_RETURN: if (Selected()) Command(CmdTimerEdit, g_view.sel); return;
+            case VK_SPACE:  if (Selected()) Command(CmdTimerPlay, g_view.sel); return;
+            case 'R':       if (Selected()) Command(CmdTimerReset, g_view.sel); return;
+            case 'N':       Command(CmdTimerAdd, 0); return;
+            case VK_DELETE: if (Selected()) Command(CmdTimerDelete, g_view.sel); return;
         }
-    } else {
+    } else if (g_view.page == PageWatch) {
         switch (vk) {
-            case VK_SPACE: StartPauseWatch(); Save(); Reschedule(); Repaint(); return;
-            case 'R':      ResetWatch(); Save(); Reschedule(); Repaint(); return;
-            case 'L':      Lap(); Save(); Repaint(); return;
+            case VK_SPACE: Command(CmdWatchPlay, 0); return;
+            case 'R':      Command(CmdWatchReset, 0); return;
+            case 'L':      Command(CmdWatchLap, 0); return;
         }
+    } else if (g_view.page == PageAlarm) {
+        if (vk == 'N') Command(CmdAlarmAdd, 0);
     }
 }
 
 // ------------------------------------------------------------------ painting
-struct PromptText { const wchar_t* key; std::wstring word; UINT vk; };
-
-std::vector<PromptText> Prompts() {
-    std::vector<PromptText> p;
-    if (g_edit) {
-        p.push_back({ L"\x2190 \x2192", L"Field", VK_RIGHT });
-        p.push_back({ L"Enter", L"Set", VK_RETURN });
-        p.push_back({ L"Esc", L"Cancel", VK_ESCAPE });
-        return p;
+Model BuildModel() {
+    Model m;
+    m.s = &g_state;
+    m.hours24 = H24();
+    m.seconds = g_cfg && g_cfg->clockSeconds;
+    m.now = NowUtc();
+    const alarm::Zone& zone = alarm::SystemZone();
+    Ticks best = 0;
+    for (size_t i = 0; i < g_state.alarms.size(); ++i) {
+        const alarm::Alarm& a = g_state.alarms[i];
+        const Ticks w = a.enabled || a.snoozeUntilUtc ? alarm::NextWake(a, m.now, zone) : 0;
+        m.wake.push_back(w);
+        if (w && (!best || w < best)) { best = w; m.nextAlarm = (int)i; }
     }
-    if (g_page == 0) {
-        const Timer* t = Selected();
-        p.push_back({ L"Tab", L"Stopwatch", VK_TAB });
-        if (t) {
-            p.push_back({ L"\x2191 \x2193", L"Select", VK_DOWN });
-            p.push_back({ L"Space", t->running ? L"Pause" : L"Start", VK_SPACE });
-            p.push_back({ L"Enter", L"Edit", VK_RETURN });
-            p.push_back({ L"R", L"Reset", 'R' });
-        }
-        if ((int)g_state.timers.size() < kMaxTimers) p.push_back({ L"N", L"New", 'N' });
-        if (t) p.push_back({ L"Del", L"Remove", VK_DELETE });
-        p.push_back({ L"Esc", L"Hide", VK_ESCAPE });
-    } else {
-        p.push_back({ L"Tab", L"Timer", VK_TAB });
-        p.push_back({ L"Space", g_state.watch.running ? L"Pause" : L"Start", VK_SPACE });
-        p.push_back({ L"L", L"Lap", 'L' });
-        p.push_back({ L"R", L"Reset", 'R' });
-        p.push_back({ L"Esc", L"Hide", VK_ESCAPE });
-    }
-    return p;
-}
-
-// A reading drawn digit by digit in equal cells, so the figures do not shuffle
-// sideways as 1 and 0 change width. `align`: -1 left of x, 0 centred, +1 right.
-int CellsWidth(HDC dc, const std::wstring& text) {
-    SIZE zero = {};
-    GetTextExtentPoint32W(dc, L"0", 1, &zero);
-    int w = 0;
-    for (wchar_t c : text) {
-        if (c >= L'0' && c <= L'9') { w += zero.cx; continue; }
-        SIZE sz = {};
-        GetTextExtentPoint32W(dc, &c, 1, &sz);
-        w += sz.cx;
-    }
-    return w;
-}
-
-void DrawCells(HDC dc, HFONT font, const std::wstring& text, int x, int top, int bottom,
-               int align, COLORREF ink) {
-    HGDIOBJ old = SelectObject(dc, font);
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, ink);
-    const int total = CellsWidth(dc, text);
-    int left = align < 0 ? x : (align == 0 ? x - total / 2 : x - total);
-    SIZE zero = {};
-    GetTextExtentPoint32W(dc, L"0", 1, &zero);
-    for (wchar_t c : text) {
-        SIZE sz = {};
-        GetTextExtentPoint32W(dc, &c, 1, &sz);
-        const bool digit = c >= L'0' && c <= L'9';
-        const int cell = digit ? zero.cx : sz.cx;
-        RECT r = { left + (cell - sz.cx) / 2, top, left + cell + sz.cx, bottom };
-        DrawTextW(dc, &c, 1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        left += cell;
-    }
-    SelectObject(dc, old);
-}
-
-std::wstring RowStatus(const Timer& t, Ticks now) {
-    const std::wstring len = FormatDuration(t.duration) + L" timer";
-    const std::wstring dot = L"  \x00B7  ";
-    if (t.running) return L"Running" + dot + L"ends " + LocalStamp(now + Remaining(t, now));
-    if (t.remaining <= 0) return L"Finished" + dot + len;
-    if (t.remaining < t.duration) return L"Paused" + dot + len;
-    return L"Ready" + dot + len;
-}
-
-void PaintEditor(HDC dc, const RECT& row, float s) {
-    using theme::Font;
-    static const wchar_t* kUnit[4] = { L"d", L"h", L"m", L"s" };
-    const int cy = (row.top + row.bottom) / 2;
-    int x = row.right - (int)(kPad * s) - (int)(8 * s);
-    for (int i = 3; i >= 0; --i) {
-        wchar_t buf[16];
-        swprintf_s(buf, i == 0 ? L"%d" : L"%02d", g_fv[i]);
-        const int unitW = theme::Measure(dc, Font::Small, kUnit[i]);
-        RECT ur = { x - unitW, cy - (int)(10 * s), x, cy + (int)(14 * s) };
-        theme::Print(dc, Font::Small, kUnit[i], ur, theme::TextDim, DT_RIGHT | DT_BOTTOM | DT_SINGLELINE);
-        x -= unitW + (int)(12 * s);
-
-        HGDIOBJ old = SelectObject(dc, theme::Get(Font::Heading));
-        const int w = CellsWidth(dc, buf);
-        SelectObject(dc, old);
-        RECT box = { x - w - (int)(8 * s), cy - (int)(20 * s), x + (int)(8 * s), cy + (int)(20 * s) };
-        if (i == g_field) {
-            theme::Gradient(dc, box, theme::Metal1, theme::Metal3);
-            theme::Frame(dc, box, theme::MetalEdge, 255);
-        } else {
-            theme::Frame(dc, box, theme::Rule, 255);
-        }
-        DrawCells(dc, theme::Get(Font::Heading), buf, x, box.top, box.bottom, 1,
-                  i == g_field ? theme::TextHi : theme::Text);
-        x = box.left - (int)(10 * s);
-    }
-}
-
-void PaintTimers(HDC dc, int top, int width, float s) {
-    using theme::Font;
-    const int pad = (int)(kPad * s);
-    const Ticks now = NowUtc();
-    if (g_state.timers.empty()) {
-        RECT r = { pad, top, width - pad, top + (int)(kRowH * s) };
-        theme::Print(dc, Font::Row, L"No timers. Press N to add one.", r, theme::TextDim,
-                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        return;
-    }
-    for (int i = 0; i < (int)g_state.timers.size(); ++i) {
-        const Timer& t = g_state.timers[(size_t)i];
-        const bool sel = (i == g_sel);
-        RECT row = { pad, top + (int)(i * kRowH * s), width - pad, top + (int)((i + 1) * kRowH * s) };
-        if (sel) theme::RowFocus(dc, row, 1.0f);
-        else { RECT line = { row.left, row.bottom - 1, row.right, row.bottom }; theme::Wash(dc, line, theme::Line, 255); }
-
-        RECT name = { row.left + pad, row.top + (int)(8 * s), row.left + (int)(240 * s), row.top + (int)(32 * s) };
-        theme::Print(dc, Font::Row, t.label, name, sel ? theme::TextHi : theme::Text,
-                     DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS);
-        RECT sub = { row.left + pad, row.top + (int)(33 * s), row.left + (int)(300 * s), row.bottom - (int)(6 * s) };
-        const bool editing = sel && g_edit;
-        theme::Print(dc, Font::Small, editing ? std::wstring(L"Type digits; arrows change field") : RowStatus(t, now),
-                     sub, sel ? theme::Text : theme::TextDim,
-                     DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
-        if (editing) { PaintEditor(dc, row, s); continue; }
-        const bool finished = !t.running && t.remaining <= 0;
-        const Ticks shown = CeilSecond(Remaining(t, now));
-        COLORREF ink = t.running ? theme::TextHi : (finished ? theme::Warn : theme::TextDim);
-        if (sel && !t.running && !finished) ink = theme::Text;
-        DrawCells(dc, theme::Get(Font::Heading), FormatDuration(shown), row.right - pad, row.top, row.bottom, 1, ink);
-    }
-}
-
-void PaintWatch(HDC dc, int top, int width, float s) {
-    using theme::Font;
-    const int pad = (int)(kPad * s);
-    const Ticks now = NowUtc();
-    const Stopwatch& w = g_state.watch;
-
-    LOGFONTW lf = {};
-    GetObjectW(theme::Get(Font::Heading), sizeof(lf), &lf);
-    lf.lfHeight = -(int)(60 * s);
-    lf.lfWidth = 0;
-    HFONT big = CreateFontIndirectW(&lf);
-    const int bandBottom = top + (int)(kWatchH * s);
-    DrawCells(dc, big ? big : theme::Get(Font::Heading), FormatDuration(Elapsed(w, now), true),
-              width / 2, top + (int)(14 * s), bandBottom - (int)(40 * s), 0,
-              w.running ? theme::TextHi : theme::Text);
-    if (big) DeleteObject(big);
-    RECT st = { pad, bandBottom - (int)(40 * s), width - pad, bandBottom - (int)(12 * s) };
-    theme::Print(dc, Font::Small, w.running ? L"Running" : (Elapsed(w, now) > 0 ? L"Paused" : L"Stopped"),
-                 st, theme::TextDim, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    RECT line = { pad, bandBottom, width - pad, bandBottom + 1 };
-    theme::Wash(dc, line, theme::Line, 255);
-    const int shown = (std::min)((int)w.laps.size(), kLapRows);
-    if (shown == 0) {
-        RECT r = { pad, bandBottom, width - pad, bandBottom + (int)(kLapH * s) * 2 };
-        theme::Print(dc, Font::Small, L"Press L to mark a lap.", r, theme::TextMute,
-                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        return;
-    }
-    for (int i = 0; i < shown; ++i) {
-        const Ticks total = w.laps[(size_t)i];
-        const Ticks prev = (i + 1 < (int)w.laps.size()) ? w.laps[(size_t)i + 1] : 0;
-        RECT row = { pad, bandBottom + (int)(i * kLapH * s), width - pad, bandBottom + (int)((i + 1) * kLapH * s) };
-        RECT a = { row.left + pad, row.top, row.left + (int)(120 * s), row.bottom };
-        theme::Print(dc, Font::Row, L"Lap " + std::to_wstring(w.lapSeq - i), a, theme::TextDim,
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        RECT c = { row.left, row.top, row.right - pad - (int)(150 * s), row.bottom };
-        theme::Print(dc, Font::Row, FormatDuration(total, true), c, theme::Text,
-                     DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-        RECT d = { row.right - pad - (int)(140 * s), row.top, row.right - pad, row.bottom };
-        theme::Print(dc, Font::Row, L"+" + FormatDuration(total - prev, true), d, theme::TextDim,
-                     DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-    }
-    if ((int)w.laps.size() > shown) {
-        RECT r = { pad, bandBottom + (int)(shown * kLapH * s), width - pad, bandBottom + (int)((shown + 1) * kLapH * s) };
-        theme::Print(dc, Font::Small, L"+" + std::to_wstring((int)w.laps.size() - shown) + L" earlier",
-                     r, theme::TextMute, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-}
-
-void PaintInto(HDC dc, const SIZE& size) {
-    using theme::Font;
-    const float s = g_scale;
-    RECT all = { 0, 0, size.cx, size.cy };
-    theme::Wash(dc, all, theme::Bg, 255);
-    theme::Frame(dc, all, theme::Rule, 255, (std::max)(1, (int)s));
-
-    const int pad = (int)(kPad * s);
-    const int headerH = (int)(kHeaderH * s);
-
-    // ---- the two page names ----
-    static const wchar_t* kPages[2] = { L"Timer", L"Stopwatch" };
-    int x = pad + (int)(8 * s);
-    const int track = (int)(2 * s);
-    for (int i = 0; i < 2; ++i) {
-        const std::wstring name = theme::Caps(kPages[i]);
-        const int w = theme::Measure(dc, Font::Tab, name, track);
-        RECT r = { x, 0, x + w, headerH };
-        theme::Print(dc, Font::Tab, name, r, i == g_page ? theme::TextHi : theme::TextDim,
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE, track);
-        g_tabRects[i] = { x - (int)(8 * s), 0, x + w + (int)(8 * s), headerH };
-        if (i == g_page) {
-            RECT u = { x, headerH - (int)(8 * s), x + w, headerH - (int)(8 * s) + (std::max)(2, (int)(2 * s)) };
-            theme::Wash(dc, u, theme::TextHi, 255);
-        }
-        x += w + (int)(32 * s);
-    }
-    RECT hair = { pad, headerH - 1, size.cx - pad, headerH };
-    theme::Wash(dc, hair, theme::Line, 255);
-
-    const int footLines = FootLines();
-    const int footTop = size.cy - (int)(footLines * kFootH * s);
-    if (g_page == 0) PaintTimers(dc, headerH, size.cx, s);
-    else             PaintWatch(dc, headerH, size.cx, s);
-
-    // ---- prompts: every one of these is a key that works, and clicking sends it ----
-    g_promptHits.clear();
-    RECT line = { pad, footTop, size.cx - pad, footTop + 1 };
-    theme::Wash(dc, line, theme::Line, 255);
-    const std::vector<PromptText> prompts = Prompts();
-    const int gap = (int)(22 * s);
-    const int avail = size.cx - 2 * pad;
-    size_t i = 0;
-    for (int ln = 0; ln < footLines && i < prompts.size(); ++ln) {
-        // Greedy: as many as fit on the line, centred.
-        size_t j = i;
-        int total = 0;
-        std::vector<int> widths;
-        while (j < prompts.size()) {
-            const int w = theme::Prompt(dc, 0, 0, prompts[j].key, prompts[j].word, theme::TextDim, true);
-            const int next = total + (widths.empty() ? 0 : gap) + w;
-            if (next > avail && !widths.empty()) break;
-            widths.push_back(w);
-            total = next;
-            ++j;
-        }
-        // Spread evenly over the lines so the second is not a lone word.
-        const int cy = footTop + (int)((ln + 0.5f) * kFootH * s);
-        int px = (std::max)(pad, (int)(size.cx - total) / 2);
-        for (size_t k = i; k < j; ++k) {
-            const bool hot = g_hotPrompt == (int)k;
-            theme::Prompt(dc, px, cy, prompts[k].key, prompts[k].word, hot ? theme::TextHi : theme::TextDim);
-            PromptHit h = { { px, cy - (int)(14 * s), px + widths[k - i], cy + (int)(14 * s) }, prompts[k].vk };
-            g_promptHits.push_back(h);
-            px += widths[k - i] + gap;
-        }
-        i = j;
-    }
+    return m;
 }
 
 void Paint(HWND wnd) {
@@ -1001,33 +1264,42 @@ void Paint(HWND wnd) {
     GetClientRect(wnd, &client);
     const SIZE size = { client.right, client.bottom };
     theme::SetDpi((UINT)(g_scale * 96.0f + 0.5f));
+    g_view.pinned = g_cfg && g_cfg->timerPinned;
+    const Model model = BuildModel();
 
     HDC mem = CreateCompatibleDC(target);
     HBITMAP bmp = mem ? CreateCompatibleBitmap(target, size.cx, size.cy) : nullptr;
     if (mem && bmp) {
         HGDIOBJ old = SelectObject(mem, bmp);
-        PaintInto(mem, size);
+        panel::Paint(mem, size, model, g_view);
         BitBlt(target, 0, 0, size.cx, size.cy, mem, 0, 0, SRCCOPY);
         SelectObject(mem, old);
     } else {
-        PaintInto(target, size);
+        panel::Paint(target, size, model, g_view);
     }
     if (bmp) DeleteObject(bmp);     // nothing stays resident while hidden (inv. 67)
     if (mem) DeleteDC(mem);
     EndPaint(wnd, &ps);
+    if (g_view.again) InvalidateRect(wnd, nullptr, FALSE);     // a scroll position was clamped
 }
 
-int PromptAt(POINT pt) {
-    for (size_t i = 0; i < g_promptHits.size(); ++i)
-        if (PtInRect(&g_promptHits[i].r, pt)) return (int)i;
-    return -1;
+const Hit* HitAt(POINT pt) {
+    for (size_t i = g_view.hits.size(); i-- > 0;)
+        if (PtInRect(&g_view.hits[i].r, pt)) return &g_view.hits[i];
+    return nullptr;
 }
 
-int RowAt(int y) {
-    const int top = (int)(kHeaderH * g_scale);
-    if (y < top || g_state.timers.empty()) return -1;
-    const int row = (y - top) / (int)(kRowH * g_scale);
-    return row < (int)g_state.timers.size() ? row : -1;
+void SetHot(const Hit* h) {
+    const int cmd = h ? h->cmd : CmdNone, arg = h ? h->arg : 0;
+    if (cmd != g_view.hotCmd || arg != g_view.hotArg) {
+        g_view.hotCmd = cmd;
+        g_view.hotArg = arg;
+        Repaint();
+    }
+}
+
+bool InDragZone(POINT pt) {
+    return pt.x < (int)(kRail * g_scale) || pt.y < (int)(kTop * g_scale);
 }
 
 void ShowContextMenu() {
@@ -1037,7 +1309,7 @@ void ShowContextMenu() {
     AppendMenuW(menu, MF_STRING, kPin, L"Pin in place (click-through)");
     AppendMenuW(menu, MF_STRING, kHide, L"Hide");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kSettings, L"Timer settings...");
+    AppendMenuW(menu, MF_STRING, kSettings, L"Clock panel settings...");
     POINT pt;
     GetCursorPos(&pt);
     SetForegroundWindow(g_wnd);
@@ -1051,6 +1323,9 @@ void ShowContextMenu() {
     }
 }
 
+// A timer's alarm (not an alarm clock's ringing) is silenced by any key or click.
+bool TimerRingActive() { return g_alarming && !g_view.ringing; }
+
 LRESULT CALLBACK TimerProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_PAINT:      Paint(wnd); return 0;
@@ -1063,42 +1338,75 @@ LRESULT CALLBACK TimerProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (!IsWindowVisible(wnd)) AppScheduleTrim(2 * 1000);
                 return 0;
             }
-            if (wp == kTimerAlarm) { StopAlarm(); return 0; }
+            if (wp == kTimerAlarm) {
+                if (g_view.ringing) EndRing(false);       // 60 s unanswered = dismissed
+                else StopAlarm();
+                return 0;
+            }
             if (wp == kTimerAway) {
                 KillTimer(wnd, kTimerAway);
                 if (!g_awayText.empty()) {
-                    AppTrayBalloon(L"Finished while you were away", g_awayText.c_str());
+                    AppTrayBalloon(g_awayHasAlarm ? L"Missed while you were away" : L"Finished while you were away",
+                                   g_awayText.c_str());
                     g_awayText.clear();
+                    g_awayHasAlarm = false;
                 }
                 return 0;
             }
             return 0;
 
-        case WM_TIMECHANGE:       // the user moved the clock: timers move with it
-            Repaint();
-            Reschedule();
+        case WM_TIMECHANGE:       // the user moved the clock: timers move with it, alarms follow the local clock
+            Tick(false);
             return 0;
 
         case WM_DPICHANGED:        // dragged to a monitor with another scale (R2)
+            ReleaseFonts();
             SetScale(HIWORD(wp));
             Relayout();
             return 0;
 
         case WM_KEYDOWN:
-            if (g_alarming) { StopAlarm(); return 0; }       // any key silences it
-            if (wp == VK_ESCAPE || wp == VK_TAB || wp == VK_UP || wp == VK_DOWN || wp == VK_LEFT ||
-                wp == VK_RIGHT || wp == VK_RETURN || wp == VK_SPACE || wp == VK_BACK ||
-                wp == VK_DELETE || (wp >= '0' && wp <= '9') || (wp >= VK_NUMPAD0 && wp <= VK_NUMPAD9) ||
-                wp == 'R' || wp == 'N' || wp == 'L')
-                HandleKey((UINT)wp);
+            if (TimerRingActive()) { StopAlarm(); return 0; }       // any key silences it
+            HandleKey((UINT)wp);
             return 0;
 
+        case WM_CHAR:
+            if (g_view.sheet != SheetNone && g_view.focus == FieldName && wp >= 32 && wp != 127) {
+                InsertText(NameFieldOf(), std::wstring(1, (wchar_t)wp));
+                Repaint();
+            }
+            return 0;
+
+        case WM_MOUSEWHEEL: {
+            POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            ScreenToClient(wnd, &pt);
+            const int steps = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
+            if (!steps) return 0;
+            const Hit* h = HitAt(pt);
+            if (h && h->wheel) { SpinField(h->arg, steps > 0 ? +1 : -1); Repaint(); return 0; }
+            if (PtInRect(&g_view.scrollRect, pt) && g_view.scrollMax > 0) {
+                int* pos = g_view.sheet != SheetNone ? &g_view.sheetScroll : &g_view.scroll[g_view.page];
+                *pos = (std::max)(0, (std::min)(g_view.scrollMax, *pos - steps * (int)(60 * g_scale)));
+                Repaint();
+            }
+            return 0;
+        }
+
         case WM_LBUTTONDOWN: {
-            // Unpinned, the header carries the panel, except the two page names.
-            if (g_alarming || !g_cfg || g_cfg->timerPinned) return 0;
+            if (TimerRingActive()) return 0;                 // the click that silences it comes up
             const POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-            if (pt.y >= (int)(kHeaderH * g_scale)) return 0;
-            for (const RECT& tab : g_tabRects) if (PtInRect(&tab, pt)) return 0;
+            const Hit* h = HitAt(pt);
+            if (h) {
+                g_view.downCmd = h->cmd;
+                g_view.downArg = h->arg;
+                SetCapture(wnd);
+                // The name field takes the caret on press, as any text box does.
+                if (h->cmd == CmdName) { Command(CmdName, 0, pt.x); }
+                Repaint();
+                return 0;
+            }
+            if (g_view.sheet != SheetNone || !g_cfg || g_cfg->timerPinned) return 0;
+            if (!InDragZone(pt)) return 0;
             g_dragging = true;
             GetCursorPos(&g_dragOrigin);
             GetWindowRect(wnd, &g_dragStart);
@@ -1108,10 +1416,11 @@ LRESULT CALLBACK TimerProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_CAPTURECHANGED:
             g_dragging = false;
+            if (g_view.downCmd != CmdNone) { g_view.downCmd = CmdNone; Repaint(); }
             return 0;
 
         case WM_RBUTTONUP:
-            if (g_alarming) { StopAlarm(); return 0; }
+            if (TimerRingActive()) { StopAlarm(); return 0; }
             if (g_cfg && !g_cfg->timerPinned) ShowContextMenu();
             return 0;
 
@@ -1128,19 +1437,16 @@ LRESULT CALLBACK TimerProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 return 0;
             }
-            if (g_alarming) { StopAlarm(); return 0; }
+            if (TimerRingActive()) { StopAlarm(); return 0; }
             const POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-            const int prompt = PromptAt(pt);
-            if (prompt >= 0) { HandleKey(g_promptHits[(size_t)prompt].vk); return 0; }
-            if (!g_edit) {
-                for (int i = 0; i < 2; ++i)
-                    if (PtInRect(&g_tabRects[i], pt)) {
-                        if (g_page != i) HandleKey(VK_TAB);
-                        return 0;
-                    }
-                const int row = g_page == 0 ? RowAt(pt.y) : -1;
-                if (row >= 0) { g_sel = row; Repaint(); }
-            }
+            const int dc = g_view.downCmd, da = g_view.downArg;
+            g_view.downCmd = CmdNone;
+            if (GetCapture() == wnd) ReleaseCapture();
+            if (dc == CmdNone) return 0;
+            const Hit* h = HitAt(pt);
+            // The command must be copied: running it repaints, and the hit list is rebuilt.
+            if (h && h->cmd == dc && h->arg == da && dc != CmdName) Command(dc, da, pt.x);
+            else Repaint();
             return 0;
         }
 
@@ -1158,15 +1464,14 @@ LRESULT CALLBACK TimerProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             const POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-            const int hot = PromptAt(pt);
-            if (hot != g_hotPrompt) { g_hotPrompt = hot; Repaint(); }
+            SetHot(HitAt(pt));
             TRACKMOUSEEVENT track = { sizeof(track), TME_LEAVE, wnd, 0 };
             TrackMouseEvent(&track);
             return 0;
         }
 
         case WM_MOUSELEAVE:
-            if (g_hotPrompt != -1) { g_hotPrompt = -1; Repaint(); }
+            SetHot(nullptr);
             return 0;
 
         case WM_DESTROY:
@@ -1179,7 +1484,7 @@ LRESULT CALLBACK TimerProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
 bool EnsureWindow() {
     if (g_wnd) return true;
     if (!g_inst) return false;
-    g_wnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kClass, L"ProWindows timer",
+    g_wnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kClass, L"ProWindows clock panel",
                             WS_POPUP, 0, 0, 100, 100, nullptr, nullptr, g_inst, nullptr);
     if (!g_wnd) return false;
     theme::DarkTitleBar(g_wnd);
@@ -1193,8 +1498,8 @@ void ApplyPin() {
     if (!g_wnd || !g_cfg) return;
     const LONG bits = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
     const bool pinned = g_cfg->timerPinned;
-    if (pinned && g_edit) EndEdit();         // a pinned panel can take no key to finish with
-    if (pinned) g_dragging = false;
+    g_view.pinned = pinned;
+    if (pinned) { g_view.sheet = SheetNone; g_dragging = false; }   // a pinned panel can take no key to finish an edit
     LONG ex = GetWindowLongW(g_wnd, GWL_EXSTYLE);
     const LONG wanted = pinned ? (ex | bits) : (ex & ~bits);
     if (wanted != ex) {
@@ -1209,9 +1514,9 @@ void ApplyPin() {
 // clicking the panel activates it, and then its keys work.
 void ShowPanel() {
     if (!EnsureWindow()) return;
-    g_edit = false;
-    if (g_sel >= (int)g_state.timers.size()) g_sel = (int)g_state.timers.size() - 1;
-    if (g_sel < 0) g_sel = 0;
+    g_view.sheet = SheetNone;
+    if (g_view.sel >= (int)g_state.timers.size()) g_view.sel = (int)g_state.timers.size() - 1;
+    if (g_view.sel < 0) g_view.sel = 0;
     ApplyPin();
     Place();
     KillTimer(g_wnd, kTimerIdle);
@@ -1224,10 +1529,11 @@ void ShowPanel() {
 void HidePanel() {
     if (!g_wnd) return;
     g_dragging = false;
-    if (g_edit) EndEdit();       // a brand-new timer cancelled by closing is taken back out (R1)
+    g_view.sheet = SheetNone;      // an unsaved edit is dropped; nothing was changed yet
     ShowWindow(g_wnd, SW_HIDE);
     SetTimer(g_wnd, kTimerIdle, kIdleMs, nullptr);
-    g_hotPrompt = -1;
+    g_view.hotCmd = g_view.downCmd = CmdNone;
+    ReleaseFonts();
     Reschedule();       // hidden: no per-second wake-ups for the display
 }
 
@@ -1250,6 +1556,9 @@ void TimerInit(HINSTANCE inst, Config* cfg) {
 
     g_state = State();
     if (!LoadFile(StorePath(), &g_state)) g_state = State();
+    g_view = View();
+    g_view.page = (std::max)(0, (std::min)((int)PageCount - 1, g_state.page));
+    g_ringQueue.clear();
 
     // The window stays (hidden, a few hundred bytes) because the one OS timer
     // needs somewhere to land; it has no bitmap and no thread while hidden.
@@ -1258,7 +1567,9 @@ void TimerInit(HINSTANCE inst, Config* cfg) {
 }
 
 void TimerShutdown() {
+    g_view.ringing = false;
     StopAlarm();
+    ReleaseFonts();
     if (g_wnd) {
         KillTimer(g_wnd, kTimerTick);
         DestroyWindow(g_wnd);
@@ -1281,9 +1592,10 @@ void TimerHide() {
 }
 
 void TimerToggle() {
-    if (g_alarming) StopAlarm();
+    if (TimerRingActive()) StopAlarm();
     if (!g_cfg) return;
     g_cfg->timerShown = !g_cfg->timerShown;
+    if (g_cfg->timerShown) g_view.page = PageClock;      // Win+W opens on the clock
     AppSaveConfig();
     AppRefreshSettings();
     AppUpdateOverlays();         // game mode and a dark display still win
@@ -1300,6 +1612,9 @@ void TimerSetPinned(bool pinned) {
 bool TimerPinned() { return g_cfg && g_cfg->timerPinned; }
 bool TimerAlarming() { return g_alarming; }
 void TimerStopAlarm() { StopAlarm(); }
+bool TimerAlarmRinging() { return g_view.ringing; }
+void TimerSnoozeAlarm() { EndRing(true); }
+void TimerDismissAlarm() { EndRing(false); }
 
 void TimerApplyConfig() {
     g_lastTickIdx = -1;
@@ -1311,5 +1626,18 @@ void TimerApplyConfig() {
 }
 
 void TimerCheckNow() { if (g_wnd) Tick(false); }
+
+bool TimerHitRect(int cmd, int arg, RECT* out) {
+    for (size_t i = g_view.hits.size(); i-- > 0;) {
+        const Hit& h = g_view.hits[i];
+        if (h.cmd == cmd && h.arg == arg) { if (out) *out = h.r; return true; }
+    }
+    return false;
+}
+
+void TimerRingAlarm(int index) {
+    if (index < 0 || index >= (int)g_state.alarms.size()) return;
+    StartRing(index, NowUtc());
+}
 
 } // namespace awa
