@@ -343,6 +343,25 @@ int wmain(int argc, wchar_t** argv) {
     Click(wnd, panel::CmdAlarmDelete, 5);
     Check(Reload(store).alarms.size() == 5, L"the bin deletes an alarm");
 
+    // A Once alarm for a time already gone: the editor says so, Save moves it to tomorrow.
+    Check(Click(wnd, panel::CmdAlarmAdd, 0), L"+ for a past-time alarm");
+    Check(Click(wnd, panel::CmdSpinFocus, panel::FieldHour), L"focus the hour");
+    Key(wnd, '0'); Key(wnd, '0');
+    ShotNow(wnd, out, L"alarm-past-note.png", png);
+    Key(wnd, VK_RETURN);
+    {
+        State s = Reload(store);
+        const alarm::LocalTime today = alarm::SystemZone().ToLocal(NowUtc());
+        const bool midnight = today.hour == 0 && today.minute == 0;
+        Check(s.alarms.size() == 6 && (midnight || s.alarms[5].day != today.day) &&
+              alarm::NextFire(s.alarms[5], NowUtc(), alarm::SystemZone()) > NowUtc(),
+              L"a past Once alarm was saved for tomorrow and will ring");
+    }
+    Wheel(wnd, 400, 300, -10);
+    Hover(wnd, panel::CmdAlarmEdit, 5);
+    Click(wnd, panel::CmdAlarmDelete, 5);
+    Check(Reload(store).alarms.size() == 5, L"and it is deleted again");
+
     // ---- the ringing banner ----
     g_lastBalloon.clear();
     TimerRingAlarm(0);
@@ -359,6 +378,20 @@ int wmain(int argc, wchar_t** argv) {
     TimerRingAlarm(1);
     Pump(100);
     Check(Click(wnd, panel::CmdRingDismiss, 0) && !TimerAlarmRinging(), L"Dismiss");
+
+    // Pinned and ringing: click-through comes off so the buttons work, then returns.
+    TimerSetPinned(true);
+    {
+        const LONG ct = WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
+        Check((GetWindowLongW(wnd, GWL_EXSTYLE) & ct) == ct, L"pinned: click-through before the ring");
+        TimerRingAlarm(2);
+        Pump(100);
+        Check(TimerAlarmRinging() && !(GetWindowLongW(wnd, GWL_EXSTYLE) & ct), L"pinned and ringing: clickable");
+        Shot(wnd, out, L"alarm-ringing-pinned.png", png);
+        Check(Click(wnd, panel::CmdRingDismiss, 0) && !TimerAlarmRinging(), L"Dismiss works while pinned");
+        Check((GetWindowLongW(wnd, GWL_EXSTYLE) & ct) == ct, L"click-through restored after the ring");
+    }
+    TimerSetPinned(false);
 
     // ---- the Timer page ----
     Click(wnd, panel::CmdPage, panel::PageTimer);

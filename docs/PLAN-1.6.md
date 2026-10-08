@@ -674,3 +674,15 @@ Save commit.
   ceiling is only there for drift between SetTimer's tick clock and the NTP-slewed wall clock.
   Over 24 days that drift can pass the 10 s "missed" line and turn a ring into a balloon; over
   an hour it is a fraction of a second. 24 wakes a day instead of 1440 (inv. 90).
+- **Pinned panel + ringing.** `ApplyPin` drops WS_EX_TRANSPARENT/NOACTIVATE (keeps LAYERED) while an
+  alarm or timer rings and restores them when it ends; dragging stays locked (reads `timerPinned`);
+  show is still SW_SHOWNOACTIVATE (R3).
+- **Past Once alarm.** `alarm::RollPastOnce` on Save moves a Once whose date+time is not after now to
+  the next occurrence of that time (today if still ahead, else tomorrow); the editor shows a TextDim
+  note under the date meanwhile (`OnceIsPast`). Saving still re-enables the alarm (decided).
+- **Hourly window across midnight.** hourFrom > hourTo wraps (22-06 = 22,23,0..6); no swap on save;
+  `NextAfter` tests `InHourWindow`, `RepeatSummary` prints the window as entered.
+- **Name field.** Left/Right/Backspace/Delete step over a UTF-16 surrogate pair as one unit.
+- **SystemZone per year.** `GetTimeZoneInformationForYear` + the `...Ex` converters, one rule table
+  per year (16 cached, guarded), dropped by `InvalidateSystemZone` on WM_TIMECHANGE and a
+  WM_SETTINGCHANGE "intl"/null (main window and panel both).

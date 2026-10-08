@@ -1205,6 +1205,11 @@ void PaintAlarmSheet(Ctx& c) {
                  a.year == today.year && a.month == today.month && a.day == today.day, CmdDay, 0);
             Chip(c, { cx0, y + S(12) + S(40), cx0 + S(110), y + S(12) + S(40) + S(34) }, L"Tomorrow",
                  a.year == tmr.year && a.month == tmr.month && a.day == tmr.day, CmdDay, 1);
+            if (alarm::OnceIsPast(a, c.m.now, alarm::SystemZone())) {
+                // Save moves it on (RollPastOnce), so say so before, as Windows Clock does.
+                RECT t = { x0 + S(80), y - S(20), x1, y };     // on the DATE label's row, in view without scrolling
+                Txt(dc, Fnt(13, 1), L"That time has passed - it will ring tomorrow", t, theme::TextDim, DT_LEFT | DT_VCENTER);
+            }
             y += S(90) + S(16);
             break;
         }

@@ -30,7 +30,7 @@ struct Alarm {
     int   hour = 7, minute = 0;
     Kind  kind = Kind::Once;
     int   year = 0, month = 0, day = 0;        // Once: the date
-    int   hourFrom = 0, hourTo = 23;           // Hourly: inclusive window
+    int   hourFrom = 0, hourTo = 23;           // Hourly: inclusive; from > to wraps midnight
     uint32_t weekdays = 0;                     // 7 bits, Monday = bit 0
     uint32_t monthDays = 0;                    // Monthly
     uint32_t weeks = 0;                        // weeks of the month
@@ -62,6 +62,12 @@ public:
 };
 // The machine's zone, on SystemTimeToTzSpecificLocalTime / TzSpecificLocalTimeToSystemTime.
 const Zone& SystemZone();
+// Drop the cached per-year rules (the clock or the time zone changed).
+void InvalidateSystemZone();
+// Once alarm whose date+time is not after now (local); RollPastOnce moves it to the
+// next occurrence of that time (today if still ahead, else tomorrow). True if moved.
+bool OnceIsPast(const Alarm& a, Ticks nowUtc, const Zone& zone);
+bool RollPastOnce(Alarm& a, Ticks nowUtc, const Zone& zone);
 
 // Calendar helpers (proleptic Gregorian, FILETIME epoch 1601-01-01 = a Monday).
 bool  LeapYear(int y);

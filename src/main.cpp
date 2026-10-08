@@ -10,6 +10,7 @@
 #include "monitor.h"
 #include "clock.h"
 #include "timer.h"
+#include "alarm.h"
 #include "launcher.h"
 #include "dragguide.h"
 #include "search.h"
@@ -1283,6 +1284,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_SETTINGCHANGE:
             if (wp == SPI_SETWORKAREA) g_wm.OnDisplayChange();
+            // A zone or DST change: the clock panel's per-year rule tables are stale
+            // (the panel window may not exist yet to hear it).
+            if (!lp || wcscmp((const wchar_t*)lp, L"intl") == 0) alarm::InvalidateSystemZone();
+            return 0;
+
+        case WM_TIMECHANGE:
+            alarm::InvalidateSystemZone();
             return 0;
 
         case WM_DPICHANGED:

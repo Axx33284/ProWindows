@@ -111,8 +111,21 @@ static void DailyHourly() {
     CHECK(NextFire(h, U(2026, 10, 9, 17, 16), utc) == U(2026, 10, 12, 9, 15));   // Fri -> Mon
     Alarm all; all.kind = Kind::Hourly; all.minute = 0;
     CHECK(NextFire(all, U(2026, 10, 8, 23, 30), utc) == U(2026, 10, 9, 0, 0));
-    Alarm swapped = h; swapped.weekdays = 0; swapped.hourFrom = 17; swapped.hourTo = 9;
-    CHECK(NextFire(swapped, U(2026, 10, 8, 8, 0), utc) == U(2026, 10, 8, 9, 15));   // a reversed window is swapped
+    Alarm wrap = h; wrap.weekdays = 0; wrap.hourFrom = 22; wrap.hourTo = 6;     // across midnight
+    CHECK(NextFire(wrap, U(2026, 10, 8, 8, 0), utc) == U(2026, 10, 8, 22, 15));
+    CHECK(NextFire(wrap, U(2026, 10, 8, 22, 15), utc) == U(2026, 10, 8, 23, 15));
+    CHECK(NextFire(wrap, U(2026, 10, 8, 23, 15), utc) == U(2026, 10, 9, 0, 15));
+    CHECK(NextFire(wrap, U(2026, 10, 9, 6, 15), utc) == U(2026, 10, 9, 22, 15));
+    CHECK(RepeatSummary(wrap) == L"Every hour at :15, 22-06");
+    // A Once alarm saved for a moment already past rolls to the next occurrence.
+    Alarm past = OnceAt(2026, 10, 8, 9, 0);
+    CHECK(OnceIsPast(past, U(2026, 10, 8, 12), utc));
+    CHECK(!OnceIsPast(past, U(2026, 10, 8, 8), utc));
+    CHECK(RollPastOnce(past, U(2026, 10, 8, 12), utc) && past.day == 9 && past.month == 10);
+    Alarm old = OnceAt(2026, 9, 1, 15, 0);
+    CHECK(RollPastOnce(old, U(2026, 10, 8, 12), utc) && old.day == 8 && old.month == 10);   // still ahead today
+    Alarm fut = OnceAt(2026, 10, 9, 9, 0);
+    CHECK(!RollPastOnce(fut, U(2026, 10, 8, 12), utc));
 }
 
 static void WeeklyMonthly() {

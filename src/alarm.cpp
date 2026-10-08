@@ -65,6 +65,9 @@ int Weekday(int y, int m, int d) { return (int)(DayNumber(y, m, d) % 7); }
 
 // ------------------------------------------------------------------ the zone
 namespace {
+// Year-specific rules: a date in 2031 or 2019 follows that year's DST rules, not
+// today's. One table per year, read once and dropped by InvalidateSystemZone
+// (WM_TIMECHANGE / time-zone change). Guarded: the clock thread and the UI both ask.
 class SysZone : public Zone {
 public:
     LocalTime ToLocal(Ticks utc) const override {
@@ -73,7 +76,9 @@ public:
         ft.dwHighDateTime = (DWORD)((uint64_t)utc >> 32);
         SYSTEMTIME su, sl;
         LocalTime r;
-        if (!FileTimeToSystemTime(&ft, &su) || !SystemTimeToTzSpecificLocalTime(nullptr, &su, &sl))
+        if (!FileTimeToSystemTime(&ft, &su)) return ToCivil(utc);
+        DYNAMIC_TIME_ZONE_INFORMATION dz;
+        if (!ForYear(su.wYear, &dz) || !SystemTimeToTzSpecificLocalTimeEx(&dz, &su, &sl))
             return ToCivil(utc);                        // no zone data: treat UTC as local
         r.year = sl.wYear; r.month = sl.wMonth; r.day = sl.wDay;
         r.hour = sl.wHour; r.minute = sl.wMinute;
@@ -84,16 +89,48 @@ public:
         sl.wYear = (WORD)lt.year; sl.wMonth = (WORD)lt.month; sl.wDay = (WORD)lt.day;
         sl.wHour = (WORD)lt.hour; sl.wMinute = (WORD)lt.minute;
         FILETIME ft;
-        if (!TzSpecificLocalTimeToSystemTime(nullptr, &sl, &su) || !SystemTimeToFileTime(&su, &ft))
+        DYNAMIC_TIME_ZONE_INFORMATION dz;
+        if (!ForYear(lt.year, &dz) || !TzSpecificLocalTimeToSystemTimeEx(&dz, &sl, &su) || !SystemTimeToFileTime(&su, &ft))
             return 0;
         return ((Ticks)ft.dwHighDateTime << 32) | (Ticks)ft.dwLowDateTime;
     }
+    void Invalidate() { EnterCriticalSection(&cs_); n_ = 0; LeaveCriticalSection(&cs_); }
+    SysZone() { InitializeCriticalSection(&cs_); }
+private:
+    bool ForYear(int year, DYNAMIC_TIME_ZONE_INFORMATION* out) const {
+        EnterCriticalSection(&cs_);
+        bool ok = false;
+        for (int i = 0; i < n_ && !ok; ++i)
+            if (year_[i] == year) { *out = dz_[i]; ok = true; }
+        if (!ok) {
+            DYNAMIC_TIME_ZONE_INFORMATION base;
+            TIME_ZONE_INFORMATION tz;
+            if (GetDynamicTimeZoneInformation(&base) != TIME_ZONE_ID_INVALID &&
+                GetTimeZoneInformationForYear((USHORT)year, &base, &tz)) {
+                DYNAMIC_TIME_ZONE_INFORMATION d = base;   // keep the key name, swap in that year's rules
+                d.Bias = tz.Bias; d.StandardBias = tz.StandardBias; d.DaylightBias = tz.DaylightBias;
+                d.StandardDate = tz.StandardDate; d.DaylightDate = tz.DaylightDate;
+                d.DynamicDaylightTimeDisabled = base.DynamicDaylightTimeDisabled;
+                if (n_ < kCache) { year_[n_] = year; dz_[n_++] = d; }
+                *out = d; ok = true;
+            }
+        }
+        LeaveCriticalSection(&cs_);
+        return ok;
+    }
+    static constexpr int kCache = 16;
+    mutable CRITICAL_SECTION cs_;
+    mutable int n_ = 0;
+    mutable int year_[kCache];
+    mutable DYNAMIC_TIME_ZONE_INFORMATION dz_[kCache];
 };
+SysZone& TheZone() { static SysZone z; return z; }
 }
 
+void InvalidateSystemZone() { TheZone().Invalidate(); }
+
 const Zone& SystemZone() {
-    static const SysZone z;
-    return z;
+    return TheZone();
 }
 
 namespace {
@@ -140,6 +177,12 @@ bool DayMatches(const Alarm& a, int y, int m, int d, int dow) {
     }
 }
 
+// from > to is a window across midnight: 22-06 = 22, 23, 0..6.
+bool InHourWindow(const Alarm& a, int h) {
+    return a.hourFrom <= a.hourTo ? (h >= a.hourFrom && h <= a.hourTo)
+                                  : (h >= a.hourFrom || h <= a.hourTo);
+}
+
 constexpr int kHorizonDays = 5 * 366 + 1;     // "never" past about five years
 }
 
@@ -149,12 +192,9 @@ Ticks NextAfter(const Alarm& a, Ticks after, const Zone& zone) {
     const LocalTime base = zone.ToLocal(after);
     const long long day0 = DayNumber(base.year, base.month, base.day);
     int lo = a.hour, hi = a.hour;
-    if (a.kind == Kind::Hourly) {
-        lo = a.hourFrom < a.hourTo ? a.hourFrom : a.hourTo;
-        hi = a.hourFrom < a.hourTo ? a.hourTo : a.hourFrom;
-    }
     if (lo < 0) lo = 0;
     if (hi > 23) hi = 23;
+    if (a.kind == Kind::Hourly) { lo = 0; hi = 23; }   // the window test below picks the hours
     const int minute = a.minute < 0 ? 0 : (a.minute > 59 ? 59 : a.minute);
 
     for (int i = 0; i < kHorizonDays; ++i) {
@@ -168,6 +208,7 @@ Ticks NextAfter(const Alarm& a, Ticks after, const Zone& zone) {
         // otherwise convert all 24 hours of every day, on the UI thread.
         Ticks best = 0;
         for (int h = lo; h <= hi && !best; ++h) {
+            if (a.kind == Kind::Hourly && !InHourWindow(a, h)) continue;
             LocalTime lt; lt.year = y; lt.month = m; lt.day = d; lt.hour = h; lt.minute = minute;
             const Ticks u = Resolve(zone, lt);
             if (u > after) best = u;
@@ -176,6 +217,23 @@ Ticks NextAfter(const Alarm& a, Ticks after, const Zone& zone) {
         if (a.kind == Kind::Once) return 0;       // its one day has passed
     }
     return 0;
+}
+
+bool OnceIsPast(const Alarm& a, Ticks nowUtc, const Zone& zone) {
+    if (a.kind != Kind::Once || !ValidDate(a.year, a.month, a.day)) return false;
+    const LocalTime n = zone.ToLocal(nowUtc);
+    const long long at = FromCivil(a.year, a.month, a.day, a.hour, a.minute);
+    return at <= FromCivil(n.year, n.month, n.day, n.hour, n.minute);
+}
+
+bool RollPastOnce(Alarm& a, Ticks nowUtc, const Zone& zone) {
+    if (!OnceIsPast(a, nowUtc, zone)) return false;
+    const LocalTime n = zone.ToLocal(nowUtc);
+    LocalTime t = ToCivil(FromCivil(n.year, n.month, n.day, a.hour, a.minute));
+    if (FromCivil(t.year, t.month, t.day, t.hour, t.minute) <= FromCivil(n.year, n.month, n.day, n.hour, n.minute))
+        t = ToCivil(FromCivil(n.year, n.month, n.day, a.hour, a.minute) + 86400 * kSecond);
+    a.year = t.year; a.month = t.month; a.day = t.day;
+    return true;
 }
 
 Ticks NextFire(const Alarm& a, Ticks nowUtc, const Zone& zone) {
@@ -306,9 +364,7 @@ std::wstring RepeatSummary(const Alarm& a) {
     case Kind::Hourly: {
         swprintf_s(buf, L"Every hour at :%02d", a.minute);
         s = buf;
-        const int lo = a.hourFrom < a.hourTo ? a.hourFrom : a.hourTo;
-        const int hi = a.hourFrom < a.hourTo ? a.hourTo : a.hourFrom;
-        if (lo != 0 || hi != 23) { swprintf_s(buf, L", %02d-%02d", lo, hi); s += buf; }
+        if (a.hourFrom != 0 || a.hourTo != 23) { swprintf_s(buf, L", %02d-%02d", a.hourFrom, a.hourTo); s += buf; }
         if (a.weekdays & 0x7F) { s += dot; s += WeekdayText(a.weekdays); }
         break;
     }

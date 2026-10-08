@@ -362,11 +362,14 @@ void PlayTick() {
     PlaySoundW((LPCWSTR)wav.data(), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
 }
 
+void ApplyPin();
+
 void StopAlarm() {
     if (!g_alarming) return;
     g_alarming = false;
     PlaySoundW(nullptr, nullptr, 0);
     if (g_wnd && !g_view.ringing) KillTimer(g_wnd, kTimerAlarm);
+    ApplyPin();                      // the ring is over: a pinned panel goes click-through again
 }
 
 void StartAlarm() {
@@ -378,6 +381,7 @@ void StartAlarm() {
     else
         PlaySoundW(L"SystemExclamation", nullptr, SND_ALIAS | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
     if (g_wnd) SetTimer(g_wnd, kTimerAlarm, kAlarmMs, nullptr);
+    ApplyPin();
 }
 
 // ------------------------------------------------------------------ window geometry
@@ -605,6 +609,7 @@ void EndRing(bool snooze) {
     g_alarming = true;               // StopAlarm only acts on a looping sound
     StopAlarm();
     if (g_wnd) KillTimer(g_wnd, kTimerAlarm);
+    ApplyPin();
     if (!g_ringQueue.empty()) {
         const Ring next = g_ringQueue.front();
         g_ringQueue.erase(g_ringQueue.begin());
@@ -937,7 +942,7 @@ void SaveSheet() {
         if (a.kind == alarm::Kind::Monthly && !a.monthDays) return;
         a.label = d.name.s.substr(0, (size_t)alarm::kMaxLabel);
         FixOnceDay(a);
-        if (a.hourFrom > a.hourTo) std::swap(a.hourFrom, a.hourTo);
+        alarm::RollPastOnce(a, now, alarm::SystemZone());   // a Once for a moment gone rings tomorrow, as Windows Clock does
         a.enabled = true;
         alarm::Arm(a, now);                         // the baseline: rings only for the future
         if (d.index >= 0 && d.index < (int)g_state.alarms.size()) {
@@ -984,6 +989,20 @@ std::wstring ClipboardText() {
     return out;
 }
 
+// A caret never rests between the halves of a surrogate pair.
+int PrevPos(const std::wstring& s, int p) {
+    if (p <= 0) return 0;
+    --p;
+    if (p > 0 && s[(size_t)p] >= 0xDC00 && s[(size_t)p] <= 0xDFFF && s[(size_t)p - 1] >= 0xD800 && s[(size_t)p - 1] <= 0xDBFF) --p;
+    return p;
+}
+int NextPos(const std::wstring& s, int p) {
+    const int n = (int)s.size();
+    if (p >= n) return n;
+    if (s[(size_t)p] >= 0xD800 && s[(size_t)p] <= 0xDBFF && p + 1 < n && s[(size_t)p + 1] >= 0xDC00 && s[(size_t)p + 1] <= 0xDFFF) return p + 2;
+    return p + 1;
+}
+
 void EditKey(TextField& f, UINT vk, bool ctrl, bool shift) {
     const int n = (int)f.s.size();
     auto moveTo = [&](int pos) {
@@ -993,11 +1012,11 @@ void EditKey(TextField& f, UINT vk, bool ctrl, bool shift) {
     switch (vk) {
         case VK_LEFT:
             if (!shift && f.HasSel()) moveTo((std::min)(f.caret, f.anchor));
-            else moveTo(f.caret - 1);
+            else moveTo(PrevPos(f.s, f.caret));
             break;
         case VK_RIGHT:
             if (!shift && f.HasSel()) moveTo((std::max)(f.caret, f.anchor));
-            else moveTo(f.caret + 1);
+            else moveTo(NextPos(f.s, f.caret));
             break;
         case VK_HOME: moveTo(0); break;
         case VK_END:  moveTo(n); break;
@@ -1010,13 +1029,14 @@ void EditKey(TextField& f, UINT vk, bool ctrl, bool shift) {
                 f.s.erase((size_t)p, (size_t)(f.caret - p));
                 f.caret = f.anchor = p;
             } else if (f.caret > 0) {
-                f.s.erase((size_t)f.caret - 1, 1);
-                f.caret = f.anchor = f.caret - 1;
+                const int p = PrevPos(f.s, f.caret);
+                f.s.erase((size_t)p, (size_t)(f.caret - p));
+                f.caret = f.anchor = p;
             }
             break;
         case VK_DELETE:
             if (f.HasSel()) DeleteSel(f);
-            else if (f.caret < n) f.s.erase((size_t)f.caret, 1);
+            else if (f.caret < n) f.s.erase((size_t)f.caret, (size_t)(NextPos(f.s, f.caret) - f.caret));
             break;
         case 'A': if (ctrl) SelectAll(f); break;
         case 'V': if (ctrl) InsertText(f, ClipboardText()); break;
@@ -1359,7 +1379,12 @@ LRESULT CALLBACK TimerProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
 
         case WM_TIMECHANGE:       // the user moved the clock: timers move with it, alarms follow the local clock
+            alarm::InvalidateSystemZone();
             Tick(false);
+            return 0;
+
+        case WM_SETTINGCHANGE:    // a new time zone or DST rule: the per-year tables are stale
+            if (lp && wcscmp((const wchar_t*)lp, L"intl") == 0) alarm::InvalidateSystemZone();
             return 0;
 
         case WM_DPICHANGED:        // dragged to a monitor with another scale (R2)
@@ -1501,10 +1526,15 @@ void ApplyPin() {
     if (!g_wnd || !g_cfg) return;
     const LONG bits = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
     const bool pinned = g_cfg->timerPinned;
+    // While anything rings the click-through comes off so Snooze / Dismiss / any
+    // click work; the position stays locked (the drag test reads timerPinned).
+    const bool ringing = g_alarming || g_view.ringing;
     g_view.pinned = pinned;
     if (pinned) { g_view.sheet = SheetNone; g_dragging = false; }   // a pinned panel can take no key to finish an edit
     LONG ex = GetWindowLongW(g_wnd, GWL_EXSTYLE);
-    const LONG wanted = pinned ? (ex | bits) : (ex & ~bits);
+    const LONG wanted = pinned ? (ringing ? ((ex | WS_EX_LAYERED) & ~(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE))
+                                          : (ex | bits))
+                               : (ex & ~bits);
     if (wanted != ex) {
         SetWindowLongW(g_wnd, GWL_EXSTYLE, wanted);
         if (pinned) SetLayeredWindowAttributes(g_wnd, 0, 255, LWA_ALPHA);
