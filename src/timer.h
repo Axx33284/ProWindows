@@ -59,6 +59,21 @@ void TimerRingAlarm(int index);
 // Called on resume from sleep.
 void TimerCheckNow();
 
+// The Timer page in Settings drives the same model the panel does (no second copy):
+// read-only view, a counter that changes whenever the model is saved (so the page
+// can tell something moved elsewhere), and the panel's own actions by index.
+// Each action saves, re-plans the wake-up and repaints the panel.
+namespace timer { struct State; }
+const timer::State& TimerModel();
+unsigned TimerRevision();
+bool TimerAddPaused(int64_t duration);           // false when full; 100 ns units
+void TimerStartPause(int index);
+void TimerResetAt(int index);
+void TimerDeleteAt(int index);
+void StopwatchStartStop();
+void StopwatchLap();
+void StopwatchReset();
+
 // ---------------------------------------------------------------- the model
 // Public so tests\timer_test.cpp can drive it without a window.
 namespace timer {

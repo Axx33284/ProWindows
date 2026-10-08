@@ -349,6 +349,10 @@ const PageDef g_pages[] = {
     { L"Clock",
       L"The desktop clock: its style, its colours and what it shows.",
       BuildClockPage, ResetClockPage, PreviewClock, 150, nullptr },
+    { L"Timer",
+      L"The clock panel (Win+W): its settings, and the timers and stopwatch it runs, "
+      L"which you can start, pause and reset from here.",
+      BuildTimerPage, ResetTimerPage, nullptr, 0, nullptr },
     { L"Explorer",
       L"File Explorer's look: a theme for the address bar, command bar, tabs and "
       L"background, and styles of your own.",
@@ -378,7 +382,7 @@ enum Hot {
 // The tab bar's order (PLAN-1.6 2.4). The categories themselves keep their
 // PageIndex numbers, which callers outside the window use.
 const int kTabOrder[PAGE_COUNT] = { PAGE_WELCOME, PAGE_LAYOUT, PAGE_BEHAVIOUR, PAGE_GENERAL, PAGE_SHORTCUTS,
-                                    PAGE_APPS, PAGE_SEARCH, PAGE_MONITOR, PAGE_CLOCK, PAGE_EXPLORER };
+                                    PAGE_APPS, PAGE_SEARCH, PAGE_MONITOR, PAGE_CLOCK, PAGE_TIMER, PAGE_EXPLORER };
 constexpr int kMaxSub = 8;
 
 struct Geometry {
@@ -1686,6 +1690,13 @@ LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER:
             if (wp == kTimerStatus) {
                 if (IsWindowVisible(wnd)) SettingsRefreshStatus();
+                // The Timer page counts down on this tick, and rebuilds when a timer
+                // changed elsewhere (the panel, a timer ending).
+                if (IsWindowVisible(wnd) && g_page == PAGE_TIMER && g_query.empty() &&
+                    g_captureRow < 0 && !ui::ModalOpen()) {
+                    if (TimerPageStale()) { BuildRows(true); Invalidate(); }
+                    else InvalidateRect(wnd, &g_geo.right, FALSE);
+                }
                 // The search caret blinks.
                 if (g_searching) InvalidateRect(wnd, &g_geo.search, FALSE);
                 return 0;

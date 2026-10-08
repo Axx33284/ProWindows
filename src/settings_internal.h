@@ -95,6 +95,11 @@ void BuildClockPage(std::vector<ui::Row>& rows);
 void ResetClockPage();
 void PreviewClock(HDC dc, const RECT& area);
 
+void BuildTimerPage(std::vector<ui::Row>& rows);
+void ResetTimerPage();
+// The timer model moved since the page was last built (settings_timer.cpp).
+bool TimerPageStale();
+
 void BuildExplorerPage(std::vector<ui::Row>& rows);
 void ResetExplorerPage();
 

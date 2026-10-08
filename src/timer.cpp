@@ -310,7 +310,10 @@ RECT  g_dragStart = {};
 
 std::wstring StorePath() { return g_store.empty() ? ConfigDir() + L"\\timers.ini" : g_store; }
 
+unsigned g_rev = 1;                    // bumped by every Save(): the settings page watches it
+
 void Save() {
+    ++g_rev;
     g_state.page = g_view.page;
     if (!SaveFile(StorePath(), g_state)) AWA_LOG(L"timer: could not save %s", StorePath().c_str());
 }
@@ -1672,5 +1675,49 @@ void TimerRingAlarm(int index) {
     if (index < 0 || index >= (int)g_state.alarms.size()) return;
     StartRing(index, NowUtc());
 }
+
+// ---------------------------------------------------- the settings page's view
+const timer::State& TimerModel() { return g_state; }
+unsigned TimerRevision() { return g_rev; }
+
+namespace {
+void Changed() { Save(); Reschedule(); Repaint(); }
+}
+
+bool TimerAddPaused(timer::Ticks duration) {
+    if ((int)g_state.timers.size() >= timer::kMaxTimers || duration <= 0) return false;
+    timer::Timer t;
+    t.label = NewTimerName();
+    t.duration = t.remaining = (std::min)(duration, timer::kMaxDuration);
+    g_state.timers.push_back(t);
+    Changed();
+    return true;
+}
+
+void TimerStartPause(int i) {
+    if (i < 0 || i >= (int)g_state.timers.size()) return;
+    StartPauseTimer(g_state.timers[(size_t)i]);
+    Changed();
+}
+
+void TimerResetAt(int i) {
+    if (i < 0 || i >= (int)g_state.timers.size()) return;
+    timer::Timer& t = g_state.timers[(size_t)i];
+    t.running = false;
+    t.remaining = t.duration;
+    Changed();
+}
+
+void TimerDeleteAt(int i) {
+    if (i < 0 || i >= (int)g_state.timers.size()) return;
+    g_state.timers.erase(g_state.timers.begin() + i);
+    if (g_view.sel >= (int)g_state.timers.size()) g_view.sel = (int)g_state.timers.size() - 1;
+    if (g_view.sel < 0) g_view.sel = 0;
+    Changed();
+}
+
+void StopwatchStartStop() { StartPauseWatch(); Changed(); }
+void StopwatchLap()       { Lap(); Changed(); }
+void StopwatchReset()     { ResetWatch(); Changed(); }
 
 } // namespace awa

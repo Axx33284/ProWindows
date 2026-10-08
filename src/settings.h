@@ -20,6 +20,7 @@ enum PageIndex {
     PAGE_SEARCH,
     PAGE_MONITOR,
     PAGE_CLOCK,
+    PAGE_TIMER,
     PAGE_EXPLORER,
     PAGE_GENERAL,
     PAGE_WELCOME,            // first in the tab bar (kTabOrder), last here

@@ -766,7 +766,7 @@ static void SetDisplayOff(bool off) {
 }
 void AppRefreshSettings() { SettingsRefresh(); }
 void AppOpenMonitorSettings() { SettingsOpenTab(PAGE_MONITOR); }
-void AppOpenClockSettings()   { SettingsOpenTab(PAGE_CLOCK); }
+void AppOpenClockSettings()   { SettingsOpenTab(PAGE_TIMER); }     // the clock panel's page
 
 // ---------------------------------------------------------------- win events
 // Everything but the cursor is discarded at once; the cursor arms one timer if
@@ -1194,7 +1194,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDM_TIMER_STOP:     TimerStopAlarm(); break;
                 case IDM_ALARM_SNOOZE:   TimerSnoozeAlarm(); break;
                 case IDM_ALARM_DISMISS:  TimerDismissAlarm(); break;
-                case IDM_TIMER_SETTINGS: SettingsOpenTab(PAGE_CLOCK); break;
+                case IDM_TIMER_SETTINGS: SettingsOpenTab(PAGE_TIMER); break;
                 case IDM_MONITOR_SETTINGS: SettingsOpenTab(PAGE_MONITOR); break;
                 case IDM_CLOCK_SETTINGS:   SettingsOpenTab(PAGE_CLOCK); break;
                 case IDM_TILING:    g_wm.ActToggleTiling(); TrayUpdate();
