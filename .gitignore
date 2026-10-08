@@ -28,3 +28,6 @@ desktop.ini
 
 # Third-party reference screenshots (design input only, not ours to ship)
 docs/design/ref/
+
+# agent worktrees
+.claude/worktrees/
