@@ -177,6 +177,7 @@ bool BindsEqual(const std::vector<Keybind>& a, const std::vector<Keybind>& b) {
     X(clockHours24) X(clockSeconds) X(clockDate) X(clockWeekday) X(clockOpacity)    \
     X(clockScale) X(timerTick) X(timerAlarm)                                        \
     X(timerShown) X(timerPinned)                                                    \
+    X(explorerStyler) X(explorerTheme) X(explorerEffect)                            \
     X(startMinimized) X(debug)
 
 bool ArraysEqual(const Config& a, const Config& b) {
@@ -348,6 +349,10 @@ const PageDef g_pages[] = {
     { L"Clock",
       L"The desktop clock: its style, its colours and what it shows.",
       BuildClockPage, ResetClockPage, PreviewClock, 150, nullptr },
+    { L"Explorer",
+      L"File Explorer's look: a theme for the address bar, command bar, tabs and "
+      L"background, and styles of your own.",
+      BuildExplorerPage, ResetExplorerPage, nullptr, 0, nullptr },
     { L"General",
       L"How ProWindows starts, where its settings are kept, and what to reach for "
       L"when something on the desktop looks wrong.",
@@ -373,7 +378,7 @@ enum Hot {
 // The tab bar's order (PLAN-1.6 2.4). The categories themselves keep their
 // PageIndex numbers, which callers outside the window use.
 const int kTabOrder[PAGE_COUNT] = { PAGE_WELCOME, PAGE_LAYOUT, PAGE_BEHAVIOUR, PAGE_GENERAL, PAGE_SHORTCUTS,
-                                    PAGE_APPS, PAGE_SEARCH, PAGE_MONITOR, PAGE_CLOCK };
+                                    PAGE_APPS, PAGE_SEARCH, PAGE_MONITOR, PAGE_CLOCK, PAGE_EXPLORER };
 constexpr int kMaxSub = 8;
 
 struct Geometry {

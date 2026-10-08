@@ -59,6 +59,13 @@ out like the menus of *Resident Evil Requiem*, which opens when you launch it.
 
 ---
 
+- **File Explorer styling**, on by default: while ProWindows runs, File Explorer's address bar,
+  command bar and tabs wear the ProWindows look (black, metal highlights, hairline borders),
+  or any of the Windhawk File Explorer Styler's themes, and go back to normal when you quit.
+  See [File Explorer styling](#file-explorer-styling).
+
+---
+
 ## Why it's light
 
 | | |
@@ -194,7 +201,12 @@ build.bat
 ```
 
 The result is `build\ProWindows.exe`. That single file is the whole
-application — copy it anywhere you like.
+application — copy it anywhere you like. `build.bat` also builds
+`build\ProWindows_explorer.dll` beside it, which only the File Explorer styling
+(below) needs; if that step fails the build still succeeds and you simply do not
+get styling. It needs the Windows SDK (for `cppwinrt.exe`) and Windows 11, whose
+Windows App Runtime metadata it reads to generate the WinUI headers into
+`build\winrt`, once.
 
 ---
 
@@ -1018,6 +1030,51 @@ off the screen.
 
 ---
 
+## File Explorer styling
+
+ProWindows can restyle File Explorer. It is **on by default** and lives on the **Explorer**
+category: a theme (**ProWindows**, or any of the themes of the Windhawk *Windows 11 File Explorer
+Styler*), a background effect (the theme's own, Blur, Acrylic, Mica, Mica Alt, None), and a file of
+your own styles.
+
+How it works, so there are no surprises: ProWindows loads `ProWindows_explorer.dll` into every
+`explorer.exe` of your session (a remote thread, started from a worker thread of its own, so the
+tiler never waits on Explorer). The DLL is a port of the Windhawk mod: it hooks a few dozen Win32
+drawing calls and registers itself as a XAML diagnostics tool to change the look of Explorer's
+XAML controls. Turning the setting off, or quitting ProWindows, tells it to undo everything: the
+hooks come off and Explorer looks as it did. The DLL itself stays loaded, idle, until Explorer
+next restarts (unloading it while Explorer may still be running its code is what crashes Explorer). If Explorer restarts twice within 90 seconds
+of the styling going in, ProWindows turns it off by itself and says so. Nothing is sent anywhere:
+the upstream mod's usage statistics were removed.
+
+- **Your own styles** go in `%APPDATA%\ProWindows\explorer-styler.ini`, below the lines
+  ProWindows manages: `controlStyles[0].target=Grid#CommandBarControlRootGrid` and
+  `controlStyles[0].styles[0]=Background=#8B0000`. The target and style syntax is the mod's
+  (XAML class names with `#Name`, `[Property=Value]`, `Parent > Child`; `styleConstants[N]`,
+  `themeResourceVariables[N]`). Press **Reload** after editing.
+- **Not supported:** the mod's `explorerFrameContainerHeight` (it needs the symbols of
+  `Windows.UI.FileExplorer.dll`), so themes that resize the Explorer frame (NoCommandBar,
+  Tabless, Float...) may leave a gap; and an Explorer running as administrator cannot be styled
+  from a normal ProWindows.
+- `debug = true` in `config.ini` writes `explorer-styler.log` beside it.
+
+---
+
+## Licence and credits
+
+ProWindows is released under the **GNU General Public License v3.0** (see `LICENSE`), because it
+contains code ported from a GPL-3.0 project. It builds on:
+
+- **Windows 11 File Explorer Styler**, a Windhawk mod by **m417z** (GPL-3.0), ported in
+  `src\explorer\styler.cpp` with the changes marked in the file. **Windhawk** by Ramen Software
+  provided the mod API that `src\explorer\windhawk_shim.*` re-implements.
+- **TranslucentTB**'s ExplorerTAP, the XAML diagnostics tool the mod's own copy is based on, and
+  its blur brush implementation.
+- **MinHook** by Tsuda Kageyu and contributors (BSD-2-Clause), vendored as source in
+  `third_party\minhook` with its licence.
+
+---
+
 ## Screen space for a bar
 
 Windows 11 only supports its taskbar along the bottom edge — Microsoft removed the option to move
@@ -1157,6 +1214,9 @@ src/monitor.*    the floating system-load overlay: window, z-order, menu
 src/clocktheme.* the clock's colour schemes, typefaces and styles, as tables of data
 src/clockpaint.* the clock's twelve layouts, one function each, measured and drawn together
 src/clock.*      the clock window: the same drag, pin, desktop and snap as the monitor
+src/explorerstyler.*  File Explorer styling, ProWindows side: writes the ini, injects, reloads, stops
+src/explorer/    the DLL loaded into explorer.exe: the ported mod (styler.cpp) and its Windhawk shim
+third_party/     MinHook (BSD-2-Clause), vendored as source
 src/dragguide.*  the drop indicator shown while a tiled window is dragged
 src/theme.*      the Requiem look: palette, type, the metal focus bar, plates, keycaps, the row controls
 src/moddrag.*    hold the modifier and drag anywhere on a window

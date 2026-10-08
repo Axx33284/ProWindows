@@ -249,6 +249,7 @@ int wmain(int argc, wchar_t** argv) {
         { PAGE_SEARCH,    L"ui-search.png"    },
         { PAGE_MONITOR,   L"ui-monitor.png"   },
         { PAGE_CLOCK,     L"ui-clock.png"     },
+        { PAGE_EXPLORER,  L"ui-explorer.png"  },
         { PAGE_GENERAL,   L"ui-general.png"   },
         { PAGE_WELCOME,   L"ui-welcome.png"   },
     };

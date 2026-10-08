@@ -524,6 +524,43 @@ appended at the end of the numbering.
     `src\clockpanel_paint.cpp` (`clockpanel.h`: `Model`, `View`, hits); state, keys and waking
     stay in `src\timer.cpp`. Fonts are cached per DIP size and DPI and freed on hide.
 
+### Explorer styling
+
+92. **The styler runs inside explorer.exe and ProWindows never waits on it.** `src\explorerstyler.*`
+    is the ProWindows side; the DLL (`src\explorer\`, built by `build_explorer.bat`) is a port of the
+    Windhawk File Explorer Styler over a shim (`windhawk_shim.*`: ini settings, log, MinHook,
+    WinHTTP). Every call that can block - walking processes, `VirtualAllocEx`, `CreateRemoteThread`
+    plus the wait for it (up to 30 s: `StylerStart` talks to Explorer's windows) - is on the one
+    worker thread; the UI thread only sets request bits and an event (`Request`). The foreground
+    WinEvent calls `ExplorerStylerForeground`, which is a class-name compare and a set lookup.
+93. **Stop on quit; the DLL is never unloaded.** `ExplorerStylerShutdown` runs first at exit, sets
+    the DLL's named events (`Local\ProWindows.Styler.Stop.<pid>`, also `Reload`) and waits at most
+    5 s for the worker, so an injection in flight is stopped by it (Sync's `g_quitting` branch)
+    before the process goes. In Explorer the stop closes the events first (the process then reads
+    as not styled), runs `Wh_ModUninit` and disables the hooks; the module stays **pinned** and
+    MinHook stays initialised until Explorer exits, because hook bodies (`CreateWindowExW_Hook`
+    waits through WM_CREATE), the TAP object XAML keeps, its delegates and the
+    `RunFromWindowThread` hook proc are all code of the DLL. Styling again re-runs the mod's init
+    in the same module (`MH_ERROR_ALREADY_CREATED` is success; `StylerStart` and the stop share a
+    mutex). An event's existence is how "styled" is known, so a ProWindows started after a crashed
+    one re-manages the old injection. The remote `StylerStart` is located by the module's full path
+    and checked by link stamp; only x64 Explorer on x64 Windows is injected (`IsWow64Process2`).
+94. **Crash guard.** `ExplorerStylerTaskbarCreated` counts Explorer restarts within 90 s of the last
+    injection *attempt* (stamped before `InjectInto`: a crash inside `StylerStart` never reports
+    Ok); the second one sets `explorer_styler = false`, saves, balloons and logs. A restart long after an injection only re-injects (delayed 1.5 s).
+95. **The ini is shared with the user.** `explorer-styler.ini` has a managed block (theme, effect,
+    `xamlDiagnosticsHandling=block`, `debug`) delimited by two marker lines at the top; ProWindows
+    rewrites only that block, atomically, and the DLL reads the whole file, later lines winning.
+    Anything under the block is the user's custom styles. The fields `explorer_styler`,
+    `explorer_theme`, `explorer_effect` are in `AWA_EDITED_FIELDS` (78).
+96. **No telemetry, and a build that may fail alone.** The mod's stats timer is deleted (the test
+    greps for it). The DLL needs WinUI 3 headers generated at build time from the Windows App
+    Runtime winmds in `C:\Windows\SystemApps\Microsoft.WindowsAppRuntime.CBS_*` (not the WinUI 2
+    package) with the SDK's old cppwinrt, so the mod is patched in a few marked places
+    (`// ProWindows:`) and `src\explorer\fix_winrt.ps1` qualifies `Windows::` in the generated
+    headers. A failure in that step is a warning in `build.bat`, never an error. The DLL is
+    locked while Explorer has it loaded; rebuild it with ProWindows closed (or styling off).
+
 ### The search bar
 
 16. **Every source is capped before the merge.** `Refilter` takes at most `kMaxRows` from each of
@@ -787,6 +824,7 @@ they were.
 | `tests\launchshot.bat` | Stands the search bar up alone, types into it, waits for icons, captures `launcher-*.png`. |
 | `tests\monshot.bat` | Draws the overlay through its own painter, one PNG per style and per skin, over a checkerboard. `--bench` times the painter per style in ms/frame. |
 | `tests\clockshot.bat` | The same for the clock: every style (12- and 24-hour) and every skin. |
+| `tests\styler_test.bat` | The styler's shim and ProWindows' side of it, in this process: the theme table (every theme selectable by the mod, the ProWindows theme's colours, no stats timer), the ini round trip that keeps your own lines, settings and indexed keys as the mod reads them, a MinHook hook on a dummy function installed, reloaded and removed. Nothing is injected; Explorer is never touched. |
 | `tests\clocklive.bat` | Runs the real clock window for a few seconds and captures it off the screen. |
 | `tests\searchprobe.bat` | Runs the file and program index alone and prints what it found, per drive. |
 | `tests\iconcache.bat` | Checks a shell icon comes back from `icons.cache` the right way up, through a save, a release and a reload, twice. Run after touching `appicon.cpp`. |

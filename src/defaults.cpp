@@ -267,6 +267,18 @@ bool Config::SaveToFile(const std::wstring& path) const {
     fwprintf(f, L"# timer_alarm: loop a sound (up to a minute) when a timer ends.\n");
     fwprintf(f, L"timer_alarm      = %s\n\n", Bool(timerAlarm));
 
+    fwprintf(f, L"# ------------------------------------------------------------ File Explorer\n");
+    fwprintf(f, L"# Styles File Explorer by loading ProWindows_explorer.dll into explorer.exe\n");
+    fwprintf(f, L"# (a port of the Windhawk 'Windows 11 File Explorer Styler' mod). It is\n");
+    fwprintf(f, L"# taken out again when ProWindows quits. Your own styles go in\n");
+    fwprintf(f, L"# explorer-styler.ini beside this file.\n");
+    fwprintf(f, L"explorer_styler  = %s\n", Bool(explorerStyler));
+    fwprintf(f, L"# explorer_theme: ProWindows, or the name of one of the mod's themes\n");
+    fwprintf(f, L"# (Matter, TintedGlass, Minimal Explorer11 ...); empty for none.\n");
+    fwprintf(f, L"explorer_theme   = %s\n", explorerTheme.c_str());
+    fwprintf(f, L"# explorer_effect: empty (the theme's own), blur, acrylic, mica, micaalt, none.\n");
+    fwprintf(f, L"explorer_effect  = %s\n\n", explorerEffect.c_str());
+
     fwprintf(f, L"# ------------------------------------------------------------ search bar\n");
     fwprintf(f, L"# What the search bar looks through besides installed apps.\n");
     fwprintf(f, L"search_files    = %s\n", Bool(searchFiles));

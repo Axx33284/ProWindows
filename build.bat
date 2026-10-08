@@ -98,6 +98,8 @@ cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UN
        "%ROOT%src\clock.cpp" ^
        "%ROOT%src\settings_clock.cpp" ^
        "%ROOT%src\settings_welcome.cpp" ^
+       "%ROOT%src\settings_explorer.cpp" ^
+       "%ROOT%src\explorerstyler.cpp" ^
        "%ROOT%src\dragguide.cpp" ^
        "%ROOT%src\appicon.cpp" ^
        "%ROOT%src\launcher.cpp" ^
@@ -133,6 +135,18 @@ if "%CLERR%"=="0" (
            /link /OPT:REF /OPT:ICF /INCREMENTAL:NO /MANIFEST:NO ^
                  /SUBSYSTEM:CONSOLE
     set CLERR=%errorlevel%
+)
+
+REM ---------------------------------------------------------------- File Explorer styler
+REM  ProWindows_explorer.dll - loaded into explorer.exe by the tiler. A failure
+REM  here is a warning only: the tiler builds and runs without it.
+if "%CLERR%"=="0" (
+    echo       plus ProWindows_explorer.dll...
+    call "%ROOT%build_explorer.bat" "%OUTDIR%" >"%OUTDIR%\explorer_build.log" 2>&1
+    if errorlevel 1 (
+        echo [warn] ProWindows_explorer.dll was not built - see build\explorer_build.log.
+        echo        The tiler works without it; File Explorer styling will be unavailable.
+    )
 )
 
 del /q *.obj >nul 2>&1

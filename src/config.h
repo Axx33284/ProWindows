@@ -270,6 +270,16 @@ struct Config {
     int   timerTick      = 0;
     bool  timerAlarm     = true;
 
+    // ---- File Explorer styling ----
+    // Restyles File Explorer by loading a DLL into explorer.exe (see
+    // explorerstyler.h). On by default. The theme is the name the styler mod
+    // knows it by ("" = no theme, only the custom styles in
+    // explorer-styler.ini); the effect is "" (the theme's own), blur,
+    // acrylic, mica, micaalt or none.
+    bool         explorerStyler = true;
+    std::wstring explorerTheme  = L"ProWindows";
+    std::wstring explorerEffect;
+
     // search bar
     // Which sources the search bar draws on besides installed apps. Files are
     // the only one that costs anything: the index is built once on a background

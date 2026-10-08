@@ -776,9 +776,36 @@ Rows (each with right-column help, inv. 78 fields in `AWA_EDITED_FIELDS`, inv. 7
   injection off the UI thread, Stop on quit, crash guard, no telemetry).
 
 ### 8.F Tasks
-- [ ] **8.1 (S)** 8.B-8.E. A harness never touches the user's real Explorer:
+- [x] **8.1 (S)** 8.B-8.E. A harness never touches the user's real Explorer:
   `tests\styler_test` checks the shim in-process (settings round-trip, MinHook install and
   remove on a dummy function, the theme table including ProWindows), and uishot shoots the
   Explorer page. Green: build (exe + dll), run, uishot, timershot.
 - [ ] **8.2 (user OK needed)** Live check: inject into the real Explorer, look, stop, quit.
-- [ ] **8.3 (O)** Review: injection safety, threads, crash guard, Stop on quit, licence.
+- [x] **8.3 (O)** Review: injection safety, threads, crash guard, Stop on quit, licence.
+
+**8.1 done - what differs from the spec above:** the mod needs the Windows App Runtime
+(**WinUI 3**, `Microsoft.UI.*`) projection, not the WinUI 2 `Microsoft.UI.Xaml.CBS` winmd - the
+latter has no `Microsoft.UI.Xaml.h` (`build_explorer.bat` reads
+`SystemApps\Microsoft.WindowsAppRuntime.CBS_*`). The SDK's cppwinrt 2.0.190620 is old: the generated
+headers are fixed by `src\explorer\fix_winrt.ps1`, the mod is built with `/await /permissive`, and
+`styler.cpp` carries a few marked `// ProWindows:` patches (guid_storage, IReference unboxing,
+array_view, DWM constants). The Windows.* namespaces come from the SDK; generating them from the
+machine's WinMetadata was not needed. Not supported: `explorerFrameContainerHeight`
+(`HookSymbols`). Live check still open: 8.2.
+
+### 8.G Decisions
+- **The DLL is never unloaded (8.3).** Stop runs `Wh_ModUninit` and disables the hooks; the module
+  is pinned and MinHook stays initialised until Explorer exits. An in-flight counter around the
+  hooks would not be enough: `CreateWindowExW_Hook` returns through our code after a whole
+  WM_CREATE, and XAML keeps the TAP object, watcher delegates and the `RunFromWindowThread` hook
+  procedure - all code of this module - for as long as it likes. A stopped DLL costs nothing; a
+  freed one under a live pointer crashes Explorer. The same goes for Uninit's XAML/TAP teardown: it
+  unadvises the watcher, and the pin keeps whatever XAML still holds valid. Styling again re-runs
+  the mod's init in the same module (`MH_ERROR_ALREADY_CREATED` = success), serialised with the
+  stop by a mutex. Consequence: rebuilding the DLL needs Explorer restarted, not just styling off.
+- **Review fixes (8.3):** crash-guard tick stamped before the injection (a crash in `StylerStart`
+  never reported Ok, so a crash loop never tripped the guard); the remote module found by full path
+  and link stamp (a pinned DLL from another ProWindows folder would get the wrong `StylerStart`);
+  `IsWow64Process2` (an emulated x64 ProWindows on ARM64 must not start threads in native
+  Explorer); quit waits up to 5 s for the worker so an injection in flight is stopped; Reload
+  says when styling is off.

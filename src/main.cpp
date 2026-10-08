@@ -10,6 +10,7 @@
 #include "monitor.h"
 #include "clock.h"
 #include "timer.h"
+#include "explorerstyler.h"
 #include "alarm.h"
 #include "launcher.h"
 #include "dragguide.h"
@@ -529,6 +530,7 @@ static void ApplyLiveConfig() {
     ClockApplyConfig();
     TimerApplyConfig();
     SearchApplyConfig();
+    ExplorerStylerApplyConfig();
 
     ApplyFocusFollows();
 
@@ -794,6 +796,7 @@ static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
                                   LONG idObject, LONG idChild, DWORD, DWORD) {
     if (!hwnd || idObject != OBJID_WINDOW || idChild != CHILDID_SELF) return;
     if (g_shuttingDown) return;
+    if (event == EVENT_SYSTEM_FOREGROUND) ExplorerStylerForeground(hwnd);
     g_wm.OnWinEvent(event, hwnd);
 }
 
@@ -1068,6 +1071,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // overlay owned by it.
         MonitorReattach();
         ClockReattach();
+        ExplorerStylerTaskbarCreated();
         return 0;
     }
 
@@ -1534,6 +1538,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
     MonitorInit(inst, &g_cfg);
     ClockInit(inst, &g_cfg);
     TimerInit(inst, &g_cfg);
+    ExplorerStylerInit(&g_cfg);
     // MonitorInit and ClockInit show their overlays straight from the config;
     // if a game is already running they must not.
     UpdateOverlayVisibility();
@@ -1583,6 +1588,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
         UnregisterPowerSettingNotification(g_powerNotify);
         g_powerNotify = nullptr;
     }
+    ExplorerStylerShutdown();   // first: Explorer needs the longest to let go
     MonitorShutdown();
     TimerShutdown();
     ClockShutdown();

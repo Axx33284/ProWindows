@@ -95,6 +95,9 @@ void BuildClockPage(std::vector<ui::Row>& rows);
 void ResetClockPage();
 void PreviewClock(HDC dc, const RECT& area);
 
+void BuildExplorerPage(std::vector<ui::Row>& rows);
+void ResetExplorerPage();
+
 void BuildGeneralPage(std::vector<ui::Row>& rows);
 void ResetGeneralPage();
 

@@ -780,6 +780,9 @@ bool Config::LoadFromFile(const std::wstring& path) {
             else if (w == L"minute") timerTick = 2;
         }
         else if (k == L"timer_alarm")      timerAlarm = ParseBool(v, timerAlarm);
+        else if (k == L"explorer_styler")  explorerStyler = ParseBool(v, explorerStyler);
+        else if (k == L"explorer_theme")   explorerTheme = Trim(v);
+        else if (k == L"explorer_effect")  explorerEffect = ToLower(Trim(v));
         else if (k == L"monitor_cpu")      monShowCpu = ParseBool(v, monShowCpu);
         else if (k == L"monitor_ram")      monShowRam = ParseBool(v, monShowRam);
         else if (k == L"monitor_gpu")      monShowGpu = ParseBool(v, monShowGpu);

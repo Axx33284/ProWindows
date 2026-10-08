@@ -90,6 +90,10 @@ void BuildWelcomePage(std::vector<Row>& rows) {
     rows.push_back(ui::Action(L"tryclock", L"Clock",
         L"Shows a desktop clock in one of a dozen styles. Change its look on the Clock tab.",
         L"Show", []() { ShowOverlay(&Config::clockEnabled, L"The clock is on screen"); }));
+    rows.push_back(ui::Action(L"tryexplorer", L"File Explorer styling",
+        L"File Explorer in the ProWindows look: black address bar and command bar, metal "
+        L"highlights. On by default; pick another theme or turn it off on the Explorer tab.",
+        L"Explorer tab", []() { SettingsOpenTab(PAGE_EXPLORER); }));
     rows.push_back(ui::Action(L"tryfolder", L"Settings folder",
         L"Opens the folder that holds config.ini and the other files ProWindows keeps. "
         L"Copy it to move your setup to another machine.",
@@ -160,6 +164,11 @@ void BuildWelcomePage(std::vector<Row>& rows) {
         L"panel anywhere; the pin button locks it and lets clicks pass through. The Clock panel "
         L"item in the tray menu shows, pins, snoozes and dismisses.",
         L"Show", []() { ShowOverlay(&Config::timerShown, L"The clock panel is on screen"); }));
+    rows.push_back(ui::Section(L"File Explorer"));
+    rows.push_back(ui::Action(L"ovexplorer", L"File Explorer styling",
+        L"Restyles File Explorer's address bar, command bar and tabs while ProWindows runs, "
+        L"and puts them back when it quits. Choose the theme or turn it off on the Explorer tab.",
+        L"Explorer tab", []() { SettingsOpenTab(PAGE_EXPLORER); }));
     rows.push_back(ui::Action(L"ovsettings", L"Look and behaviour",
         L"Styles, colours, size and what each overlay shows are on the Monitor and Clock tabs.",
         L"Clock tab", []() { SettingsOpenTab(PAGE_CLOCK); }));
