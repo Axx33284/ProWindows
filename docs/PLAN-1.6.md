@@ -657,7 +657,7 @@ Save commit.
   settings_keys help, ipc help, README What's new, MAP "Timer" heading → "Clock panel", tray.
 
 ### 7.F Tasks
-- [ ] **7.1 (S)** `alarm.h/.cpp` model, alarms in `timers.ini`, `tests\alarm_test.cpp` (run by
+- [x] **7.1 (S)** `alarm.h/.cpp` model, alarms in `timers.ini`, `tests\alarm_test.cpp` (run by
   `tests\run.bat`): every kind; weekdays, weeks of the month (incl. last), months, until; day 31
   in short months; last day of a leap February; DST gap and repeated hour with the fake
   converter; missed alarms reported once; Once disables after firing; snooze.

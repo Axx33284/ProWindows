@@ -11,6 +11,7 @@
 #pragma once
 #include "common.h"
 #include "config.h"
+#include "alarm.h"
 
 namespace awa {
 
@@ -76,6 +77,7 @@ struct Stopwatch {
 struct State {
     std::vector<Timer> timers;
     Stopwatch watch;
+    std::vector<alarm::Alarm> alarms;   // stored in the same file, see alarm.h
 };
 
 struct Finished {

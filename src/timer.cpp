@@ -168,6 +168,7 @@ std::wstring Serialize(const State& s) {
         out += std::to_wstring(s.watch.laps[i]);
     }
     out += L"\n";
+    alarm::AppendIni(out, s.alarms);
     return out;
 }
 
@@ -232,6 +233,7 @@ bool Deserialize(const std::wstring& text, State* out) {
             if (*p == L',') ++p;
         }
     }
+    alarm::ReadIni(kv, &s.alarms);       // absent keys = no alarms, so old files load
     *out = s;
     return true;
 }
