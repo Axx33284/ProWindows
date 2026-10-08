@@ -13,7 +13,6 @@ using ui::Row;
 
 namespace {
 
-// The chord of the first binding for `a`/`arg`, "Not set" without one.
 // Every chord bound to it, not just the first: search is both Alt+R and Win+S,
 // and the one someone remembers may be either.
 std::wstring ChordOf(Action a, int arg) {

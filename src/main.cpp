@@ -1546,8 +1546,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
     if (!startHidden || firstRun) SettingsOpenTab(PAGE_WELCOME);
     else TrayBalloon(kAppName, L"Running in the tray - click the icon for settings.");
 
+    // The Welcome page is already open; this says where it lives afterwards.
     if (firstRun && startHidden)
-        TrayBalloon(kAppName, L"Tiling is active. Click the tray icon to set it up.");
+        TrayBalloon(kAppName, L"Tiling is active. The tray icon brings this window back.");
 
     AWA_LOG(L"%s %s started%s", kAppName, kVersion, startHidden ? L" (tray)" : L"");
 

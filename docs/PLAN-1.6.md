@@ -492,7 +492,7 @@ default, ctl `timer` shows/hides). Sweep "Win+T" out of `config.h`, `defaults.cp
 - [x] **5.D1 (S)** Everything above, plus R1 and R4. `timer_test` gets an R4 case.
   `tests\timershot.bat` shoots the overlay (unpinned and pinned) instead of the popup. Green:
   `build.bat PW_dev.exe`, `tests\run.bat`, `tests\timershot.bat`, `tests\uishot.bat`.
-- [ ] **5.D2 (O)** Review the 5.D1 diff.
+- [x] **5.D2 (O)** Review the 5.D1 diff (done with 6.2).
 
 ## Phase 6 — Welcome (user, 2026-10-08)
 
@@ -537,4 +537,6 @@ here whenever a shortcut slips your mind."
   `tests\*.bat`), the enum, `g_pages`, `kTabOrder`, start-up and tray changes. `uishot` shoots
   each Welcome page. README "What's new in 1.6" gets one line; MAP a one-line note under the
   settings window heading.
-- [ ] **6.2 (O)** Review 6.1 and 5.D1 together.
+- [x] **6.2 (O)** Review 6.1 and 5.D1 together. Passes inv. 67/74/78/79; Show actions rebase
+  through `SettingsRefresh` (78). Fixed: a stale comment, and the first-run balloon that said
+  "click the tray icon to set it up" over a settings window already open.
