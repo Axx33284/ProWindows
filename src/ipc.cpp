@@ -339,6 +339,7 @@ std::wstring IpcHelpText() {
         L"  retile                          rescan and re-arrange now\n"
         L"  reload                          re-read the config file\n"
         L"  launcher                        open the app launcher\n"
+        L"  timer                           show or hide the timer and stopwatch\n"
         L"  launch <command>                run something\n"
         L"  quit                            exit ProWindows\n"
         L"\n"

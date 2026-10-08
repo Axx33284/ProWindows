@@ -161,6 +161,7 @@ bool ParseAction(const std::wstring& name, const std::wstring& argText,
     if (a == L"reload")               { *act = ACT_RELOAD_CONFIG; return true; }
     if (a == L"togglegaps")           { *act = ACT_TOGGLE_GAPS; return true; }
     if (a == L"launcher" || a == L"run") { *act = ACT_LAUNCHER; return true; }
+    if (a == L"timer")                { *act = ACT_TIMER; return true; }
     if (a == L"promote")              { *act = ACT_PROMOTE; return true; }
     if (a == L"focusmonitor")         { *act = ACT_FOCUS_MONITOR; return relArg(arg); }
     if (a == L"movetomonitor")        { *act = ACT_MOVE_TO_MONITOR; return relArg(arg); }
@@ -277,6 +278,7 @@ std::wstring ActionSpecText(const Keybind& kb) {
         case ACT_TOGGLE_TILING:     return L"toggletiling";
         case ACT_TOGGLE_GAPS:       return L"togglegaps";
         case ACT_LAUNCHER:          return L"launcher";
+        case ACT_TIMER:             return L"timer";
         case ACT_TOGGLE_SPLIT:      return L"togglesplit";
         case ACT_SWAP_SPLIT:        return L"swapsplit";
         case ACT_TOGGLE_STICKY:     return L"togglesticky";
@@ -346,6 +348,7 @@ std::wstring DescribeAction(const Keybind& kb) {
         case ACT_TOGGLE_TILING:     return L"Pause / resume arranging";
         case ACT_TOGGLE_GAPS:       return L"Show / hide the gaps";
         case ACT_LAUNCHER:          return L"Open the app launcher";
+        case ACT_TIMER:             return L"Open the timer and stopwatch";
         case ACT_FOCUS_MONITOR:
             return kb.arg < 0 ? L"Focus the previous monitor" : L"Focus the next monitor";
         case ACT_MOVE_TO_MONITOR:
@@ -763,6 +766,17 @@ bool Config::LoadFromFile(const std::wstring& path) {
         else if (k == L"clock_seconds")    clockSeconds = ParseBool(v, clockSeconds);
         else if (k == L"clock_date")       clockDate = ParseBool(v, clockDate);
         else if (k == L"clock_weekday")    clockWeekday = ParseBool(v, clockWeekday);
+        else if (k == L"timer_shown")      timerShown = ParseBool(v, timerShown);
+        else if (k == L"timer_pinned")     timerPinned = ParseBool(v, timerPinned);
+        else if (k == L"timer_x")          timerX = _wtoi(v.c_str());
+        else if (k == L"timer_y")          timerY = _wtoi(v.c_str());
+        else if (k == L"timer_tick") {
+            const std::wstring w = Trim(v);
+            if (w == L"off")         timerTick = 0;
+            else if (w == L"second") timerTick = 1;
+            else if (w == L"minute") timerTick = 2;
+        }
+        else if (k == L"timer_alarm")      timerAlarm = ParseBool(v, timerAlarm);
         else if (k == L"monitor_cpu")      monShowCpu = ParseBool(v, monShowCpu);
         else if (k == L"monitor_ram")      monShowRam = ParseBool(v, monShowRam);
         else if (k == L"monitor_gpu")      monShowGpu = ParseBool(v, monShowGpu);

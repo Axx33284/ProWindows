@@ -48,6 +48,7 @@ void AppSaveConfig()      {}
 void AppRefreshSettings() {}
 void AppOpenMonitorSettings() {}
 void AppOpenClockSettings()   {}
+void AppUpdateOverlays()    {}
 void AppScheduleTrim(UINT)    {}
 bool AppAutostartEnabled()    { return false; }
 void AppSetAutostart(bool)    {}

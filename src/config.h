@@ -72,6 +72,9 @@ enum Action : int {
     // needing a terminal that supports one.
     ACT_SCRATCHPAD_MOVE,
     ACT_SCRATCHPAD_TOGGLE,
+
+    // The timer and stopwatch overlay: shows or hides it. No default key.
+    ACT_TIMER,
 };
 
 // How a binding actually reached us.
@@ -256,6 +259,16 @@ struct Config {
     bool  clockSeconds   = false;
     bool  clockDate      = true;
     bool  clockWeekday   = true;
+
+    // timer overlay. Shown / pinned / position work as the clock's; INT_MIN =
+    // never placed. Tick: 0 off, 1 every second, 2 every minute while
+    // something runs. Alarm: loop a sound when a timer ends.
+    bool  timerShown     = false;
+    bool  timerPinned    = false;
+    int   timerX         = INT_MIN;
+    int   timerY         = INT_MIN;
+    int   timerTick      = 0;
+    bool  timerAlarm     = true;
 
     // search bar
     // Which sources the search bar draws on besides installed apps. Files are

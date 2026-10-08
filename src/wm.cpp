@@ -1181,6 +1181,7 @@ bool WindowManager::LearnFromLastPass() {
         if (slot > 0 && used * 100 < slot * kUsesEnough) {
             if (++mw->wastes >= kGiveUpAfter && !mw->tooSmall) {
                 mw->tooSmall = true;
+                mw->misfitAt = GetTickCount64();
                 learned = true;
                 AWA_LOG(L"window %p uses %lld%% of its tile (%dx%d of %dx%d); "
                         L"floating it instead",
@@ -1317,6 +1318,26 @@ void WindowManager::RetileMonitor(int monitorIndex) {
             AWA_LOG(L"window %p: trying to place it again", (void*)h);
         }
         if (mw->immovable) { sitOut(h, L"immovable"); continue; }
+
+        // The same goes for "will not use its tile" and "will not fit", which
+        // are worse guesses than "immovable": a minimum learned from a window
+        // caught mid-restore is a size it happened to be, not one it insists
+        // on. Forget the observed limits and ask the window again; one that
+        // really is too large is found out again on this very pass, from what
+        // it declares, and a really small one within two placements.
+        if ((mw->tooSmall || mw->tooLarge) &&
+            GetTickCount64() - mw->misfitAt > kMisfitRetryMs) {
+            mw->tooSmall    = false;
+            mw->tooLarge    = false;
+            mw->wastes      = 0;
+            mw->limits      = SizeLimits();
+            mw->limitsAsked = false;
+            mw->haveSeen    = false;
+            // RememberLimits will not write an empty record, so drop the old
+            // one outright, or the next run would load the same verdict back.
+            if (cfg_ && cfg_->learnedLimits.erase(mw->limitKey)) limitsDirty_ = true;
+            AWA_LOG(L"window %p: trying to tile it again", (void*)h);
+        }
         if (mw->tooSmall)  { sitOut(h, L"uses too little of its tile"); continue; }
 
         if (mw->tooLarge) {
@@ -1358,6 +1379,7 @@ void WindowManager::RetileMonitor(int monitorIndex) {
         if (!hopeless) { ++i; continue; }
 
         mw->tooLarge = true;
+        mw->misfitAt = GetTickCount64();
         RememberLimits(*mw);
         AWA_LOG(L"window %p needs at least %dx%d, the screen offers %dx%d; "
                 L"leaving it floating", (void*)order[i],

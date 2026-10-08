@@ -72,6 +72,13 @@ struct ManagedWindow {
     // all, and for those the only honest answer is to stop tiling the window.
     bool tooLarge   = false;
 
+    // When tooSmall or tooLarge was last decided. Both are judged from a few
+    // looks at a window that may have been mid-restore, playing a video or
+    // still loading, and a verdict that is never revisited left Brave floating
+    // for the rest of the session - and, as a remembered "nofit", for every
+    // session after. Zero for a verdict read from the config: due at once.
+    ULONGLONG misfitAt = 0;
+
     // Set for this pass only, by the feasibility check in RetileMonitor: the
     // window is fine in principle but there is no room for it alongside
     // everything else on this workspace right now. Unlike tooLarge this is
@@ -356,6 +363,7 @@ private:
     // as immovable stays written off. Both in milliseconds.
     static constexpr ULONGLONG kShowGraceMs       = 1500;
     static constexpr ULONGLONG kImmovableRetryMs  = 60000;
+    static constexpr ULONGLONG kMisfitRetryMs     = 5 * 60000;
     int  verifyChain_ = 0;
     // True only for a pass that this verification loop asked for itself. Any
     // other pass - a window event, a layout change, a workspace switch - is

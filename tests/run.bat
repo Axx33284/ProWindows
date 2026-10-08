@@ -57,5 +57,24 @@ REM Explicitly relative: NoDefaultCurrentDirectoryInExePath is set on some
 REM machines, and then a bare name is not found even in the current directory.
 .\layout_test.exe
 set RESULT=%ERRORLEVEL%
+
+REM The timer model: pure functions over a state, with the clock passed in.
+cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UNICODE ^
+       /MT /GR- ^
+       "%~dp0timer_test.cpp" ^
+       "%ROOT%src\timer.cpp" "%ROOT%src\theme.cpp" ^
+       "%ROOT%src\winutil.cpp" "%ROOT%src\common.cpp" "%ROOT%src\config.cpp" ^
+       "%ROOT%src\defaults.cpp" "%ROOT%src\montheme.cpp" "%ROOT%src\clocktheme.cpp" ^
+       /Fe:timer_test.exe ^
+       /link /SUBSYSTEM:CONSOLE user32.lib gdi32.lib gdiplus.lib shell32.lib ole32.lib ^
+       dwmapi.lib advapi32.lib shlwapi.lib
+if errorlevel 1 (
+    popd
+    echo [ERROR] The timer tests did not compile.
+    exit /b 1
+)
+echo.
+.\timer_test.exe
+if errorlevel 1 set RESULT=1
 popd
 exit /b %RESULT%

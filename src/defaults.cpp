@@ -255,6 +255,18 @@ bool Config::SaveToFile(const std::wstring& path) const {
     fwprintf(f, L"clock_date       = %s\n", Bool(clockDate));
     fwprintf(f, L"clock_weekday    = %s\n\n", Bool(clockWeekday));
 
+    fwprintf(f, L"# ------------------------------------------------------------ timer\n");
+    fwprintf(f, L"# The timer and stopwatch overlay: drag it, pin it. It has no default key;\n");
+    fwprintf(f, L"# bind the `timer` action to show or hide it.\n");
+    fwprintf(f, L"timer_shown      = %s\n", Bool(timerShown));
+    fwprintf(f, L"timer_pinned     = %s\n", Bool(timerPinned));
+    fwprintf(f, L"timer_x          = %d\n", timerX);
+    fwprintf(f, L"timer_y          = %d\n", timerY);
+    fwprintf(f, L"# timer_tick: off, second or minute - a clock tick while a timer runs.\n");
+    fwprintf(f, L"timer_tick       = %s\n", timerTick == 1 ? L"second" : (timerTick == 2 ? L"minute" : L"off"));
+    fwprintf(f, L"# timer_alarm: loop a sound (up to a minute) when a timer ends.\n");
+    fwprintf(f, L"timer_alarm      = %s\n\n", Bool(timerAlarm));
+
     fwprintf(f, L"# ------------------------------------------------------------ search bar\n");
     fwprintf(f, L"# What the search bar looks through besides installed apps.\n");
     fwprintf(f, L"search_files    = %s\n", Bool(searchFiles));

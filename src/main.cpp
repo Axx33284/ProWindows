@@ -9,6 +9,7 @@
 #include "settings.h"
 #include "monitor.h"
 #include "clock.h"
+#include "timer.h"
 #include "launcher.h"
 #include "dragguide.h"
 #include "search.h"
@@ -38,7 +39,7 @@ enum : UINT {
     IDM_OPENDIR, IDM_AUTOSTART, IDM_RESTOREALL, IDM_EXIT,
     IDM_SETTINGS, IDM_SHORTCUTS, IDM_MONITOR, IDM_MONITOR_PIN, IDM_ELEVATE,
     IDM_ELEVAUTO, IDM_DIAG, IDM_CLOCK, IDM_CLOCK_PIN, IDM_MONITOR_SETTINGS,
-    IDM_CLOCK_SETTINGS,
+    IDM_CLOCK_SETTINGS, IDM_TIMER, IDM_TIMER_PIN, IDM_TIMER_STOP, IDM_TIMER_SETTINGS,
     IDM_LAYOUT_BASE = 200,
     IDM_WORKSPACE_BASE = 300,
 };
@@ -262,6 +263,7 @@ static void RunAction(const Keybind& kb) {
         case ACT_TOGGLE_TILING:     g_wm.ActToggleTiling(); break;
         case ACT_TOGGLE_GAPS:       g_wm.ActToggleGaps(); break;
         case ACT_LAUNCHER:          LauncherToggle(); return;
+        case ACT_TIMER:             TimerToggle(); return;
         case ACT_FOCUS_MONITOR:     g_wm.ActFocusMonitor(kb.arg); break;
         case ACT_MOVE_TO_MONITOR:   g_wm.ActMoveToMonitor(kb.arg); break;
         case ACT_RETILE:            AppRetileNow(); break;
@@ -523,6 +525,7 @@ static void ApplyLiveConfig() {
     UpdateOverlayVisibility();
     MonitorApplyConfig();
     ClockApplyConfig();
+    TimerApplyConfig();
     SearchApplyConfig();
 
     ApplyFocusFollows();
@@ -695,7 +698,12 @@ static void UpdateOverlayVisibility() {
     const bool allowed = !g_wm.GameMode() && !g_displayOff;
     MonitorSetVisible(g_cfg.monitorEnabled && allowed);
     ClockSetVisible(g_cfg.clockEnabled && allowed);
+    TimerSetVisible(g_cfg.timerShown && allowed);
 }
+
+// For the timer's alarm, which sets timerShown itself and needs the overlay
+// rules (game mode, display off) applied to it.
+void AppUpdateOverlays() { UpdateOverlayVisibility(); }
 
 void AppGameModeChanged(bool on) {
     if (on) {
@@ -983,6 +991,19 @@ static void ShowTrayMenu() {
     AppendMenuW(clock, MF_STRING, IDM_CLOCK_SETTINGS, L"Clock settings...");
     AppendMenuW(menu, MF_POPUP | (g_cfg.clockEnabled ? MF_CHECKED : 0),
                 (UINT_PTR)clock, L"Clock");
+
+    HMENU timerMenu = CreatePopupMenu();
+    AppendMenuW(timerMenu, MF_STRING | (g_cfg.timerShown ? MF_CHECKED : 0),
+                IDM_TIMER, L"Show");
+    AppendMenuW(timerMenu, MF_STRING | (g_cfg.timerPinned ? MF_CHECKED : 0) |
+                           (g_cfg.timerShown ? 0 : MF_GRAYED),
+                IDM_TIMER_PIN, L"Pin in place");
+    // A pinned panel cannot take a key, so this is how a ringing alarm is stopped.
+    if (TimerAlarming()) AppendMenuW(timerMenu, MF_STRING, IDM_TIMER_STOP, L"Stop alarm");
+    AppendMenuW(timerMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(timerMenu, MF_STRING, IDM_TIMER_SETTINGS, L"Timer settings...");
+    AppendMenuW(menu, MF_POPUP | (g_cfg.timerShown ? MF_CHECKED : 0),
+                (UINT_PTR)timerMenu, L"Timer");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     // ---- maintenance
@@ -1148,6 +1169,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDM_CLOCK_PIN:
                     ClockSetPinned(!g_cfg.clockPinned);
                     break;
+                case IDM_TIMER:
+                    g_cfg.timerShown = !g_cfg.timerShown;
+                    UpdateOverlayVisibility();
+                    AppSaveConfig();
+                    SettingsRefresh();
+                    break;
+                case IDM_TIMER_PIN:      TimerSetPinned(!g_cfg.timerPinned); break;
+                case IDM_TIMER_STOP:     TimerStopAlarm(); break;
+                case IDM_TIMER_SETTINGS: SettingsOpenTab(PAGE_CLOCK); break;
                 case IDM_MONITOR_SETTINGS: SettingsOpenTab(PAGE_MONITOR); break;
                 case IDM_CLOCK_SETTINGS:   SettingsOpenTab(PAGE_CLOCK); break;
                 case IDM_TILING:    g_wm.ActToggleTiling(); TrayUpdate();
@@ -1233,6 +1263,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 SetDisplayOff(true);
             } else if (wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND) {
                 SetDisplayOff(false);
+                TimerCheckNow();      // anything that ended during sleep fires now
                 // Waking can bring displays back in a different arrangement.
                 g_wm.OnDisplayChange();
             }
@@ -1482,6 +1513,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
     DragGuideInit(inst, &g_cfg);
     MonitorInit(inst, &g_cfg);
     ClockInit(inst, &g_cfg);
+    TimerInit(inst, &g_cfg);
     // MonitorInit and ClockInit show their overlays straight from the config;
     // if a game is already running they must not.
     UpdateOverlayVisibility();
@@ -1530,6 +1562,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
         g_powerNotify = nullptr;
     }
     MonitorShutdown();
+    TimerShutdown();
     ClockShutdown();
     DragGuideShutdown();
     LauncherShutdown();

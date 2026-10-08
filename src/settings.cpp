@@ -175,7 +175,8 @@ bool BindsEqual(const std::vector<Keybind>& a, const std::vector<Keybind>& b) {
     X(monShowCpuTemp) X(monShowGpuTemp) X(monShowDisk) X(monShowNet)                \
     X(clockEnabled) X(clockPinned) X(clockOnDesktop) X(clockTheme) X(clockStyle)    \
     X(clockHours24) X(clockSeconds) X(clockDate) X(clockWeekday) X(clockOpacity)    \
-    X(clockScale)                                                                   \
+    X(clockScale) X(timerTick) X(timerAlarm)                                        \
+    X(timerShown) X(timerPinned)                                                    \
     X(startMinimized) X(debug)
 
 bool ArraysEqual(const Config& a, const Config& b) {

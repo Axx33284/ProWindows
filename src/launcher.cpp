@@ -16,6 +16,7 @@ using std::max;
 #include <gdiplus.h>
 
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "uuid.lib")      // BHID_SFUIObject, for the shell menu
 
 namespace awa {
 
@@ -83,6 +84,14 @@ std::vector<Hit> g_hits;
 // True while the right-click menu is up, so losing activation to it is not
 // mistaken for the user clicking away.
 bool g_menuOpen = false;
+
+// Explorer's own context menu for the row, held only while the menu is up. Its
+// submenus - Send to, and whatever WinRAR and the like add - are filled in as
+// they open, by messages this window passes on to it (see LauncherProc).
+IContextMenu*  g_shellMenu  = nullptr;
+IContextMenu2* g_shellMenu2 = nullptr;
+IContextMenu3* g_shellMenu3 = nullptr;
+constexpr UINT kShellFirst = 0x100, kShellLast = 0x7FFF;
 
 // Where the pointer was when the bar was last shown. Windows delivers a
 // WM_MOUSEMOVE to a window that appears underneath a stationary cursor, and
@@ -704,12 +713,19 @@ void RunElevated(const std::wstring& path) {
     SHELLEXECUTEINFOW info = {};
     info.cbSize = sizeof(info);
     info.fMask  = SEE_MASK_FLAG_NO_UI;
+    // Owned by the bar, and asked for while the bar is still the foreground
+    // window. Windows only brings the consent prompt to the front for the
+    // foreground process; asked for by a hidden tray app it opened as a
+    // flashing taskbar button, and "Run as administrator" looked like it did
+    // nothing at all.
+    info.hwnd   = g_wnd;
     info.lpVerb = L"runas";
     info.lpFile = target.empty() ? path.c_str() : target.c_str();
     info.nShow  = SW_SHOWNORMAL;
     // A refused UAC prompt comes back as ERROR_CANCELLED; that is the user
     // saying no, not something to complain about.
-    ShellExecuteExW(&info);
+    if (!ShellExecuteExW(&info) && GetLastError() != ERROR_CANCELLED)
+        AWA_LOG(L"search: could not elevate '%s' (error %lu)", info.lpFile, GetLastError());
 }
 
 void RevealInExplorer(const std::wstring& path) {
@@ -781,9 +797,9 @@ void RunRowCommand(int cmd) {
         // Ctrl+Shift+Enter on a Store app would quietly do nothing at all.
         case IDM_RUNAS:
             if (!file) return;
-            LauncherHide();
             if (Ranked(hit.kind)) NoteUse(hit.name);
-            RunElevated(hit.target);
+            RunElevated(hit.target);     // before hiding: see RunElevated
+            LauncherHide();
             break;
         case IDM_LOCATION:
             if (!file) return;
@@ -809,9 +825,83 @@ void RunRowCommand(int cmd) {
     }
 }
 
+// Explorer's context menu for the thing behind a row: an indexed file or
+// folder, a program, an app's Start-menu shortcut, or a packaged app by its
+// AppsFolder name. Null for rows that are not a shell item (a settings page,
+// a sum, a command line). Shell extensions load here, on the UI thread, the
+// same as they do in Explorer; it is the user's own right-click, once.
+IContextMenu* ShellMenuFor(const Hit& hit) {
+    const bool item = HasFile(hit) || (hit.kind == HitKind::App && IsPackaged(hit.target));
+    if (!item || hit.target.empty()) return nullptr;
+    IShellItem* si = nullptr;
+    if (FAILED(SHCreateItemFromParsingName(hit.target.c_str(), nullptr, IID_PPV_ARGS(&si))) || !si)
+        return nullptr;
+    IContextMenu* cm = nullptr;
+    if (FAILED(si->BindToHandler(nullptr, BHID_SFUIObject, IID_PPV_ARGS(&cm)))) cm = nullptr;
+    si->Release();
+    return cm;
+}
+
+std::wstring ShellVerb(IContextMenu* cm, UINT id) {
+    wchar_t verb[128] = {};
+    if (FAILED(cm->GetCommandString(id - kShellFirst, GCS_VERBW, nullptr,
+                                    reinterpret_cast<char*>(verb), ARRAYSIZE(verb))))
+        return L"";
+    return verb;
+}
+
+std::wstring MenuText(HMENU menu, int pos) {
+    wchar_t text[256] = {};
+    GetMenuStringW(menu, (UINT)pos, text, ARRAYSIZE(text), MF_BYPOSITION);
+    std::wstring out;
+    for (const wchar_t* c = text; *c && *c != L'\t'; ++c) if (*c != L'&') out += *c;
+    return out;
+}
+
+bool IsSeparatorAt(HMENU menu, int pos) {
+    MENUITEMINFOW mii = { sizeof(mii) };
+    mii.fMask = MIIM_FTYPE;
+    return GetMenuItemInfoW(menu, (UINT)pos, TRUE, &mii) && (mii.fType & MFT_SEPARATOR);
+}
+
+// The shell's menu repeats what is already at the top - Open, Run as
+// administrator, Open file location - so its copies go, by verb where the
+// handler gives one and by name where it does not. Then the separators that
+// leaves doubled up or dangling.
+void DropShellDuplicates(HMENU menu, IContextMenu* cm, int from) {
+    static const wchar_t* kVerbs[] = { L"open", L"runas", L"opencontaining",
+                                       L"openfilelocation" };
+    static const wchar_t* kNames[] = { L"Open", L"Run as administrator",
+                                       L"Open file location" };
+    for (int i = GetMenuItemCount(menu) - 1; i >= from; --i) {
+        const UINT id = GetMenuItemID(menu, i);
+        if (id < kShellFirst || id > kShellLast) continue;     // separators, submenus
+        const std::wstring verb = ShellVerb(cm, id), name = MenuText(menu, i);
+        bool dup = false;
+        for (const wchar_t* v : kVerbs) if (_wcsicmp(verb.c_str(), v) == 0) dup = true;
+        for (const wchar_t* n : kNames) if (_wcsicmp(name.c_str(), n) == 0) dup = true;
+        if (dup) DeleteMenu(menu, (UINT)i, MF_BYPOSITION);
+    }
+    bool lastSep = true;
+    for (int i = 0; i < GetMenuItemCount(menu); ) {
+        const bool sep = IsSeparatorAt(menu, i);
+        if (sep && lastSep) { DeleteMenu(menu, (UINT)i, MF_BYPOSITION); continue; }
+        lastSep = sep;
+        ++i;
+    }
+    const int n = GetMenuItemCount(menu);
+    if (n > 0 && IsSeparatorAt(menu, n - 1)) DeleteMenu(menu, (UINT)(n - 1), MF_BYPOSITION);
+}
+
+void ReleaseShellMenu() {
+    if (g_shellMenu3) { g_shellMenu3->Release(); g_shellMenu3 = nullptr; }
+    if (g_shellMenu2) { g_shellMenu2->Release(); g_shellMenu2 = nullptr; }
+    if (g_shellMenu)  { g_shellMenu->Release();  g_shellMenu  = nullptr; }
+}
+
 void ShowRowMenu(HWND wnd, POINT screen) {
     if (g_selected < 0 || g_selected >= Rows()) return;
-    const Hit& hit = g_hits[(size_t)g_selected];
+    const Hit hit = g_hits[(size_t)g_selected];   // copied: the menu pumps messages
     const UINT fileOnly = HasFile(hit) ? 0 : MF_GRAYED;
     const UINT appOnly  = Ranked(hit.kind) ? 0 : MF_GRAYED;
 
@@ -833,19 +923,66 @@ void ShowRowMenu(HWND wnd, POINT screen) {
     AppendMenuW(menu, MF_STRING | fileOnly, IDM_RUNAS, L"Run as administrator");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | fileOnly, IDM_LOCATION, L"Open file location");
-    AppendMenuW(menu, MF_STRING | fileOnly, IDM_COPYPATH, L"Copy path");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | appOnly, IDM_FORGET, L"Forget this app");
+
+    // Below ProWindows' own lines, everything Explorer would offer for the same
+    // thing: pin, send to, cut, copy, copy as path, delete, properties, and the
+    // entries other programs add. Shift shows the extended ones, as in Explorer.
+    ReleaseShellMenu();
+    g_shellMenu = ShellMenuFor(hit);
+    if (g_shellMenu) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        const int from = GetMenuItemCount(menu);
+        UINT flags = CMF_NORMAL;
+        if (GetKeyState(VK_SHIFT) < 0) flags |= CMF_EXTENDEDVERBS;
+        if (SUCCEEDED(g_shellMenu->QueryContextMenu(menu, (UINT)from, kShellFirst,
+                                                    kShellLast, flags))) {
+            g_shellMenu->QueryInterface(IID_PPV_ARGS(&g_shellMenu2));
+            g_shellMenu->QueryInterface(IID_PPV_ARGS(&g_shellMenu3));
+            DropShellDuplicates(menu, g_shellMenu, from);
+        } else {
+            ReleaseShellMenu();
+        }
+    }
+    // No shell item behind the row: the plain version of the same menu.
+    if (!g_shellMenu) AppendMenuW(menu, MF_STRING | fileOnly, IDM_COPYPATH, L"Copy path");
+    if (Ranked(hit.kind)) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | appOnly, IDM_FORGET, L"Forget this app");
+    }
 
     // The menu takes activation with it; without this the panel would treat
     // that as "the user clicked away" and vanish underneath its own menu.
+    // Notifications stay on while the shell's menu is in it: its submenus are
+    // only filled when WM_INITMENUPOPUP reaches it.
     g_menuOpen = true;
     SetForegroundWindow(wnd);
     const int cmd = (int)TrackPopupMenu(
-        menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+        menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | (g_shellMenu ? 0u : (UINT)TPM_NONOTIFY),
         screen.x, screen.y, 0, wnd, nullptr);
     g_menuOpen = false;
     DestroyMenu(menu);
+
+    if (cmd >= (int)kShellFirst && cmd <= (int)kShellLast && g_shellMenu) {
+        // Out of the way first: Delete, Properties and the rest open windows
+        // of their own, which should not sit behind the bar or vanish with it.
+        LauncherHide();
+        CMINVOKECOMMANDINFOEX info = {};
+        info.cbSize   = sizeof(info);
+        info.fMask    = CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE;
+        if (GetKeyState(VK_CONTROL) < 0) info.fMask |= CMIC_MASK_CONTROL_DOWN;
+        if (GetKeyState(VK_SHIFT) < 0)   info.fMask |= CMIC_MASK_SHIFT_DOWN;
+        info.lpVerb   = MAKEINTRESOURCEA(cmd - (int)kShellFirst);
+        info.lpVerbW  = MAKEINTRESOURCEW(cmd - (int)kShellFirst);
+        info.nShow    = SW_SHOWNORMAL;
+        info.ptInvoke = screen;
+        const HRESULT hr =
+            g_shellMenu->InvokeCommand(reinterpret_cast<CMINVOKECOMMANDINFO*>(&info));
+        if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_CANCELLED))
+            AWA_LOG(L"search: the shell menu command failed (0x%08lx)", (unsigned long)hr);
+        ReleaseShellMenu();
+        return;
+    }
+    ReleaseShellMenu();
 
     if (cmd) {
         RunRowCommand(cmd);
@@ -903,6 +1040,16 @@ std::wstring ClipboardText() {
 }
 
 LRESULT CALLBACK LauncherProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
+    // While Explorer's menu is up, its submenus and owner-drawn items (icons,
+    // Send to, the entries other programs add) are filled and drawn by it.
+    if (g_shellMenu && (msg == WM_INITMENUPOPUP || msg == WM_DRAWITEM ||
+                        msg == WM_MEASUREITEM || msg == WM_MENUCHAR)) {
+        LRESULT res = 0;
+        if (g_shellMenu3 && SUCCEEDED(g_shellMenu3->HandleMenuMsg2(msg, wp, lp, &res)))
+            return res;
+        if (g_shellMenu2 && SUCCEEDED(g_shellMenu2->HandleMenuMsg(msg, wp, lp)))
+            return (msg == WM_MENUCHAR) ? 0 : TRUE;
+    }
     switch (msg) {
         case WM_AWA_APPSREADY:            // the catalogue finished loading
             if (IsWindowVisible(wnd)) Relayout();

@@ -487,6 +487,25 @@ appended at the end of the numbering.
     `nvmlShutdown` never returns; `NvApiSensor` reads the same sensor for 2.8 MB and unloads. NVML
     is the fallback only when NvAPI could not be *opened*. `tests\gputemp.bat` measures all three.
 
+### Timer
+
+88. **Timers are anchored to the wall clock, never to tick counts.** Times are `int64` 100-ns
+    units from `GetSystemTimeAsFileTime` (UTC). Remaining is `endUtc - nowUtc`, clamped at 0;
+    stopwatch elapsed is `banked + now - startUtc`, clamped at 0 if the clock was set back. A
+    tick count would stop during sleep and be wrong after a restart. `src\timer.*`.
+
+89. **`timers.ini` is kept apart from `config.ini`, and written only on a state change.** It goes
+    to `.new` and then `MoveFileExW`, as `Config::SaveToFile` does. Starting, pausing, lapping and
+    time passing never write it; `config.ini` is rewritten whole and would churn on every one.
+
+90. **Nothing wakes while idle.** With nothing running there is no timer at all. The panel is an
+    overlay (`timer_shown`, `timer_pinned`, `timer_x/y`), shown without activation and hidden by
+    game mode and display-off through `UpdateOverlayVisibility`; the alarm shows it the same way
+    and never takes the keyboard. A visible panel
+    aligns to the next whole second (100 ms while the stopwatch shows tenths). A hidden panel uses
+    one `SetTimer` for `min(next deadline, 60 s)`, or 1 s only while the tick is on. `SetTimer`
+    caps at about 24.8 days, so always clamp. No thread and no resident DIB while hidden (67).
+
 ### The search bar
 
 16. **Every source is capped before the merge.** `Refilter` takes at most `kMaxRows` from each of

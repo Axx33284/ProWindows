@@ -280,3 +280,216 @@ Measure before and after each change: private bytes and GDI/USER objects of the 
 - [ ] **4.4 (O)** Final diff review against this plan; anything P1/P2 blocks the release.
 - [ ] **4.5 (user)** Run the real app for a day; then commit, tag `v1.6.0`, zip
   `build\ProWindows.exe` + `build\prowindowsctl.exe` + `README.md`.
+
+## Phase 5 — bug fixes and the Timer (added 2026-10-08)
+
+### 5.A Fixes that landed (O), verify only
+
+- [x] **5.A1** Brave stops being tiled after a few hours or a restart. Cause: `tooSmall`
+  ("uses too little of its tile") and `tooLarge` ("too large for this monitor") were decided
+  from a few looks at a window that may have been mid-restore or playing fullscreen video, and
+  they were never looked at again. `tooLarge` was also saved to `config.ini` as `nofit` and
+  reloaded on every run. The fix is in the `wm.cpp` layout pass (`misfitAt` in `wm.h`,
+  `kMisfitRetryMs` = 5 min). Both verdicts now expire, the observed limits are forgotten, the
+  window is asked again, and the stale `learned` record is erased. A window that really does not
+  fit is caught again on the same pass.
+- [x] **5.A2** "Run as administrator" in the search bar (menu, footer prompt, Ctrl+Shift+Enter)
+  seemed to do nothing. The bar hid itself *before* `ShellExecuteEx("runas")`, so the UAC prompt
+  came up as a flashing taskbar button. Now `RunElevated` runs first, owned by the bar
+  (`info.hwnd`), and any failure other than a refused prompt is logged (`launcher.cpp`).
+- [ ] **5.A3 (user)** Restart the tiler on the new build and use it for a day with Brave. Then
+  search `%APPDATA%\ProWindows\log.txt` for "trying to tile it again" and "sits out". Also try
+  elevating from the search bar.
+
+### 5.B The Timer: spec (decided by O, built by S)
+
+**What it is.** A panel (an overlay since 5.D; first built as a Win+T popup) with two pages: **Timer** (countdowns)
+and **Stopwatch**. Everything is anchored to the **system clock** (UTC wall time), never to tick
+counts. A running timer or stopwatch keeps going through sleep, hibernate, shutdown and restart,
+and on the next start it is exactly where the wall clock says it should be.
+
+**Files.** New `src/timer.h` / `src/timer.cpp` for the window, state, input and sound. Split out
+`src/timerpaint.cpp/.h` only if painting grows past ~400 lines. Register each `.cpp` in
+`build.bat` **and** in `tests\uishot.bat`, `clickprobe.bat`, `launchshot.bat` and `analyze.bat`.
+`timer.cpp` pulls in `winmm.lib` with a `#pragma comment`.
+
+**State and storage.** All times are `int64` 100-ns units from `GetSystemTimeAsFileTime`.
+- Timer *i* (up to **8**) holds `label`, `duration`, and either `endUtc` (running) or
+  `remaining` (paused or not started). Remaining = `endUtc − nowUtc`, clamped at 0.
+- Stopwatch (one) holds `startUtc` and `banked`. While running, elapsed =
+  `banked + now − startUtc`, and a pause folds that into `banked`. Laps: up to 99, newest first.
+- Store all of this in **`%APPDATA%\ProWindows\timers.ini`** (`ConfigDir()`), **not** in
+  `config.ini`, which is rewritten whole and would churn on every start, pause and lap. Write it
+  to `.new` first and then `MoveFileExW`, as `Config::SaveToFile` does (`defaults.cpp`). Load it
+  once in `TimerInit`, and save on every state change only. Nothing is written while time
+  simply passes.
+- Durations go up to **9999 days 23:59:59**: 8.6e15 in 100-ns units, safe in `int64`. The
+  stopwatch has no limit worth caring about (int64 covers 29,000 years).
+
+**Clock rules.**
+- `WM_TIMECHANGE`: the user moved the clock, so the timers move with it, as the user asked.
+  Only repaint.
+- On resume (`WM_POWERBROADCAST` / `PBT_APMRESUMEAUTOMATIC`, already handled near
+  `main.cpp:1220`), call `TimerCheckNow()`.
+- A timer whose `endUtc` passed while the PC was off or asleep fires **once**, at load or on
+  resume. Title: "Finished while you were away". The text gives the label and the local time it
+  ended.
+- If the clock went back past `startUtc`, elapsed would be negative: show 0, never wrap or
+  crash.
+
+**Waking up.** The UI thread never waits, and nothing polls while idle.
+- When nothing is running, there is no timer at all.
+- When the panel is visible and something runs, use `SetTimer` aligned to the next whole
+  second, or 100 ms while the stopwatch shows tenths.
+- When the panel is hidden, use one `SetTimer` for `min(next deadline, 60 s)`, or 1 s only when
+  the every-second tick is on. `SetTimer` caps at about 24.8 days, so always clamp.
+
+**Display.** `H:MM:SS` under a day and `Nd HH:MM:SS` from a day up (`9999d 23:59:59`). The
+stopwatch adds `.t` (tenths) while visible. Use the Requiem tokens and fonts from `theme.h`, and
+for spaced text `theme::SpacedWidth` / `DrawSpaced` (inv. 77). Build the window the way
+`launcher.cpp` builds the search bar:
+- centred on the monitor under the pointer and DPI-scaled;
+- hidden on deactivate;
+- `FocusWindow` to take the foreground;
+- resources freed on idle (`kTimerIdle`).
+
+**Keys in the panel.** The footer prompts list only these, and clicking a prompt sends its key
+(inv. 74).
+- `Tab`: switch page.
+- `Up` / `Down`: select a timer.
+- `Enter`: edit the selected timer's duration in the fields `days : hh : mm : ss`. Digits type
+  into the focused field, `Left` / `Right` move between fields, and `Enter` commits.
+- `Space`: start or pause. `R`: reset.
+- `N`: new timer. `Del`: remove the timer.
+- `L`: lap (stopwatch).
+- `Esc`: close.
+
+**When a timer ends.**
+- If the alarm setting is on, an alarm loops for up to 60 s: `C:\Windows\Media\Alarm01.wav` if
+  it exists, otherwise `SystemExclamation` through `PlaySoundW(..., SND_ALIAS)`. Any key in the
+  panel stops it.
+- A tray balloon (`AppTrayBalloon`) names the timer, and the panel opens on it.
+- With the alarm off, only the balloon shows.
+
+**Tick sound.** The user asked for "a tick clock sound … able to enable or disable". Setting
+`timer_tick = off | second | minute`, default `off`:
+- `second`: a tick every whole second while any timer or the stopwatch runs.
+- `minute`: a tick each time the seconds come round to :00 (the "full clock").
+
+Build the tick once as an in-memory WAV: 16-bit mono 44.1 kHz, about 12 ms, a decaying 2 kHz
+burst. Play it with `PlaySoundW(buf, nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT)`. Ship no
+asset file, and never tick while the alarm loops.
+
+**Config and settings.**
+- `config.ini` gets `timer_tick = off|second|minute` and `timer_alarm = true|false`. Parse them
+  in `config.cpp`, write them in `SaveToFile` (`defaults.cpp`), and list both in
+  **`AWA_EDITED_FIELDS`** (`settings.cpp:160`, inv. 78), or Apply drops them.
+- In Settings, add a "Timer" group on the best-fitting existing page (`settings_clock.cpp` is
+  the natural home): a three-way Choice for the tick and a Toggle for the alarm, each with a
+  right-column description (2.T5). Row callbacks must not touch a `Row&` after calling out
+  (inv. 79).
+
+**Binding.**
+- Add `ACT_TIMER` (word `timer`) to `config.h`. In `config.cpp`, add its parse (near :163),
+  word (near :279) and description (near :348), and add its hint at `settings_keys.cpp:79`.
+- Dispatch it at `main.cpp:264` → `TimerToggle()`.
+- No default key (5.D removed the Win+T default and its migration; `kConfigVersion` stays 4).
+  The action is bindable by the word `timer`.
+- The ctl channel gets `timer` for free, since it uses the bind words. Update its help text in
+  `ctl_main.cpp`.
+
+**Lifecycle.**
+- Call `TimerInit(inst, cfg)` after `ClockInit` in `main.cpp`, `TimerShutdown()` beside
+  `ClockShutdown`, and `TimerApplyConfig()` wherever `ClockApplyConfig()` runs.
+- Respect the idle trim (inv. 67): no thread and no resident DIB while the panel is hidden.
+
+### 5.C Tasks
+
+- [x] **5.C1 (S)** `timer.h/.cpp`: state, `timers.ini` load and save, the time maths and the
+  formatting. Add `tests\timer_test.cpp` (asserts, run from `tests\run.bat` like
+  `layout_test`). It must cover:
+  - parse/format round-trip, including `9999d 23:59:59`;
+  - remaining time across a simulated 3-day "off" gap;
+  - a stopwatch running past 400 days;
+  - a clock set backwards gives 0, not a negative time;
+  - a finished timer fires once on load.
+- [x] **5.C2 (S)** The panel: window, paint, keys, footer prompts, both pages, the editor.
+- [x] **5.C3 (S)** Alarm and tick sound, the settings rows, the config fields and
+  `AWA_EDITED_FIELDS`.
+- [x] **5.C4 (S)** `ACT_TIMER`, the Win+T default and migration, dispatch, ctl help text.
+- [x] **5.C5 (S)** `tests\timershot.bat`, modelled on `clockshot.bat`: PNGs of both pages, a
+  running timer showing days, and the editor. Exit code 1 on failure.
+- [x] **5.C6 (H)** Register the sources in every `.bat`. Add Timer to README's "What's new in
+  1.6" (`grep -n "What's new" README.md`, edit only that range). Add a "Timer" heading to MAP
+  under "The overlays", with this feature's invariants: wall-clock anchoring, `timers.ini` kept
+  apart from `config.ini`, and nothing waking while idle.
+- [x] **5.C7 (O)** Review 5.C1–5.C4 against inv. 67/74/77/78/79 and the "UI thread never
+  waits" rule. **Passes:** 67 (paint-time DIB freed every paint, no thread, idle trim armed on
+  hide), 74 (every prompt maps to a handled key; click sends it through `HandleKey`), 77 (tabs
+  go through `Measure`/`Print` → `SpacedWidth`/`DrawSpaced`; `DrawCells` is unspaced), 78
+  (`timerTick`/`timerAlarm` in `AWA_EDITED_FIELDS`), 79 (stock `Toggle`/`ChoiceOf` rows). The
+  UI thread does a small synchronous `timers.ini` write per state change, the same as
+  `AppSaveConfig`; accepted. **Bugs, fixed in 5.D:**
+  - R1. `TimerHide` clears `g_editIsNew` *before* calling `EndEdit`, so a new timer cancelled by
+    closing the panel is kept instead of taken back out.
+  - R2. `Reposition` takes the DPI of where the window *was*, not of the monitor it is moved
+    to: wrong scale the first time it opens on a monitor with another DPI. No `WM_DPICHANGED`.
+  - R3. A finished timer with the alarm on calls `FocusWindow`: it steals the keyboard from
+    whatever the user is typing in, and their next key only silences the alarm.
+  - R4. `Deserialize` accepts `watch.running = 1` with `watch.start = 0`: elapsed = 400 years.
+    Running needs `startUtc > 0`, as timers need `endUtc > 0`.
+
+### 5.D The Timer becomes an overlay (user, 2026-10-08)
+
+The user asked for two changes: **no Win+T** - the timer is opened from the app - and it can be
+**pinned like the monitor and clock**. So the panel stops being a search-bar-style popup and
+becomes an overlay that stays where it was put.
+
+**Config.** `timer_shown` (bool, default false), `timer_pinned` (bool, false), `timer_x` /
+`timer_y` (int, `INT_MIN` = never placed: centred in the primary work area, 22 % down). Parse in
+`config.cpp`, write in `SaveToFile`, defaults in `config.h`. `timerShown` and `timerPinned` go in
+`AWA_EDITED_FIELDS` (inv. 78) and in `ResetClockPage`.
+
+**Window.** `WS_POPUP`, `WS_EX_TOOLWINDOW | WS_EX_TOPMOST`. Pinned adds `WS_EX_LAYERED |
+WS_EX_TRANSPARENT | WS_EX_NOACTIVATE` (then `SetLayeredWindowAttributes(255, LWA_ALPHA)`;
+`WS_EX_TRANSPARENT` is only click-through on a layered window); unpinning removes all three.
+Painting stays `WM_PAINT` with the paint-time DIB (inv. 67).
+- Shown with `SW_SHOWNOACTIVATE` and **never** `FocusWindow` - clicking it activates it and then
+  the keys work. Deactivating no longer hides it.
+- Placed at `timerX/Y`, clamped on screen; DPI from the monitor at that point
+  (`MonitorFromPoint` + `GetDpiForMonitor`), and `WM_DPICHANGED` rescales (R2). A size change
+  keeps the top-left corner.
+- Unpinned, a left drag on the header outside the two tab names moves it, as the clock drags
+  (`SetCapture`, clamp, save `timerX/Y` + `AppSaveConfig()` on button-up).
+- Right-click (unpinned): Pin in place / Hide / Timer settings... (`SettingsOpenTab(PAGE_CLOCK)`).
+- `Esc` prompt becomes **Hide**: `timerShown = false`, hide, `AppSaveConfig()`,
+  `AppRefreshSettings()`. Inv. 74 still holds.
+- Hidden by game mode and display-off like the others: `UpdateOverlayVisibility` in `main.cpp`
+  calls `TimerSetVisible(g_cfg.timerShown && allowed)`. Timers keep running while hidden.
+
+**Public API** (`timer.h`): `TimerSetVisible(bool)`, `TimerSetPinned(bool)`, `TimerPinned()`,
+`TimerAlarming()`, `TimerStopAlarm()`; `TimerToggle()` stays for the `timer` action and flips
+`timerShown`. `TimerApplyConfig()` also re-applies pin and position.
+
+**Tray.** A third overlay submenu, **Timer**, beside Clock: Show (checked = `timerShown`), Pin in
+place (greyed unless shown), **Stop alarm** (only while alarming - a pinned panel cannot take a
+key), separator, Timer settings... - mirroring the monitor and clock submenus.
+
+**Alarm** (R3). A finished timer with the alarm on sets `timerShown = true` (saved), selects it
+on page 0 and shows the panel without activating it. Any key or click in the panel, or the tray
+item, stops it; it still gives up after 60 s.
+
+**Settings** (Clock page, "Timer" section): add "Show the timer" (toggle, `timerShown`), "Pin in
+place" (toggle, `timerPinned`, enabled only while shown), "Position" Reset action (as the
+clock's). Take Win+T out of every description.
+
+**Win+T goes.** Remove the `win+t` default and its `kAdded` entry, put `kConfigVersion` back to
+4 and drop "5 adds the timer panel's win+t". `ACT_TIMER` stays as a bindable word (`timer`, no
+default, ctl `timer` shows/hides). Sweep "Win+T" out of `config.h`, `defaults.cpp`,
+`settings_keys.cpp`, `settings_clock.cpp`, `timer.h`, MAP inv. 88–90 / Timer heading, README
+"What's new in 1.6", and §5.B above.
+
+- [x] **5.D1 (S)** Everything above, plus R1 and R4. `timer_test` gets an R4 case.
+  `tests\timershot.bat` shoots the overlay (unpinned and pinned) instead of the popup. Green:
+  `build.bat PW_dev.exe`, `tests\run.bat`, `tests\timershot.bat`, `tests\uishot.bat`.
+- [ ] **5.D2 (O)** Review the 5.D1 diff.

@@ -36,6 +36,10 @@ void AppScheduleTrim(UINT delayMs);
 // Pulls the settings window's controls back into step with the live Config.
 void AppRefreshSettings();
 
+// Re-applies which overlays may be on screen (game mode, display off, and each
+// one's own "shown" setting). The timer's alarm calls it after showing itself.
+void AppUpdateOverlays();
+
 // Opens the settings window on the Monitor tab.
 void AppOpenMonitorSettings();
 // ... and on the Clock tab.
