@@ -877,6 +877,6 @@ v1.7, ~16k lines, includes `StartMenuExperienceHost.exe`, `SearchHost.exe`, `Sea
 - [ ] **9.T1 (S)** 9.A. Green: build (exe + dll), run, uishot, styler_test.
 - [ ] **9.T2 (S)** 9.B. Green: build (exe + both dlls), run, uishot, styler_test (extend it for
   the shim's new APIs and the Start theme table). Never inject into the real Start menu.
-- [ ] **9.T3 (S)** 9.C. Green: build, run, uishot, timershot.
+- [x] **9.T3 (S)** 9.C. Green: build, run, uishot, timershot.
 - [ ] **9.T4 (O)** Review 9.B: AppContainer ACLs, event namespace, crash guard, Stop on quit.
 - [ ] **9.T5 (user OK needed)** Live check with 8.2: Explorer glass, Start menu glass, quit.
