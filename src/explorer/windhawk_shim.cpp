@@ -1,10 +1,14 @@
-// The Windhawk API over ProWindows, and the DLL's life inside explorer.exe.
+// The Windhawk API over ProWindows, and the DLL's life inside the process it
+// styles (explorer.exe, or the Start menu's StartMenuExperienceHost.exe and
+// SearchHost.exe - one source, two DLLs, see windhawk_shim.h).
 //
-// Everything here runs in File Explorer's process, so it is deliberately plain:
+// Everything here runs in somebody else's process, so it is deliberately plain:
 // no ProWindows headers, no static constructors that do work, and DllMain does
 // nothing. ProWindows injects the DLL with LoadLibraryW and then runs
 // StylerStart on a remote thread; a worker thread started there waits for the
-// Reload and Stop events and is the only thing that ever tears the mod down.
+// Reload and Stop signals and is the only thing that ever tears the mod down.
+// The signals are named events in Explorer; in the Start menu build
+// (PW_STYLER_PACKAGED) they are files - see "lifecycle" below for why.
 
 #include "windhawk_shim.h"
 
@@ -23,7 +27,8 @@
 
 namespace {
 
-std::wstring g_configDir;  // ...\ProWindows, where the ini and the log live
+std::wstring g_configDir;  // where the ini and the log live: ...\ProWindows for
+                           // Explorer, ...\ProWindows\startmenu-styler for the Start menu
 std::mutex g_settingsMutex;
 std::unordered_map<std::wstring, std::wstring> g_settings;
 std::atomic<bool> g_debug;
@@ -37,13 +42,18 @@ std::wstring DefaultConfigDir() {
         roaming) {
         dir = roaming;
         dir += L"\\ProWindows";
+#ifdef PW_STYLER_PACKAGED
+        // Only a fallback: inside an AppContainer this is the package's own
+        // copy of %APPDATA%, so ProWindows always passes the real path.
+        dir += L"\\" PW_STYLER L"-styler";
+#endif
     }
     CoTaskMemFree(roaming);
     return dir;
 }
 
 std::wstring IniPath() {
-    return g_configDir + L"\\explorer-styler.ini";
+    return g_configDir + L"\\" PW_STYLER L"-styler.ini";
 }
 
 // ---------------------------------------------------------------- the ini
@@ -176,7 +186,7 @@ void Wh_Log(PCWSTR format, ...) {
     WideCharToMultiByte(CP_UTF8, 0, line.c_str(), (int)line.size(), &bytes[0], n,
                         nullptr, nullptr);
 
-    HANDLE f = CreateFileW((g_configDir + L"\\explorer-styler.log").c_str(),
+    HANDLE f = CreateFileW((g_configDir + L"\\" PW_STYLER L"-styler.log").c_str(),
                            FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f != INVALID_HANDLE_VALUE) {
@@ -212,15 +222,88 @@ int Wh_GetIntSetting(PCWSTR valueName, ...) {
     return it == g_settings.end() ? 0 : _wtoi(it->second.c_str());
 }
 
+namespace {
+
+// The mod's private folder. Explorer: a subfolder of the config dir. Start
+// menu: the config dir itself, which is already the one folder the packaged
+// hosts may write to (ProWindows gave it the ACL).
+std::wstring StorageDir() {
+#ifdef PW_STYLER_PACKAGED
+    return g_configDir;
+#else
+    return g_configDir + L"\\" PW_STYLER L"-styler";
+#endif
+}
+
+// One file per stored value, "value_<key>.bin" in the storage folder (the key
+// cut down to letters, digits and '_'). Raw bytes; an int is its four bytes.
+// Separate files so that two host processes never rewrite each other's keys.
+std::wstring ValuePath(PCWSTR name) {
+    std::wstring file = L"\\value_";
+    for (PCWSTR c = name; *c; ++c) {
+        file += (iswalnum(*c) || *c == L'_') ? *c : L'_';
+    }
+    return StorageDir() + file + L".bin";
+}
+
+}  // namespace
+
 BOOL Wh_GetModStoragePath(PWSTR pathBuffer, UINT bufferChars) {
-    std::wstring dir = g_configDir + L"\\explorer-styler";
+    std::wstring dir = StorageDir();
     if (dir.size() + 1 > bufferChars) {
         return FALSE;
     }
+#ifndef PW_STYLER_PACKAGED
     CreateDirectoryW(g_configDir.c_str(), nullptr);
+#endif
     CreateDirectoryW(dir.c_str(), nullptr);
     wmemcpy(pathBuffer, dir.c_str(), dir.size() + 1);
     return TRUE;
+}
+
+size_t Wh_GetBinaryValue(PCWSTR valueName, void* buffer, size_t bufferSize) {
+    HANDLE f = CreateFileW(ValuePath(valueName).c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    LARGE_INTEGER size = {};
+    GetFileSizeEx(f, &size);
+    if (buffer && bufferSize) {
+        DWORD got = 0;
+        ReadFile(f, buffer, (DWORD)(bufferSize < (1u << 28) ? bufferSize : (1u << 28)),
+                 &got, nullptr);
+    }
+    CloseHandle(f);
+    return (size_t)size.QuadPart;
+}
+
+BOOL Wh_SetBinaryValue(PCWSTR valueName, const void* buffer, size_t bufferSize) {
+    CreateDirectoryW(StorageDir().c_str(), nullptr);
+    HANDLE f = CreateFileW(ValuePath(valueName).c_str(), GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        return FALSE;
+    }
+    DWORD wrote = 0;
+    BOOL ok = !bufferSize ||
+              (WriteFile(f, buffer, (DWORD)bufferSize, &wrote, nullptr) && wrote == bufferSize);
+    CloseHandle(f);
+    return ok;
+}
+
+int Wh_GetIntValue(PCWSTR valueName, int defaultValue) {
+    int value = 0;
+    if (Wh_GetBinaryValue(valueName, &value, sizeof(value)) != sizeof(value)) {
+        return defaultValue;
+    }
+    return value;
+}
+
+BOOL Wh_SetIntValue(PCWSTR valueName, int value) {
+    return Wh_SetBinaryValue(valueName, &value, sizeof(value));
 }
 
 // ---------------------------------------------------------------- download
@@ -383,44 +466,147 @@ namespace {
 
 std::mutex g_lifeMutex;  // StylerStart against the stop in WorkerProc
 bool g_running;          // under g_lifeMutex
+HANDLE g_worker;
+
+// ---------------------------------------------------------------- signals
+// How ProWindows says "reload" and "stop", and how it can tell this process is
+// styled. Explorer: the named events Local\ProWindows.Styler.{Reload,Stop}.<pid>.
+//
+// The Start menu hosts are packaged AppContainer processes, and there the
+// events do not work: "Local\" inside a container is the container's own
+// namespace (\Sessions\N\AppContainerNamedObjects\<package SID>), which a
+// normal ProWindows cannot open by name; creating the events in the session's
+// global namespace from inside the container is denied, and creating them from
+// ProWindows first means guessing what a package may open. What both sides
+// already have is the folder ProWindows made readable and writable for ALL
+// APPLICATION PACKAGES (startmenu-styler\), so the signals are files there:
+//   alive.<pid>   held open by the DLL, deleted by the kernel when it closes
+//                 (also when the host dies): "this process is styled"
+//   reload.<pid>  made by ProWindows; the worker deletes it and re-reads the ini
+//   stop.<pid>    made by ProWindows; the worker deletes it and stops
+// The worker sleeps on a directory change notification, never polls.
+#ifdef PW_STYLER_PACKAGED
+
+HANDLE g_aliveFile = INVALID_HANDLE_VALUE;
+HANDLE g_watch = INVALID_HANDLE_VALUE;
+
+std::wstring SignalPath(PCWSTR what) {
+    return g_configDir + L"\\" + what + L"." + std::to_wstring(GetCurrentProcessId());
+}
+
+// True when the signal file existed (and is gone now).
+bool TakeSignal(PCWSTR what) {
+    const std::wstring path = SignalPath(what);
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        return false;
+    }
+    if (!DeleteFileW(path.c_str())) {
+        Wh_Log(L"cannot delete %s (error %lu)", path.c_str(), GetLastError());
+    }
+    return true;
+}
+
+bool OpenSignals() {
+    // Left over from a run that ended without taking it (ProWindows made it
+    // after the worker had already gone): not for us.
+    DeleteFileW(SignalPath(L"stop").c_str());
+    DeleteFileW(SignalPath(L"reload").c_str());
+    g_aliveFile = CreateFileW(SignalPath(L"alive").c_str(), GENERIC_WRITE | DELETE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    g_watch = FindFirstChangeNotificationW(
+        g_configDir.c_str(), FALSE, FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE);
+    if (g_aliveFile == INVALID_HANDLE_VALUE || g_watch == INVALID_HANDLE_VALUE) {
+        Wh_Log(L"cannot open the signal files in %s (error %lu)", g_configDir.c_str(),
+               GetLastError());
+        return false;
+    }
+    return true;
+}
+
+void CloseSignals() {
+    if (g_watch != INVALID_HANDLE_VALUE) FindCloseChangeNotification(g_watch);
+    if (g_aliveFile != INVALID_HANDLE_VALUE) CloseHandle(g_aliveFile);  // deletes alive.<pid>
+    g_watch = g_aliveFile = INVALID_HANDLE_VALUE;
+}
+
+// StylerStart on an already styled process: wake the worker with a reload.
+void PostReload() {
+    HANDLE f = CreateFileW(SignalPath(L"reload").c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                           nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+}
+
+// true = reload, false = stop.
+bool WaitForSignal() {
+    for (;;) {
+        WaitForSingleObject(g_watch, INFINITE);
+        FindNextChangeNotification(g_watch);   // before looking, so none is missed
+        if (TakeSignal(L"stop")) return false;
+        if (TakeSignal(L"reload")) return true;
+    }
+}
+
+#else
+
 HANDLE g_reloadEvent;
 HANDLE g_stopEvent;
-HANDLE g_worker;
 
 std::wstring EventName(PCWSTR what) {
     return std::wstring(L"Local\\ProWindows.Styler.") + what + L"." +
            std::to_wstring(GetCurrentProcessId());
 }
 
-void CloseEvents() {
+bool OpenSignals() {
+    g_reloadEvent =
+        CreateEventW(nullptr, FALSE, FALSE, EventName(L"Reload").c_str());
+    g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, EventName(L"Stop").c_str());
+    if (!g_reloadEvent || !g_stopEvent) {
+        if (g_reloadEvent) CloseHandle(g_reloadEvent);
+        if (g_stopEvent) CloseHandle(g_stopEvent);
+        g_reloadEvent = g_stopEvent = nullptr;
+        return false;
+    }
+    // A Stop meant for an earlier run that ended on its own is not for us.
+    ResetEvent(g_stopEvent);
+    return true;
+}
+
+void CloseSignals() {
     CloseHandle(g_reloadEvent);
     CloseHandle(g_stopEvent);
     g_reloadEvent = g_stopEvent = nullptr;
 }
 
+void PostReload() {
+    SetEvent(g_reloadEvent);
+}
+
+bool WaitForSignal() {
+    HANDLE events[2] = {g_stopEvent, g_reloadEvent};
+    return WaitForMultipleObjects(2, events, FALSE, INFINITE) == WAIT_OBJECT_0 + 1;
+}
+
+#endif
+
 // Waits for ProWindows to say "reload" (the ini changed) or "stop" (styling
 // off, or ProWindows quitting). Stop undoes everything the mod did and takes
 // the hooks out; the module stays loaded (see above).
 DWORD WINAPI WorkerProc(LPVOID) {
-    HANDLE events[2] = {g_stopEvent, g_reloadEvent};
-    for (;;) {
-        DWORD r = WaitForMultipleObjects(2, events, FALSE, INFINITE);
-        if (r == WAIT_OBJECT_0 + 1) {
-            try {
-                LoadIni();
-                Wh_ModSettingsChanged();
-            } catch (...) {
-                Wh_Log(L"exception in Wh_ModSettingsChanged");
-            }
-            continue;
+    while (WaitForSignal()) {
+        try {
+            LoadIni();
+            Wh_ModSettingsChanged();
+        } catch (...) {
+            Wh_Log(L"exception in Wh_ModSettingsChanged");
         }
-        break;
     }
 
     std::lock_guard<std::mutex> life(g_lifeMutex);
-    // The events go first: from here ProWindows sees this Explorer as not
+    // The signals go first: from here ProWindows sees this process as not
     // styled, and a new injection waits in StylerStart until the stop is done.
-    CloseEvents();
+    CloseSignals();
     try {
         Wh_ModUninit();
     } catch (...) {
@@ -442,7 +628,7 @@ DWORD WINAPI WorkerProc(LPVOID) {
 extern "C" __declspec(dllexport) DWORD WINAPI StylerStart(LPVOID configDir) {
     std::lock_guard<std::mutex> life(g_lifeMutex);
     if (g_running) {
-        SetEvent(g_reloadEvent);  // already running: just re-read the ini
+        PostReload();  // already running: just re-read the ini
         return 1;
     }
 
@@ -462,15 +648,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI StylerStart(LPVOID configDir) {
     LoadIni();
     Wh_Log(L"StylerStart, config dir %s", g_configDir.c_str());
 
-    g_reloadEvent =
-        CreateEventW(nullptr, FALSE, FALSE, EventName(L"Reload").c_str());
-    g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, EventName(L"Stop").c_str());
-    if (!g_reloadEvent || !g_stopEvent) {
-        CloseEvents();
+    if (!OpenSignals()) {
+        CloseSignals();
         return 0;
     }
-    // A Stop meant for an earlier run that ended on its own is not for us.
-    ResetEvent(g_stopEvent);
 
     bool ok = false;
     bool inited = false;
@@ -504,7 +685,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StylerStart(LPVOID configDir) {
             }
         }
         DisableAllHooks();
-        CloseEvents();
+        CloseSignals();
         return 0;
     }
     g_running = true;

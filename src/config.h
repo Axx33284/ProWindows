@@ -293,6 +293,25 @@ struct Config {
     int          explorerRegion      = 0;
     int          explorerXamlDiag    = 1;
 
+    // ---- Start menu styling ----
+    // Restyles the Start menu and the search flyout by loading
+    // ProWindows_startmenu.dll into StartMenuExperienceHost.exe and
+    // SearchHost.exe (see startmenustyler.h). On by default. startTheme is the
+    // name the styler mod knows ("" = none; "ProWindows" and "ProWindows Glass"
+    // are ours); startLayout is the mod's disableNewStartMenuLayout ("" = the
+    // theme's own). The Look fields only drive the two ProWindows themes:
+    // tint 0 black, 1 graphite, 2 steel, 3 the system accent colour; opacity
+    // is the Glass tint's, in percent; highlight 0 metal gradient, 1 accent,
+    // 2 tint; radius in pixels; text 0 white, 1 light grey.
+    bool         startStyler      = true;
+    std::wstring startTheme       = L"ProWindows Glass";
+    std::wstring startLayout;
+    int          startTint        = 0;
+    int          startTintOpacity = 55;
+    int          startHighlight   = 0;
+    int          startRadius      = 12;
+    int          startText        = 0;
+
     // search bar
     // Which sources the search bar draws on besides installed apps. Files are
     // the only one that costs anything: the index is built once on a background

@@ -251,6 +251,7 @@ int wmain(int argc, wchar_t** argv) {
         { PAGE_CLOCK,     L"ui-clock.png"     },
         { PAGE_TIMER,     L"ui-timer.png"     },
         { PAGE_EXPLORER,  L"ui-explorer.png"  },
+        { PAGE_START,     L"ui-start.png"     },
         { PAGE_GENERAL,   L"ui-general.png"   },
         { PAGE_WELCOME,   L"ui-welcome.png"   },
     };

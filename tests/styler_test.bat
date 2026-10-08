@@ -51,5 +51,29 @@ if errorlevel 1 (
 )
 
 "%ROOT%\tests\build\styler_test.exe" "%ROOT%"
-exit /b %errorlevel%
+set RESULT=%errorlevel%
+
+REM  The Start menu styler: the same shim compiled the way the Start menu DLL gets
+REM  it (PW_STYLER_PACKAGED: signals as files, stored values), plus the ProWindows
+REM  side with the app-package ACL. Still nothing is injected.
+if not exist "%ROOT%\tests\build\styler_sm" mkdir "%ROOT%\tests\build\styler_sm"
+cl.exe /nologo /std:c++17 /utf-8 /W3 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UNICODE ^
+    /DPW_STYLER=L\"startmenu\" /DPW_STYLER_PACKAGED ^
+    /O2 /MT /Fo:"%ROOT%\tests\build\styler_sm\\" ^
+    /I"%MH%\include" ^
+    "%ROOT%\tests\styler_startmenu_test.cpp" ^
+    "%ROOT%\src\explorer\windhawk_shim.cpp" ^
+    "%ROOT%\src\startmenustyler.cpp" "%ROOT%\src\common.cpp" ^
+    "%MH%\src\hook.c" "%MH%\src\buffer.c" "%MH%\src\trampoline.c" "%MH%\src\hde\hde64.c" ^
+    /Fe:"%ROOT%\tests\build\styler_startmenu_test.exe" ^
+    /link /INCREMENTAL:NO /SUBSYSTEM:CONSOLE user32.lib shell32.lib ole32.lib winhttp.lib ^
+    advapi32.lib shlwapi.lib dwmapi.lib
+if errorlevel 1 (
+    echo [ERROR] The Start menu styler tests did not compile.
+    exit /b 1
+)
+
+"%ROOT%\tests\build\styler_startmenu_test.exe" "%ROOT%"
+if errorlevel 1 set RESULT=1
+exit /b %RESULT%
 

@@ -790,6 +790,14 @@ bool Config::LoadFromFile(const std::wstring& path) {
         else if (k == L"explorer_text")    explorerText = std::clamp(_wtoi(v.c_str()), 0, 1);
         else if (k == L"explorer_region")  explorerRegion = std::clamp(_wtoi(v.c_str()), 0, 1);
         else if (k == L"explorer_xaml")    explorerXamlDiag = std::clamp(_wtoi(v.c_str()), 0, 2);
+        else if (k == L"start_styler")     startStyler = ParseBool(v, startStyler);
+        else if (k == L"start_theme")      startTheme = Trim(v);
+        else if (k == L"start_layout")     startLayout = Trim(v);
+        else if (k == L"start_tint")       startTint = (std::max)(0, (std::min)(3, _wtoi(v.c_str())));
+        else if (k == L"start_tint_opacity") startTintOpacity = (std::max)(0, (std::min)(100, _wtoi(v.c_str())));
+        else if (k == L"start_highlight")  startHighlight = (std::max)(0, (std::min)(2, _wtoi(v.c_str())));
+        else if (k == L"start_radius")     startRadius = (std::max)(0, (std::min)(12, _wtoi(v.c_str())));
+        else if (k == L"start_text")       startText = (std::max)(0, (std::min)(1, _wtoi(v.c_str())));
         else if (k == L"monitor_cpu")      monShowCpu = ParseBool(v, monShowCpu);
         else if (k == L"monitor_ram")      monShowRam = ParseBool(v, monShowRam);
         else if (k == L"monitor_gpu")      monShowGpu = ParseBool(v, monShowGpu);

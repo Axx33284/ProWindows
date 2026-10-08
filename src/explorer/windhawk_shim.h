@@ -1,9 +1,12 @@
-// The slice of the Windhawk runtime API that the File Explorer Styler mod uses,
-// implemented over ProWindows: settings come from explorer-styler.ini, logging
-// goes to explorer-styler.log, and the inline hooks are MinHook's.
+// The slice of the Windhawk runtime API that the stylers use (File Explorer and
+// Start menu), implemented over ProWindows: settings come from <name>-styler.ini,
+// logging goes to <name>-styler.log, and the inline hooks are MinHook's.
 //
-// This header is included by styler.cpp ahead of everything else, the way
-// Windhawk prepends its own API header to a mod.
+// One shim, two DLLs: the styler's name is fixed at compile time with
+// /DPW_STYLER=L"explorer" or L"startmenu". The Start menu build also defines
+// PW_STYLER_PACKAGED (its hosts are AppContainer processes, see
+// windhawk_shim.cpp). This header is included by styler.cpp ahead of
+// everything else, the way Windhawk prepends its own API header to a mod.
 #pragma once
 
 #ifndef NOMINMAX
@@ -13,7 +16,10 @@
 
 #include <initializer_list>
 
-#define WH_MOD_ID L"prowindows-explorer-styler"
+#ifndef PW_STYLER
+#define PW_STYLER L"explorer"
+#endif
+#define WH_MOD_ID L"prowindows-" PW_STYLER L"-styler"
 
 // ---------------------------------------------------------------- toolchain gaps
 // The mod is written for clang and a recent SDK; ProWindows builds with MSVC
@@ -50,6 +56,15 @@ int Wh_GetIntSetting(PCWSTR valueName, ...);
 // ---------------------------------------------------------------- storage
 BOOL Wh_GetModStoragePath(PWSTR pathBuffer, UINT bufferChars);
 
+// Values the mod keeps between runs (Windhawk's per-mod storage). One small
+// file per key in the storage folder, so two host processes writing different
+// keys never rewrite each other's. GetBinaryValue returns the stored size and
+// copies at most bufferSize bytes; a missing key reads as 0 bytes / the default.
+int Wh_GetIntValue(PCWSTR valueName, int defaultValue);
+BOOL Wh_SetIntValue(PCWSTR valueName, int value);
+size_t Wh_GetBinaryValue(PCWSTR valueName, void* buffer, size_t bufferSize);
+BOOL Wh_SetBinaryValue(PCWSTR valueName, const void* buffer, size_t bufferSize);
+
 // ---------------------------------------------------------------- download
 // Synchronous (WinHTTP). The mod only calls it from threads of its own.
 struct WH_GET_URL_CONTENT_OPTIONS {
@@ -71,6 +86,11 @@ void Wh_FreeUrlContent(const WH_URL_CONTENT* content);
 BOOL Wh_ApplyHookOperations();
 
 bool WhSetFunctionHook(void* target, void* hook, void** original);
+
+// The mod's own spelling; Windhawk's returns BOOL.
+inline BOOL Wh_SetFunctionHook(void* target, void* hook, void** original) {
+    return WhSetFunctionHook(target, hook, original) ? TRUE : FALSE;
+}
 
 namespace WindhawkUtils {
 

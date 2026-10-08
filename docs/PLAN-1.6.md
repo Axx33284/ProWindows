@@ -875,8 +875,43 @@ v1.7, ~16k lines, includes `StartMenuExperienceHost.exe`, `SearchHost.exe`, `Sea
 
 ### 9.T Tasks
 - [x] **9.T1 (S)** 9.A. Green: build (exe + dll), run, uishot, styler_test.
-- [ ] **9.T2 (S)** 9.B. Green: build (exe + both dlls), run, uishot, styler_test (extend it for
+- [x] **9.T2 (S)** 9.B. Green: build (exe + both dlls), run, uishot, styler_test (extend it for
   the shim's new APIs and the Start theme table). Never inject into the real Start menu.
 - [x] **9.T3 (S)** 9.C. Green: build, run, uishot, timershot.
 - [ ] **9.T4 (O)** Review 9.B: AppContainer ACLs, event namespace, crash guard, Stop on quit.
 - [ ] **9.T5 (user OK needed)** Live check with 8.2: Explorer glass, Start menu glass, quit.
+
+**9.T2 done - what differs from 9.B** (for the 9.T4 review):
+- **Signals are files, not events.** Inside a container `Local\` is the package's own namespace
+  (`\Sessions\N\AppContainerNamedObjects\<package SID>`), which a medium-integrity ProWindows
+  cannot open by name; a container cannot create events in the global namespace; making them
+  first from ProWindows would be a guess about what each package may open. Both sides already
+  share the ACL'd folder, so the shim built with `PW_STYLER_PACKAGED` signals through it:
+  `alive.<pid>` (held open delete-on-close by the DLL, so it vanishes when the DLL stops or the
+  host dies; existing = styled), `reload.<pid>` and `stop.<pid>` (made by ProWindows, deleted by
+  the DLL, which sleeps on `FindFirstChangeNotification`). The Explorer build keeps its named
+  events; same `StylerStart`, same worker. Not tested live: a real AppContainer host (the harness
+  covers the shim and the ACL in-process).
+- **ACLs** (`StartMenuStylerGrantPackages`): S-1-15-2-1 and S-1-15-2-2 get read+execute on the DLL
+  file in place (redone for every injection: a rebuilt DLL is a new file) and read/write/delete
+  with an inheritable ACE on `%APPDATA%\ProWindows\startmenu-styler\`, which is the DLL's config
+  dir (passed to `StylerStart`; `SHGetKnownFolderPath` in a container is virtualised), ini, log,
+  stored values and signal files. Nothing else under `%APPDATA%\ProWindows` is opened up.
+- **Shim:** `PW_STYLER` names ini/log/events; `PW_STYLER_PACKAGED` = files for signals, and the
+  storage dir is the config dir itself. `Wh_Get/SetIntValue` and `Wh_Get/SetBinaryValue` are one
+  file per key (`value_<key>.bin`); `Wh_SetFunctionHook` wraps `WhSetFunctionHook`.
+- **Crash guard:** TaskbarCreated does not tell about host restarts, so the worker counts hosts
+  gone within 90 s of their injection (two within 3 min: `WM_AWA_STYLERCRASH`, the UI thread turns
+  `start_styler` off, saves, balloon). A non-default layout makes the mod `ExitProcess` the host
+  (upstream relies on being loaded at process start; a late injection is never the initial
+  thread), so the guard is also what stops that relaunch loop; the Layout help says so.
+- **Injector not shared:** `startmenustyler.cpp` is a copy of `explorerstyler.cpp`'s injector
+  (process names, signal files, ACLs; a failed or suspended host is retried on its next foreground
+  event after 20 s; `Foreground` filters by class `Windows.UI.Core.CoreWindow`, then image name).
+  Merging the two after the live check avoids touching the reviewed Explorer code now.
+- **Themes:** `ProWindows Glass` (default) and `ProWindows` share one target list (modelled on
+  TintedGlass, both layouts) and read constants `pwBg pwBgSoft pwHover pwEdge pwRadius pwText`,
+  which the Look rows write as `styleConstants[0..5]` of the managed ini block (whole values: the
+  mod expands a constant when it is read). No search-WebView styles. Look rows: Tint (black,
+  graphite, steel, accent), Tint opacity (Glass), Highlight (metal, accent, tint), Corner radius
+  0-12, Text (white, light grey).

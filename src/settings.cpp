@@ -180,6 +180,8 @@ bool BindsEqual(const std::vector<Keybind>& a, const std::vector<Keybind>& b) {
     X(explorerStyler) X(explorerTheme) X(explorerEffect)                            \
     X(explorerTint) X(explorerTintOpacity) X(explorerHighlight) X(explorerRadius)   \
     X(explorerText) X(explorerRegion) X(explorerXamlDiag)                           \
+    X(startStyler) X(startTheme) X(startLayout) X(startTint) X(startTintOpacity)    \
+    X(startHighlight) X(startRadius) X(startText)                                   \
     X(startMinimized) X(debug)
 
 bool ArraysEqual(const Config& a, const Config& b) {
@@ -359,6 +361,10 @@ const PageDef g_pages[] = {
       L"File Explorer's look: a theme for the address bar, command bar, tabs and "
       L"background, and styles of your own.",
       BuildExplorerPage, ResetExplorerPage, nullptr, 0, nullptr },
+    { L"Start",
+      L"The Start menu's look: a theme for the Start menu and the search flyout, "
+      L"how glassy it is, and styles of your own.",
+      BuildStartPage, ResetStartPage, nullptr, 0, nullptr },
     { L"General",
       L"How ProWindows starts, where its settings are kept, and what to reach for "
       L"when something on the desktop looks wrong.",
@@ -384,7 +390,7 @@ enum Hot {
 // The tab bar's order (PLAN-1.6 2.4). The categories themselves keep their
 // PageIndex numbers, which callers outside the window use.
 const int kTabOrder[PAGE_COUNT] = { PAGE_WELCOME, PAGE_LAYOUT, PAGE_BEHAVIOUR, PAGE_GENERAL, PAGE_SHORTCUTS,
-                                    PAGE_APPS, PAGE_SEARCH, PAGE_MONITOR, PAGE_CLOCK, PAGE_TIMER, PAGE_EXPLORER };
+                                    PAGE_APPS, PAGE_SEARCH, PAGE_MONITOR, PAGE_CLOCK, PAGE_TIMER, PAGE_EXPLORER, PAGE_START };
 constexpr int kMaxSub = 8;
 
 struct Geometry {

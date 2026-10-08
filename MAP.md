@@ -560,6 +560,20 @@ appended at the end of the numbering.
     (`// ProWindows:`) and `src\explorer\fix_winrt.ps1` qualifies `Windows::` in the generated
     headers. A failure in that step is a warning in `build.bat`, never an error. The DLL is
     locked while Explorer has it loaded; rebuild it with ProWindows closed (or styling off).
+97. **Start menu styling is the same design for AppContainer hosts.** `src\startmenustyler.*` +
+    `ProWindows_startmenu.dll` (`src\startmenu\styler.cpp`, `build_startmenu.bat`, Windows.UI.Xaml
+    from the SDK, the Explorer shim compiled with `PW_STYLER=L"startmenu"` and
+    `PW_STYLER_PACKAGED`). StartMenuExperienceHost / SearchHost are packaged, so ProWindows first gives
+    S-1-15-2-1 and S-1-15-2-2 read+execute on the DLL file and read/write/delete (inheritable) on
+    `%APPDATA%\ProWindows\startmenu-styler\`, which holds everything the DLL touches (ini, log,
+    stored values, signals) and is passed to `StylerStart` (inside a container `%APPDATA%` is
+    virtualised). Named events do not cross the container boundary, so Reload/Stop/"styled" are
+    files there: `reload.<pid>`, `stop.<pid>`, and `alive.<pid>` held open delete-on-close by the DLL;
+    the DLL sleeps on a directory change notification. The crash guard is the worker noticing a
+    host gone within 90 s of its injection (twice within 3 min: `WM_AWA_STYLERCRASH`, the UI thread
+    turns `start_styler` off). Everything else is 92-96: worker thread, Stop on quit, never unloaded,
+    shared ini block (`styleConstants[0..5]` are ProWindows' while a ProWindows theme is chosen),
+    no telemetry. The Start fields are in `AWA_EDITED_FIELDS` (78).
 
 ### The search bar
 

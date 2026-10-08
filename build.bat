@@ -101,6 +101,8 @@ cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UN
        "%ROOT%src\settings_welcome.cpp" ^
        "%ROOT%src\settings_explorer.cpp" ^
        "%ROOT%src\explorerstyler.cpp" ^
+       "%ROOT%src\settings_startmenu.cpp" ^
+       "%ROOT%src\startmenustyler.cpp" ^
        "%ROOT%src\dragguide.cpp" ^
        "%ROOT%src\appicon.cpp" ^
        "%ROOT%src\launcher.cpp" ^
@@ -147,6 +149,18 @@ if "%CLERR%"=="0" (
     if errorlevel 1 (
         echo [warn] ProWindows_explorer.dll was not built - see build\explorer_build.log.
         echo        The tiler works without it; File Explorer styling will be unavailable.
+    )
+)
+
+REM ---------------------------------------------------------------- Start menu styler
+REM  ProWindows_startmenu.dll - loaded into StartMenuExperienceHost.exe and
+REM  SearchHost.exe. Same rule: a failure is a warning only.
+if "%CLERR%"=="0" (
+    echo       plus ProWindows_startmenu.dll...
+    call "%ROOT%build_startmenu.bat" "%OUTDIR%" >"%OUTDIR%\startmenu_build.log" 2>&1
+    if errorlevel 1 (
+        echo [warn] ProWindows_startmenu.dll was not built - see build\startmenu_build.log.
+        echo        The tiler works without it; Start menu styling will be unavailable.
     )
 )
 
