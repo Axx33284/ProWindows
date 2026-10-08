@@ -1682,10 +1682,10 @@ LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (wp == kTimerMeters) {
-                if (IsWindowVisible(wnd) && GetForegroundWindow() == wnd) {
-                    ReadMeters(true);
-                    InvalidateRect(wnd, &g_geo.right, FALSE);
-                }
+                // Runs only while the window is active (WM_ACTIVATE): cached
+                // getters, no window walk - that one is taken on activation.
+                ReadMeters(false);
+                InvalidateRect(wnd, &g_geo.right, FALSE);
                 return 0;
             }
             if (wp == kTimerAnim) {
@@ -1705,6 +1705,13 @@ LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_ACTIVATE:
             if (LOWORD(wp) == WA_INACTIVE && g_captureRow >= 0 && !ui::ModalOpen()) CancelCapture();
+            // The meter tick exists only while the window is in front and shown.
+            if (LOWORD(wp) == WA_INACTIVE || IsIconic(wnd)) {
+                KillTimer(wnd, kTimerMeters);
+            } else {
+                ReadMeters(true);
+                SetTimer(wnd, kTimerMeters, 1000, nullptr);
+            }
             Invalidate();
             break;
 
@@ -1778,6 +1785,7 @@ LRESULT CALLBACK SettingsProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DESTROY:
             EndCapture();
             KillTimer(wnd, kTimerStatus);
+            KillTimer(wnd, kTimerMeters);
             KillTimer(wnd, kTimerAnim);
             g_animating = false;
             g_wnd = nullptr;
@@ -1893,8 +1901,7 @@ HWND SettingsOpen(HINSTANCE inst) {
         BuildRows(false);
         g_list.SetActive(false);
         SetTimer(wnd, kTimerStatus, 700, nullptr);
-        SetTimer(wnd, kTimerMeters, 1000, nullptr);
-        ReadMeters(true);
+        ReadMeters(true);       // the meter timer starts with WM_ACTIVATE
         g_pageShownAt = GetTickCount64();
         Animate();
     } else {

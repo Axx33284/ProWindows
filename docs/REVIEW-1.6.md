@@ -111,3 +111,37 @@ Fold into 3.2: invalidate only the capture row's rectangle, at the pulse's own r
 - **Idle trim** (`main.cpp:1052`, inv. 67): skipped while settings, the search bar or a drag is up;
   `SettingsHide` / the search bar's idle release re-arm it.
 - **`appicon.cpp`**: unchanged since `87a8084`; no new findings.
+
+---
+
+## C. Optimisation numbers (Phase 3)
+
+The running tiler was not started for these (it rearranges the desktop), so there are no
+private-bytes / GDI-object columns for the live app; the figures are from harnesses and a
+`RowFocus` micro-bench linking only `theme.cpp`.
+
+- **3.1 backdrop.** Already gone before this pass: no `RenderBackdrop` or backdrop cache remains
+  in `src/`, inv. 72 is marked retired in MAP. Nothing changed; the ~33 MB (4K) allocation no
+  longer exists.
+- **3.2 focus.** The 15 ms `kTimerAnim` already kills itself when `g_list.Tick()` reports nothing
+  fading (and the page-in/toast windows are over). New: `Glow` tells `BlendLayer` which span of
+  its layer is fully transparent (deeper than `inner` from every edge) and the per-pixel loop
+  skips it. `RowFocus` at 840x60, 96 dpi, t = 0.7, 300 frames: **0.558 ms to 0.463 ms** per
+  frame; the pixels are byte-identical (same checksum before and after).
+- **3.3 icon cache.** Already landed: `kCacheVersion` 4, one size (the majority size) per save,
+  `last_used` stamp per entry, entries older than 30 days dropped on save. `tests\iconcache.bat`
+  green.
+- **3.4 mouse.** Already landed: `main.cpp` installs an out-of-context `SetWinEventHook`
+  (`OBJID_CURSOR`) only while focus-follows-mouse is on; each event arms the one-shot
+  `TIMER_MOUSE`. No 120 ms poll remains.
+- **3.5 meters.** The 1 s `kTimerMeters` ran for the whole life of the settings window, with an
+  `EnumWindows` on every tick. Now it is started by `WM_ACTIVATE` (active, not minimised) and
+  killed on deactivate and on destroy; a tick reads the cached getters only (`ReadMeters(false)`);
+  the top-level window count is taken once per activation. An unfocused settings window runs no
+  meter timer at all.
+- **3.6 binary.** `PW_dev.exe` 1,132,032 bytes: `.text` 805 KB, `.rdata` 267 KB, `.data` 35 KB,
+  `.pdata` 23 KB, `.rsrc` 6 KB. Top `.text` contributors from the `/MAP` (symbol-gap sizes, so
+  approximate): `wm` 66 KB, `settings` 56 KB, `main` 39 KB, `config` 39 KB (`Config::LoadFromFile`
+  alone 12.6 KB), `timer` 38 KB, `rowlist` 35 KB, `launcher` 33 KB, `clockpaint` 32 KB,
+  `settings_pages` 31 KB, `monpaint` 29 KB; CRT float parse/format (`atof` 7.8 KB, `pow` 5.8 KB,
+  `cfout`) is the largest foreign block. Nothing obviously dead; no change made.

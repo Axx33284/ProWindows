@@ -249,16 +249,16 @@ Measure before and after each change: private bytes and GDI/USER objects of the 
 (Task Manager columns or `GetProcessMemoryInfo` / `GetGuiResources` in a probe), and `monshot
 --bench` for paint cost. Record the numbers in REVIEW-1.6 §C.
 
-- [ ] **3.1** **Drop the backdrop picture.** `RenderBackdrop` renders a DIB at the *monitor's*
+- [x] **3.1** **Drop the backdrop picture.** `RenderBackdrop` renders a DIB at the *monitor's*
   size (a 4K screen is ~33 MB) and caches up to three (inv. 72). The Requiem screen is flat black:
   fill with `Bg`, draw at most a cheap gradient vignette. Removes the biggest allocation the
   settings window and the search bar make. Retire inv. 72 in MAP.
-- [ ] **3.2** **Cheaper focus.** The amber `Glow` is per-pixel alpha work every animation frame
+- [x] **3.2** **Cheaper focus.** The amber `Glow` is per-pixel alpha work every animation frame
   (15 ms timer while fading); the metal bar is gradients. Confirm the fade timer stops when no
   row is fading.
-- [ ] **3.3** **Icon cache.** 780 KB for ≤ 512 icons. Store only the size the search bar draws,
+- [x] **3.3** **Icon cache.** 780 KB for ≤ 512 icons. Store only the size the search bar draws,
   and drop entries not seen for 30 days on save. Bump `kCacheVersion`; run `tests\iconcache.bat`.
-- [ ] **3.4** **Focus-follows-mouse polls** every 120 ms (`main.cpp` `TIMER_MOUSE`), against the
+- [x] **3.4** **Focus-follows-mouse polls** every 120 ms (`main.cpp` `TIMER_MOUSE`), against the
   "never polls" rule. Replace with the `WM_MOUSE`-hook-only-while-needed pattern `moddrag.cpp`
   already uses, or `EVENT_OBJECT_LOCATIONCHANGE` on the cursor — O to choose; S implements.
   **O chose (2026-10-08):** `EVENT_OBJECT_LOCATIONCHANGE` / `OBJID_CURSOR` through an
@@ -266,9 +266,9 @@ Measure before and after each change: private bytes and GDI/USER objects of the 
   arms the one coalescing timer. No `WH_MOUSE_LL`: it adds latency to every mouse move on the
   machine. If `main.cpp` already does this (grep "the cursor arms one timer"), only remove
   what still polls.
-- [ ] **3.5** **Meters must not cost.** The 1 s meter timer runs only while the settings window
+- [x] **3.5** **Meters must not cost.** The 1 s meter timer runs only while the settings window
   is visible and in front; getters read cached numbers, never walk anything.
-- [ ] **3.6** **Binary size.** `dumpbin /headers` and a map file (`/MAP`) on `ProWindows.exe`
+- [x] **3.6** **Binary size.** `dumpbin /headers` and a map file (`/MAP`) on `ProWindows.exe`
   (1.0 MB, already `/O1 /GL /LTCG /OPT:REF,ICF`). Report the top 10 contributors; act only on
   something obviously dead.
 - [ ] **3.7 (O)** Review 3.1–3.6 for regressions (idle trim inv. 67, thread rules).
