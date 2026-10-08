@@ -277,13 +277,13 @@ struct Config {
     // explorer-styler.ini); the effect is "" (the theme's own), blur,
     // acrylic, mica, micaalt or none.
     bool         explorerStyler = true;
-    std::wstring explorerTheme  = L"ProWindows";
+    std::wstring explorerTheme  = L"ProWindows Glass";
     std::wstring explorerEffect;
     // The Look page: read by the two ProWindows themes only. Tint is the
     // fill colour, its opacity counts for ProWindows Glass only; highlight is
     // 0 metal gradient, 1 accent colour, 2 tint; text is 0 white, 1 light grey.
     COLORREF     explorerTint        = RGB(0, 0, 0);
-    int          explorerTintOpacity = 60;
+    int          explorerTintOpacity = 25;
     int          explorerHighlight   = 0;
     int          explorerRadius      = 4;
     int          explorerText        = 0;
