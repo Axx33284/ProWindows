@@ -543,10 +543,26 @@ void Sync(bool reload) {
     }
 }
 
+// A reload makes the styler drop its XAML watcher and attach a new one, which
+// it does from a thread of its own. A second reload while that thread is still
+// attaching crashed Explorer inside Microsoft.UI.Xaml.dll - clicking through
+// the theme choice in Settings does exactly that, an Apply every half second.
+// So a reload waits until the requests have been quiet for this long and then
+// goes out once. Stop and quit are not held up.
+constexpr DWORD kSettleMs = 1500;
+
+void WaitForQuiet() {
+    while ((g_requests.load() & (REQ_SYNC | REQ_RELOAD)) &&
+           !(g_requests.load() & (REQ_STOP | REQ_QUIT)) &&
+           WaitForSingleObject(g_wake, kSettleMs) == WAIT_OBJECT_0) {
+    }
+}
+
 DWORD WINAPI WorkerProc(LPVOID) {
     for (;;) {
         WaitForSingleObject(g_wake, INFINITE);
         for (;;) {
+            WaitForQuiet();
             const unsigned bits = g_requests.exchange(0);
             if (!bits) break;
             if (bits & REQ_QUIT) return 0;

@@ -931,6 +931,18 @@ bool Config::LoadFromFile(const std::wstring& path) {
         }
     }
 
+    // Before 7 the File Explorer default was the opaque ProWindows theme at a
+    // 60 % tint, and Apply writes every field, so anyone who had pressed Apply
+    // kept it for good and never saw the glass default. The values that were
+    // only ever the old defaults move once. Start menu styling comes back on
+    // too: the 1.6 test builds' crash guard turned it off when Explorer itself
+    // crashed and took the Start menu down with it, which was not its doing.
+    if (fileVersion < 7) {
+        if (explorerTheme == L"ProWindows") explorerTheme = L"ProWindows Glass";
+        if (explorerTintOpacity == 60)      explorerTintOpacity = 25;
+        startStyler = true;
+    }
+
     return true;
 }
 

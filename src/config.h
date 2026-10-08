@@ -361,8 +361,9 @@ struct Config {
     // binding explicitly (see MAP.md invariant 6), so without this a newly
     // introduced action would never reach anyone who already had a config.
     // 4 adds togglesplit, swapsplit, focuslast and the two relative-workspace
-    // bindings. 6 adds win+w for the clock panel.
-    static constexpr int kConfigVersion = 6;
+    // bindings. 6 adds win+w for the clock panel. 7 moves File Explorer from
+    // the opaque ProWindows theme to ProWindows Glass (see LoadFromFile).
+    static constexpr int kConfigVersion = 7;
 
     // Rewrites `path` from the current values, every binding included - a bind
     // added by hand survives because it was parsed into `binds` on load, not

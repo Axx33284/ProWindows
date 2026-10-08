@@ -633,8 +633,22 @@ void StopAll() {
 
 // Hosts that went away soon after we injected them. Two within the memory
 // window trip the guard. Under g_mutex.
+// The shell's process, as last seen. When Explorer itself crashes the Start
+// menu hosts go down with it; those exits are Explorer's, not the styler's, and
+// counting them turned Start menu styling off whenever File Explorer crashed.
+DWORD g_shellPid = 0;
+
+DWORD ShellPid() {
+    DWORD pid = 0;
+    if (HWND shell = GetShellWindow()) GetWindowThreadProcessId(shell, &pid);
+    return pid;
+}
+
 bool NoteGoneHosts(const std::vector<DWORD>& pids) {
     const ULONGLONG now = GetTickCount64();
+    const DWORD shell = ShellPid();
+    const bool shellRestarted = !shell || (g_shellPid && shell != g_shellPid);
+    g_shellPid = shell;
     FILETIME nowFt;
     GetSystemTimeAsFileTime(&nowFt);
     for (auto it = g_injectedAt.begin(); it != g_injectedAt.end();) {
@@ -651,7 +665,8 @@ bool NoteGoneHosts(const std::vector<DWORD>& pids) {
             exitedAt = now - std::min(ago, now);
         }
         if (proc) CloseHandle(proc);
-        if (exitedAt - std::min(exitedAt, it->second.at) < kCrashWindowMs) g_earlyExits.push_back(exitedAt);
+        if (!shellRestarted && exitedAt - std::min(exitedAt, it->second.at) < kCrashWindowMs)
+            g_earlyExits.push_back(exitedAt);
         g_styled.erase(it->first);
         g_failed.erase(it->first);
         it = g_injectedAt.erase(it);
@@ -781,10 +796,23 @@ void Sync(bool reload) {
     }
 }
 
+// The same settling as the Explorer styler (see explorerstyler.cpp): a burst of
+// Applies reaches the hosts as one reload, never as a reload landing while the
+// previous one is still attaching its XAML watcher.
+constexpr DWORD kSettleMs = 1500;
+
+void WaitForQuiet() {
+    while ((g_requests.load() & (REQ_SYNC | REQ_RELOAD)) &&
+           !(g_requests.load() & (REQ_STOP | REQ_QUIT)) &&
+           WaitForSingleObject(g_wake, kSettleMs) == WAIT_OBJECT_0) {
+    }
+}
+
 DWORD WINAPI WorkerProc(LPVOID) {
     for (;;) {
         WaitForSingleObject(g_wake, INFINITE);
         for (;;) {
+            WaitForQuiet();
             const unsigned bits = g_requests.exchange(0);
             if (!bits) break;
             if (bits & REQ_QUIT) return 0;
@@ -839,6 +867,11 @@ void StartMenuStylerApplyConfig() {
 
 void StartMenuStylerTaskbarCreated() {
     if (!g_cfg || !g_cfg->startStyler || !g_thread) return;
+    {
+        // A new shell: whatever the hosts did around its restart was not ours.
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_earlyExits.clear();
+    }
     Request(REQ_SYNC | REQ_DELAYED);
 }
 
