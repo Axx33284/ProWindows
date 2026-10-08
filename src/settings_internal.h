@@ -98,6 +98,9 @@ void PreviewClock(HDC dc, const RECT& area);
 void BuildExplorerPage(std::vector<ui::Row>& rows);
 void ResetExplorerPage();
 
+void BuildStartPage(std::vector<ui::Row>& rows);
+void ResetStartPage();
+
 void BuildGeneralPage(std::vector<ui::Row>& rows);
 void ResetGeneralPage();
 

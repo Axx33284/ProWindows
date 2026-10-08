@@ -94,6 +94,10 @@ void BuildWelcomePage(std::vector<Row>& rows) {
         L"File Explorer in the ProWindows look: black address bar and command bar, metal "
         L"highlights. On by default; pick another theme or turn it off on the Explorer tab.",
         L"Explorer tab", []() { SettingsOpenTab(PAGE_EXPLORER); }));
+    rows.push_back(ui::Action(L"trystart", L"Start menu styling",
+        L"The Start menu and its search in the ProWindows look: black, or glass with the "
+        L"desktop blurred behind it. On by default; choose a theme or turn it off on the Start tab.",
+        L"Start tab", []() { SettingsOpenTab(PAGE_START); }));
     rows.push_back(ui::Action(L"tryfolder", L"Settings folder",
         L"Opens the folder that holds config.ini and the other files ProWindows keeps. "
         L"Copy it to move your setup to another machine.",
@@ -169,6 +173,10 @@ void BuildWelcomePage(std::vector<Row>& rows) {
         L"Restyles File Explorer's address bar, command bar and tabs while ProWindows runs, "
         L"and puts them back when it quits. Choose the theme or turn it off on the Explorer tab.",
         L"Explorer tab", []() { SettingsOpenTab(PAGE_EXPLORER); }));
+    rows.push_back(ui::Action(L"ovstart", L"Start menu styling",
+        L"Restyles the Start menu and the search flyout while ProWindows runs, and puts them "
+        L"back when it quits. Choose the theme, how glassy it is, or turn it off on the Start tab.",
+        L"Start tab", []() { SettingsOpenTab(PAGE_START); }));
     rows.push_back(ui::Action(L"ovsettings", L"Look and behaviour",
         L"Styles, colours, size and what each overlay shows are on the Monitor and Clock tabs.",
         L"Clock tab", []() { SettingsOpenTab(PAGE_CLOCK); }));

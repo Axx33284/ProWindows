@@ -279,6 +279,29 @@ bool Config::SaveToFile(const std::wstring& path) const {
     fwprintf(f, L"# explorer_effect: empty (the theme's own), blur, acrylic, mica, micaalt, none.\n");
     fwprintf(f, L"explorer_effect  = %s\n\n", explorerEffect.c_str());
 
+    fwprintf(f, L"# ------------------------------------------------------------ Start menu\n");
+    fwprintf(f, L"# Styles the Start menu and the search flyout by loading\n");
+    fwprintf(f, L"# ProWindows_startmenu.dll into StartMenuExperienceHost.exe and SearchHost.exe\n");
+    fwprintf(f, L"# (a port of the Windhawk 'Windows 11 Start Menu Styler' mod). It is taken out\n");
+    fwprintf(f, L"# again when ProWindows quits. Your own styles go in\n");
+    fwprintf(f, L"# startmenu-styler\\startmenu-styler.ini beside this file.\n");
+    fwprintf(f, L"start_styler     = %s\n", Bool(startStyler));
+    fwprintf(f, L"# start_theme: 'ProWindows', 'ProWindows Glass', or the name of one of the mod's\n");
+    fwprintf(f, L"# themes (TranslucentStartMenu, TintedGlass ...); empty for none.\n");
+    fwprintf(f, L"start_theme      = %s\n", startTheme.c_str());
+    fwprintf(f, L"# start_layout: empty (the theme's), default, disableNewLayoutKeepPhoneLink,\n");
+    fwprintf(f, L"# legacyClassicLayout, forceNewLayout, newLayoutSideBySide. A change other\n");
+    fwprintf(f, L"# than to or from the Windows default makes the Start menu host restart.\n");
+    fwprintf(f, L"start_layout     = %s\n", startLayout.c_str());
+    fwprintf(f, L"# The look of the two ProWindows themes. tint: 0 black, 1 graphite, 2 steel,\n");
+    fwprintf(f, L"# 3 accent colour. tint_opacity: percent, Glass only. highlight: 0 metal\n");
+    fwprintf(f, L"# gradient, 1 accent, 2 tint. radius: 0-12 px. text: 0 white, 1 light grey.\n");
+    fwprintf(f, L"start_tint         = %d\n", startTint);
+    fwprintf(f, L"start_tint_opacity = %d\n", startTintOpacity);
+    fwprintf(f, L"start_highlight    = %d\n", startHighlight);
+    fwprintf(f, L"start_radius       = %d\n", startRadius);
+    fwprintf(f, L"start_text         = %d\n\n", startText);
+
     fwprintf(f, L"# ------------------------------------------------------------ search bar\n");
     fwprintf(f, L"# What the search bar looks through besides installed apps.\n");
     fwprintf(f, L"search_files    = %s\n", Bool(searchFiles));

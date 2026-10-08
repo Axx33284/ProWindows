@@ -60,6 +60,10 @@ enum : UINT {
     // the overlay window; see monitor.cpp. The reading itself travels under
     // a lock, not in the message, so a late one cannot outlive its data.
     WM_AWA_SAMPLED   = WM_APP + 9,
+    // The Start menu styler's worker saw its hosts exit twice right after an
+    // injection and wants styling turned off. Posted to the main window,
+    // because only the UI thread changes the config; see startmenustyler.h.
+    WM_AWA_STYLERCRASH = WM_APP + 10,
 };
 
 // Timers

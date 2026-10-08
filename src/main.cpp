@@ -11,6 +11,7 @@
 #include "clock.h"
 #include "timer.h"
 #include "explorerstyler.h"
+#include "startmenustyler.h"
 #include "alarm.h"
 #include "launcher.h"
 #include "dragguide.h"
@@ -531,6 +532,7 @@ static void ApplyLiveConfig() {
     TimerApplyConfig();
     SearchApplyConfig();
     ExplorerStylerApplyConfig();
+    StartMenuStylerApplyConfig();
 
     ApplyFocusFollows();
 
@@ -796,7 +798,10 @@ static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
                                   LONG idObject, LONG idChild, DWORD, DWORD) {
     if (!hwnd || idObject != OBJID_WINDOW || idChild != CHILDID_SELF) return;
     if (g_shuttingDown) return;
-    if (event == EVENT_SYSTEM_FOREGROUND) ExplorerStylerForeground(hwnd);
+    if (event == EVENT_SYSTEM_FOREGROUND) {
+        ExplorerStylerForeground(hwnd);
+        StartMenuStylerForeground(hwnd);
+    }
     g_wm.OnWinEvent(event, hwnd);
 }
 
@@ -1072,6 +1077,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         MonitorReattach();
         ClockReattach();
         ExplorerStylerTaskbarCreated();
+        StartMenuStylerTaskbarCreated();
         return 0;
     }
 
@@ -1108,6 +1114,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // does: between passes, never inside one.
         case WM_AWA_IPC:
             IpcExecute(wp);
+            return 0;
+
+        // The Start menu hosts kept exiting right after an injection.
+        case WM_AWA_STYLERCRASH:
+            StartMenuStylerCrashTripped();
             return 0;
 
         case WM_AWA_RETILE:
@@ -1539,6 +1550,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
     ClockInit(inst, &g_cfg);
     TimerInit(inst, &g_cfg);
     ExplorerStylerInit(&g_cfg);
+    StartMenuStylerInit(&g_cfg, g_wnd);
     // MonitorInit and ClockInit show their overlays straight from the config;
     // if a game is already running they must not.
     UpdateOverlayVisibility();
@@ -1589,6 +1601,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
         g_powerNotify = nullptr;
     }
     ExplorerStylerShutdown();   // first: Explorer needs the longest to let go
+    StartMenuStylerShutdown();
     MonitorShutdown();
     TimerShutdown();
     ClockShutdown();
