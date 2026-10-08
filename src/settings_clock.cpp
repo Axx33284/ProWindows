@@ -11,7 +11,6 @@ using ui::Row;
 
 namespace {
 bool On() { return Edit().clockEnabled; }
-bool TimerOn() { return Edit().timerShown; }
 }
 
 void BuildClockPage(std::vector<Row>& rows) {
@@ -48,41 +47,6 @@ void BuildClockPage(std::vector<Row>& rows) {
     add(ui::Toggle(L"date", L"Date", L"Shows the date under the time.", &e.clockDate, &s.clockDate));
     add(ui::Toggle(L"weekday", L"Day of the week", L"Shows the day's name with the date.",
         &e.clockWeekday, &s.clockWeekday));
-
-    // The timer overlay has no page of its own; its settings live with the
-    // clock because both are about the time. Not tied to the clock being on.
-    rows.push_back(ui::Section(L"Clock panel"));
-    rows.push_back(ui::Toggle(L"timershown", L"Show the clock panel",
-        L"The clock, alarms, timers and stopwatch in one panel that stays on your screen. Drag it "
-        L"anywhere; alarms and timers keep running while it is hidden.",
-        &e.timerShown, &s.timerShown));
-    {
-        Row r = ui::Toggle(L"timerpinned", L"Pin in place",
-            L"Locks it where it is: it cannot be dragged, and clicks go straight through to "
-            L"whatever is underneath. Stop a ringing alarm from the tray menu.",
-            &e.timerPinned, &s.timerPinned);
-        r.enabled = TimerOn;
-        rows.push_back(r);
-    }
-    rows.push_back(ui::Action(L"timerpos", L"Position",
-        L"Puts the clock panel back where it first opens. Takes effect at once.",
-        L"Reset", []() {
-            Config& cfg = AppConfig();
-            cfg.timerX = INT_MIN;
-            cfg.timerY = INT_MIN;
-            TimerApplyConfig();
-            AppSaveConfig();
-            SettingsToast(L"The clock panel is back where it starts");
-        }));
-    rows.push_back(ui::ChoiceOf(L"timertick", L"Clock tick",
-        L"A soft tick while a timer or the stopwatch runs: every second, or once a minute "
-        L"as the seconds come round to zero. Never while the alarm is sounding.",
-        &e.timerTick, &s.timerTick, { 0, 1, 2 }, { L"Off", L"Every second", L"Every minute" }));
-    rows.push_back(ui::Toggle(L"timeralarm", L"Alarm",
-        L"Plays a sound for up to a minute when a timer ends (alarms have their own sound switch), and shows the panel without "
-        L"taking the keyboard. Off shows only a notification. Any key or click in the panel, or "
-        L"the tray menu, stops the sound.",
-        &e.timerAlarm, &s.timerAlarm));
 
     rows.push_back(ui::Page(L"Look"));
     rows.push_back(ui::Section(L"Look"));
@@ -127,8 +91,6 @@ void ResetClockPage() {
     e.clockHours24 = d.clockHours24;   e.clockSeconds = d.clockSeconds;
     e.clockDate = d.clockDate;         e.clockWeekday = d.clockWeekday;
     e.clockOpacity = d.clockOpacity;   e.clockScale = d.clockScale;
-    e.timerShown = d.timerShown;       e.timerPinned = d.timerPinned;
-    e.timerTick = d.timerTick;        e.timerAlarm = d.timerAlarm;
 }
 
 void PreviewClock(HDC dc, const RECT& area) {
