@@ -37,7 +37,7 @@ namespace awa {
 enum : UINT {
     IDM_TILING = 100, IDM_GAPS, IDM_RETILE, IDM_RELOAD, IDM_EDITCFG,
     IDM_OPENDIR, IDM_AUTOSTART, IDM_RESTOREALL, IDM_EXIT,
-    IDM_SETTINGS, IDM_SHORTCUTS, IDM_MONITOR, IDM_MONITOR_PIN, IDM_ELEVATE,
+    IDM_SETTINGS, IDM_WELCOME, IDM_SHORTCUTS, IDM_MONITOR, IDM_MONITOR_PIN, IDM_ELEVATE,
     IDM_ELEVAUTO, IDM_DIAG, IDM_CLOCK, IDM_CLOCK_PIN, IDM_MONITOR_SETTINGS,
     IDM_CLOCK_SETTINGS, IDM_TIMER, IDM_TIMER_PIN, IDM_TIMER_STOP, IDM_TIMER_SETTINGS,
     IDM_LAYOUT_BASE = 200,
@@ -942,6 +942,7 @@ static void ShowTrayMenu() {
     // a short list of things rather than a long list of switches.
     AppendMenuW(menu, MF_STRING, IDM_SETTINGS, L"Settings...");
     SetMenuDefaultItem(menu, IDM_SETTINGS, FALSE);
+    AppendMenuW(menu, MF_STRING, IDM_WELCOME, L"Welcome and shortcuts...");
     AppendMenuW(menu, MF_STRING, IDM_SHORTCUTS, L"Keyboard shortcuts...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
@@ -1150,6 +1151,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_COMMAND:
             switch (LOWORD(wp)) {
                 case IDM_SETTINGS:  SettingsOpen(g_inst); break;
+                case IDM_WELCOME:   SettingsOpenTab(PAGE_WELCOME); break;
                 case IDM_SHORTCUTS: SettingsOpenTab(PAGE_SHORTCUTS); break;
                 case IDM_MONITOR:
                     g_cfg.monitorEnabled = !g_cfg.monitorEnabled;
@@ -1540,7 +1542,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdLine, int) {
     const bool startHidden = g_cfg.startMinimized ||
                              (cmdLine && (wcsstr(cmdLine, L"--tray") ||
                                           wcsstr(cmdLine, L"/tray")));
-    if (!startHidden) SettingsOpen(inst);
+    // Opening the app lands on Welcome; a first run shows it even when hidden.
+    if (!startHidden || firstRun) SettingsOpenTab(PAGE_WELCOME);
     else TrayBalloon(kAppName, L"Running in the tray - click the icon for settings.");
 
     if (firstRun && startHidden)

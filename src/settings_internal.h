@@ -98,6 +98,10 @@ void PreviewClock(HDC dc, const RECT& area);
 void BuildGeneralPage(std::vector<ui::Row>& rows);
 void ResetGeneralPage();
 
+void BuildWelcomePage(std::vector<ui::Row>& rows);
+// The description the Shortcuts page gives an action; the Welcome page reuses it.
+const wchar_t* ActionHelp(Action a);
+
 // ---------------------------------------------------------------- shared bits
 struct ModChoice { const wchar_t* label; UINT mask; };
 extern const ModChoice kModChoices[6];

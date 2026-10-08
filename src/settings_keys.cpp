@@ -176,6 +176,8 @@ Row TakeoverRow() {
 
 } // namespace
 
+const wchar_t* ActionHelp(Action a) { return HelpFor(a); }
+
 // ================================================================ Shortcuts
 int ShortcutIssues() {
     int n = 0;

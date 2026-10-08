@@ -97,6 +97,7 @@ cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UN
        "%ROOT%src\clockpaint.cpp" ^
        "%ROOT%src\clock.cpp" ^
        "%ROOT%src\settings_clock.cpp" ^
+       "%ROOT%src\settings_welcome.cpp" ^
        "%ROOT%src\dragguide.cpp" ^
        "%ROOT%src\appicon.cpp" ^
        "%ROOT%src\launcher.cpp" ^

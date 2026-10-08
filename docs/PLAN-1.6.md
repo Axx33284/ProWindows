@@ -493,3 +493,48 @@ default, ctl `timer` shows/hides). Sweep "Win+T" out of `config.h`, `defaults.cp
   `tests\timershot.bat` shoots the overlay (unpinned and pinned) instead of the popup. Green:
   `build.bat PW_dev.exe`, `tests\run.bat`, `tests\timershot.bat`, `tests\uishot.bat`.
 - [ ] **5.D2 (O)** Review the 5.D1 diff.
+
+## Phase 6 — Welcome (user, 2026-10-08)
+
+The user wants opening the app to show what it is and what it can do - Win+S search first -
+for someone who just installed it and for someone who forgot a shortcut. In the app's design.
+
+**Where.** A new settings category, **Welcome**, first in `kTabOrder` (`PAGE_WELCOME`; keep the
+other `PageIndex` numbers stable by appending it to the enum, as the tab order is separate). It
+is built only from existing row kinds (`Section`, `Info`, `Action`, `Page`), so it inherits the
+Requiem look, the right-column description (2.T5) and the footer prompts (inv. 74) for free. No
+Reset (nothing to reset; hide the Reset prompt if the `PageDef` allows a null reset, otherwise a
+no-op). Nothing edited, so nothing joins `AWA_EDITED_FIELDS`.
+
+**When it shows.**
+- Launching the app (the `SettingsOpen(inst)` at start-up in `wWinMain`) lands on Welcome.
+- First run (`firstRun`) opens the settings window on Welcome even when starting hidden.
+- Tray: a new item **"Welcome and shortcuts..."** above "Keyboard shortcuts..." →
+  `SettingsOpenTab(PAGE_WELCOME)`. Tray "Settings..." keeps its current landing tab.
+
+**Pages (sub-tabs).**
+1. **Start here.** Section "ProWindows": an `Info` row saying in one line what it does (tiles
+   every window into a layout, workspaces, overlays), its help a short paragraph. Section
+   "Try these": `Action` rows that *do* the thing - **Search** (value shows the live chord, e.g.
+   Win+S; button "Open" → `LauncherToggle`), **Timer** ("Show" → set `timerShown`, as the tray
+   does), **System monitor**, **Clock** (same, via the existing tray paths), **Settings
+   folder**. Each with help text explaining it. Callbacks copy nothing from the `Row&` after
+   calling out (inv. 79) and refresh with `SettingsRefresh`/`AppRefreshSettings` as the tray does.
+   Section "Mouse": the mod+drag move / resize and drag-to-swap, as `Info` rows.
+2. **Keys.** The shortcuts that matter, grouped by Section - Search and apps; Focus; Move;
+   Workspaces (switch, send - one row each, "Win+1 ... 9" style if the binds are a run);
+   Windows (close, float, fullscreen, sticky); ProWindows (pause tiling, reload, quit). Each an
+   `Info` row: label = `DescribeAction`, value = the **live** chord from `Edit().binds`
+   (`DescribeChord`), "Not set" when unbound; help = `HelpFor(action)` from
+   `settings_keys.cpp`. Last row: `Action` "Change shortcuts" → the Shortcuts tab.
+3. **Overlays.** Monitor, Clock, Timer: what each is, how to show / pin / move it (tray submenu,
+   right-click, drag, Pin in place = click-through), each with a Show action.
+
+Category blurb (the `PageDef` text): "What ProWindows does and the keys that matter. Come back
+here whenever a shortcut slips your mind."
+
+- [x] **6.1 (S)** Build it: `src/settings_welcome.cpp` (register in `build.bat` and every UI
+  `tests\*.bat`), the enum, `g_pages`, `kTabOrder`, start-up and tray changes. `uishot` shoots
+  each Welcome page. README "What's new in 1.6" gets one line; MAP a one-line note under the
+  settings window heading.
+- [ ] **6.2 (O)** Review 6.1 and 5.D1 together.

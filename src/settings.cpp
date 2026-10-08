@@ -352,6 +352,11 @@ const PageDef g_pages[] = {
       L"How ProWindows starts, where its settings are kept, and what to reach for "
       L"when something on the desktop looks wrong.",
       BuildGeneralPage, ResetGeneralPage, nullptr, 0, nullptr },
+    // Appended to match PAGE_WELCOME; the tab bar puts it first. Nothing to reset.
+    { L"Welcome",
+      L"What ProWindows does and the keys that matter. Come back here whenever a "
+      L"shortcut slips your mind.",
+      BuildWelcomePage, nullptr, nullptr, 0, nullptr },
 };
 static_assert(ARRAYSIZE(g_pages) == PAGE_COUNT, "PageIndex is out of step with g_pages");
 
@@ -367,7 +372,7 @@ enum Hot {
 
 // The tab bar's order (PLAN-1.6 2.4). The categories themselves keep their
 // PageIndex numbers, which callers outside the window use.
-const int kTabOrder[PAGE_COUNT] = { PAGE_LAYOUT, PAGE_BEHAVIOUR, PAGE_GENERAL, PAGE_SHORTCUTS,
+const int kTabOrder[PAGE_COUNT] = { PAGE_WELCOME, PAGE_LAYOUT, PAGE_BEHAVIOUR, PAGE_GENERAL, PAGE_SHORTCUTS,
                                     PAGE_APPS, PAGE_SEARCH, PAGE_MONITOR, PAGE_CLOCK };
 constexpr int kMaxSub = 8;
 
@@ -497,6 +502,7 @@ void BuildSearchResults(std::vector<ui::Row>& out) {
         }
     }
     for (int p = 0; p < PAGE_COUNT; ++p) {
+        if (p == PAGE_WELCOME) continue;      // a guide to the other pages; its rows would only echo them
         std::vector<ui::Row> rows;
         g_pages[p].build(rows);
         std::wstring section;
@@ -973,7 +979,7 @@ void PaintFooter(HDC dc) {
             keys.push_back(VK_RETURN);
         }
         if (g_dirty) { prompts.push_back({ L"Ctrl+S", L"Apply" }); keys.push_back('S' | 0x10000); }
-        if (!g_searching) { prompts.push_back({ L"R", L"Reset category" }); keys.push_back('R'); }
+        if (!g_searching && g_pages[g_page].reset) { prompts.push_back({ L"R", L"Reset category" }); keys.push_back('R'); }
         prompts.push_back({ L"Tab", L"Reset all" });
         keys.push_back(VK_TAB);
         prompts.push_back({ L"Esc", (g_zone == Zone::Nav && !g_searching) ? L"Close" : L"Back" });
@@ -1161,7 +1167,7 @@ void ApplyNow() {
 }
 
 void ResetPage() {
-    if (!g_query.empty()) return;
+    if (!g_query.empty() || !g_pages[g_page].reset) return;
     // Held across the question: the tray or an overlay can switch category
     // while it is up, and the one that was named is the one to reset.
     const int page = g_page;
@@ -1202,7 +1208,7 @@ void ResetAll() {
                      L"Nothing is saved until you apply.",
                      L"Reset all", L"Cancel"))
         return;
-    for (int p = 0; p < PAGE_COUNT; ++p) g_pages[p].reset();
+    for (int p = 0; p < PAGE_COUNT; ++p) if (g_pages[p].reset) g_pages[p].reset();
     BuildRows(true);
     UpdateDirty();
     Toast(L"Everything reset to defaults - apply to keep it");

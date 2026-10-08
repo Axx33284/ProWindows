@@ -250,6 +250,7 @@ int wmain(int argc, wchar_t** argv) {
         { PAGE_MONITOR,   L"ui-monitor.png"   },
         { PAGE_CLOCK,     L"ui-clock.png"     },
         { PAGE_GENERAL,   L"ui-general.png"   },
+        { PAGE_WELCOME,   L"ui-welcome.png"   },
     };
     static_assert(ARRAYSIZE(tabs) == PAGE_COUNT, "a category was added and this harness stopped covering it");
     for (const Tab& tab : tabs) {
@@ -257,6 +258,17 @@ int wmain(int argc, wchar_t** argv) {
         Pump(420);
         Capture(wnd, tab.name);
     }
+
+    // The Welcome category's other pages: '3' steps to the next sub-tab.
+    SettingsOpenTab(PAGE_WELCOME);
+    Pump(300);
+    Key(wnd, VK_ESCAPE);
+    Key(wnd, '3');
+    Pump(420);
+    Capture(wnd, L"ui-welcome-keys.png");
+    Key(wnd, '3');
+    Pump(420);
+    Capture(wnd, L"ui-welcome-overlays.png");
 
     RECT client{};
     GetClientRect(wnd, &client);

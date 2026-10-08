@@ -24,6 +24,9 @@ out like the menus of *Resident Evil Requiem*, which opens when you launch it.
 
 ## What's new in 1.6
 
+- **A Welcome page** opens with the app: what ProWindows does, things to try (search, timer,
+  monitor, clock), and the keys that matter, read live from your own shortcuts. Tray: *Welcome
+  and shortcuts...*.
 - **A new look**, after the options screens of *Resident Evil Requiem*: black,
   categories as tabs across the top, pages within a category, a brushed-metal
   bar on the row you are on, and every setting's default shown beside it. See

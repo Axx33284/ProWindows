@@ -44,7 +44,7 @@ cl.exe /nologo /std:c++17 /utf-8 /W4 /EHsc /permissive- /DNDEBUG /DUNICODE /D_UN
     "%ROOT%\src\settings_pages.cpp" "%ROOT%\src\settings_monitor.cpp" ^
     "%ROOT%\src\rowlist.cpp" "%ROOT%\src\modal.cpp" ^
     "%ROOT%\src\monitor.cpp" "%ROOT%\src\monpaint.cpp" "%ROOT%\src\montheme.cpp" ^
-    "%ROOT%\src\clock.cpp" "%ROOT%\src\timer.cpp" "%ROOT%\src\clockpaint.cpp" "%ROOT%\src\clocktheme.cpp" "%ROOT%\src\settings_clock.cpp" ^
+    "%ROOT%\src\clock.cpp" "%ROOT%\src\timer.cpp" "%ROOT%\src\clockpaint.cpp" "%ROOT%\src\clocktheme.cpp" "%ROOT%\src\settings_clock.cpp" "%ROOT%\src\settings_welcome.cpp" ^
     "%ROOT%\src\sysinfo.cpp" "%ROOT%\src\thermal.cpp" ^
     "%ROOT%\src\search.cpp" "%ROOT%\src\launcher.cpp" "%ROOT%\src\appicon.cpp" ^
     "%ROOT%\src\wm.cpp" "%ROOT%\src\layout.cpp" "%ROOT%\src\dragguide.cpp" "%ROOT%\src\moddrag.cpp" ^

@@ -556,6 +556,8 @@ appended at the end of the numbering.
 
 ### Settings window and the look
 
+*Welcome* (`PAGE_WELCOME`, `settings_welcome.cpp`) is the first tab, appended to the enum and put first by `kTabOrder`; it has no reset (null `PageDef::reset`) and is skipped by the settings search.
+
 7. *Retired in 1.5 — see 80.* `res\app.rc` owned the layout while the settings window was a
    dialog; there are no templates now.
 
