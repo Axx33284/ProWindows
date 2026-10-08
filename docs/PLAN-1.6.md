@@ -686,3 +686,99 @@ Save commit.
 - **SystemZone per year.** `GetTimeZoneInformationForYear` + the `...Ex` converters, one rule table
   per year (16 cached, guarded), dropped by `InvalidateSystemZone` on WM_TIMECHANGE and a
   WM_SETTINGCHANGE "intl"/null (main window and panel both).
+
+## Phase 8 — File Explorer styling (user, 2026-10-08)
+
+The user wants Windhawk's **Windows 11 File Explorer Styler** (m417z, GPL-3.0,
+`ramensoftware/windhawk-mods/mods/windows-11-file-explorer-styler.wh.cpp`, v1.7, ~12k lines)
+inside ProWindows, with ProWindows' customisation and theme. Decided with the user:
+**ProWindows becomes GPL-3.0** (port the code, credit the author) and the styler ships **on by
+default** as a DLL loaded into explorer.exe.
+
+### 8.A How the original works (so nobody re-derives it)
+- It runs **inside explorer.exe** (Windhawk injects it). It inline-hooks ~18 functions
+  (`CreateWindowExW`, `DwmSetWindowAttribute`, `DwmExtendFrameIntoClientArea`, `BeginPaint`/
+  `EndPaint`, `CreateCompatibleDC`/`DeleteDC`, `ExtTextOutW`, `FillRect`, `PatBlt`, `Polyline`,
+  `DrawThemeBackground(Ex)`, uxtheme ordinal 126 `DrawTextWithGlow`, `CreateWindowInBand(Ex)`,
+  kernelbase `LoadLibraryExW`) for the Win32 parts and translucency, and catches XAML loading
+  to call `InitializeXamlDiagnosticsEx` with its own **TAP** (`IObjectWithSite` +
+  `IVisualTreeServiceCallback2`) to restyle File Explorer's XAML elements by target/style
+  strings. Themes are data (`Theme { targetStyles, styleConstants, themeResourceVariables,
+  explorerFrameContainerHeight, backgroundTranslucentEffect }`).
+- Windhawk APIs it uses: `Wh_Log`, `Wh_GetStringSetting`/`Wh_FreeStringSetting`,
+  `Wh_GetIntSetting`, `Wh_Get/SetBinaryValue`, `Wh_GetModStoragePath`, `Wh_GetUrlContent`/
+  `Wh_FreeUrlContent`, `WindhawkUtils::SetFunctionHook`, `Wh_ApplyHookOperations`,
+  `WindhawkUtils::SYMBOL_HOOK` + `HookSymbols` (one symbol hook, in
+  `Windows.UI.FileExplorer.dll`, only for `explorerFrameContainerHeight`), and the
+  `Wh_ModInit / AfterInit / Uninit / SettingsChanged` entry points.
+- It needs `winrt/Microsoft.UI.Xaml.h` (WinUI **2**, the system copy Explorer uses).
+
+### 8.B The port
+- `src/explorer/styler.cpp`: the mod source **as close to verbatim as possible** (so upstream
+  fixes can be re-applied), GPL header and credit kept. Delete the **stats timer**
+  (`StartStatsTimer`, the GitHub stats URL) - no telemetry from ProWindows.
+- `src/explorer/windhawk_shim.h/.cpp`: the Windhawk API over ProWindows:
+  - settings from `%APPDATA%\ProWindows\explorer-styler.ini` (written by ProWindows), the
+    mod's setting names as keys; `Wh_Log` → `%APPDATA%\ProWindows\explorer-styler.log`, only
+    when `debug = true` in config.ini;
+  - `Wh_Get/SetBinaryValue` → the same ini (hex); `Wh_GetModStoragePath` →
+    `%APPDATA%\ProWindows\explorer-styler\`;
+  - `Wh_GetUrlContent` → WinHTTP, synchronous (it is only called on the mod's own threads);
+  - `SetFunctionHook` / `Wh_ApplyHookOperations` → **MinHook** (BSD-2-Clause, vendored as
+    source in `third_party/minhook/` with its LICENSE; GPL-compatible);
+  - `HookSymbols`: not supported in this release - return false (the mod already logs and
+    carries on); `explorerFrameContainerHeight` is then ignored. Say so in the settings help.
+- WinUI 2 headers: `build.bat` generates them **at build time** into `build\winrt\` with the
+  SDK's `cppwinrt.exe` from `C:\Windows\SystemApps\Microsoft.UI.Xaml.CBS_8wekyb3d8bbwe\
+  Microsoft.UI.Xaml.winmd` plus the SDK's `UnionMetadata` (reference), skipped when already
+  generated. Never commit generated headers.
+- `build.bat` builds `ProWindows_explorer.dll` (x64, `/LD`, `/std:c++20` or what the source
+  needs, `/EHsc`, `/utf-8`) next to the exe. The exe still builds if the DLL step fails (a
+  warning), so the tiler is never blocked by it.
+- DLL lifecycle (in the DLL, beside the shim): `DllMain` does nothing heavy; an exported
+  `StylerStart` (run by the injecting thread) calls `Wh_ModInit` + `Wh_ModAfterInit`, then a
+  worker thread waits on two named events, `Local\ProWindows.Styler.Reload.<pid>` (→
+  `Wh_ModSettingsChanged`) and `Local\ProWindows.Styler.Stop.<pid>` (→ `Wh_ModUninit`,
+  `MH_Uninitialize`, `FreeLibraryAndExitThread`).
+
+### 8.C ProWindows side (`src/explorerstyler.cpp/.h`)
+- **Injection**: `CreateRemoteThread(LoadLibraryW)` then a remote call of `StylerStart`, into
+  every explorer.exe of this session (x64 only), on start, on `TaskbarCreated`, and when a
+  `CabinetWClass` window appears from an explorer.exe not yet styled (separate-process folder
+  windows) - hook into the existing WinEvent path, never poll. All of it on a worker thread
+  (the UI thread never waits; inv.). Skip elevated explorers we cannot open; log it.
+- **Off / theme change**: write the ini, then set the Reload event (or Stop for off) per pid.
+  Quitting ProWindows sets Stop, so Explorer goes back to normal and nothing of ours stays
+  loaded.
+- **Crash guard**: if explorer.exe restarts twice within 90 s of an injection, turn the styler
+  off (`explorer_styler = false`, saved), balloon "File Explorer styling was turned off because
+  Explorer kept restarting", and log it.
+
+### 8.D Settings (new category **Explorer**, after Clock in `kTabOrder`)
+Rows (each with right-column help, inv. 78 fields in `AWA_EDITED_FIELDS`, inv. 79):
+- **File Explorer styling** toggle (`explorer_styler`, default **true**).
+- **Theme** choice: every built-in theme of the mod by name, plus **ProWindows** (default) -
+  a new theme in the mod's own `Theme` format matching Requiem: black (`#000000`) background
+  for the window, navigation pane and command bar, `#1A1A1A`→`#3A3A3A` metal gradient on
+  selected/hovered items, white text, `#E0E0E0` borders hairline, no accent colour. Model its
+  targets on the existing Matter / TintedGlass / Minimal themes.
+- **Background effect** choice: Default, Blur, Acrylic, Mica, Mica Alt, None.
+- **Custom styles** Action "Edit..." → opens `explorer-styler.ini` in the default editor; help
+  explains the target/style format with a link-free example; **Reload** Action.
+- A preview is not needed; an Info row says which explorer processes are styled ("2 Explorer
+  processes styled" / the reason it is off).
+- Welcome page: one Start-here row and one Overlays-like line.
+
+### 8.E Licence and docs
+- `LICENSE` = GPL-3.0 full text (from gnu.org). README: licence section, credit m417z /
+  Windhawk / MinHook / TranslucentTB's ExplorerTAP (the mod credits it), and a "File Explorer
+  styling" section. MAP: an "Explorer styling" heading with invariants (runs in explorer, all
+  injection off the UI thread, Stop on quit, crash guard, no telemetry).
+
+### 8.F Tasks
+- [ ] **8.1 (S)** 8.B-8.E. A harness never touches the user's real Explorer:
+  `tests\styler_test` checks the shim in-process (settings round-trip, MinHook install and
+  remove on a dummy function, the theme table including ProWindows), and uishot shoots the
+  Explorer page. Green: build (exe + dll), run, uishot, timershot.
+- [ ] **8.2 (user OK needed)** Live check: inject into the real Explorer, look, stop, quit.
+- [ ] **8.3 (O)** Review: injection safety, threads, crash guard, Stop on quit, licence.
