@@ -874,7 +874,7 @@ v1.7, ~16k lines, includes `StartMenuExperienceHost.exe`, `SearchHost.exe`, `Sea
 - Footer keys only for keys that work (inv. 74). Inv. 79 for the row callbacks.
 
 ### 9.T Tasks
-- [ ] **9.T1 (S)** 9.A. Green: build (exe + dll), run, uishot, styler_test.
+- [x] **9.T1 (S)** 9.A. Green: build (exe + dll), run, uishot, styler_test.
 - [ ] **9.T2 (S)** 9.B. Green: build (exe + both dlls), run, uishot, styler_test (extend it for
   the shim's new APIs and the Start theme table). Never inject into the real Start menu.
 - [ ] **9.T3 (S)** 9.C. Green: build, run, uishot, timershot.

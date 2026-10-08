@@ -45,7 +45,16 @@ std::wstring ExplorerStylerIniPath();
 void ExplorerStylerEnsureIni();
 // Rewrites the part of the ini ProWindows owns and leaves the rest alone; true
 // when the file changed. The worker's own step, exposed for tests\styler_test.
-bool ExplorerStylerWriteIni(const std::wstring& theme, const std::wstring& effect, bool debug);
+// `look` carries the Look page and the two region / diagnostics choices (the
+// Config::explorer* fields of the same names).
+struct ExplorerLook {
+    COLORREF tint = RGB(0, 0, 0);
+    int tintOpacity = 60, highlight = 0, radius = 4, text = 0, region = 0, xaml = 1;
+};
+bool ExplorerStylerWriteIni(const std::wstring& theme, const std::wstring& effect, bool debug,
+                            const ExplorerLook& look = ExplorerLook());
+// True for the themes whose look the Look page drives (ProWindows, ProWindows Glass).
+bool ExplorerThemeIsProWindows(const std::wstring& id);
 
 // The choices the settings page offers. Index 0 of the themes is the default.
 int ExplorerThemeCount();

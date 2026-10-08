@@ -783,6 +783,13 @@ bool Config::LoadFromFile(const std::wstring& path) {
         else if (k == L"explorer_styler")  explorerStyler = ParseBool(v, explorerStyler);
         else if (k == L"explorer_theme")   explorerTheme = Trim(v);
         else if (k == L"explorer_effect")  explorerEffect = ToLower(Trim(v));
+        else if (k == L"explorer_tint")    ParseColor(v, &explorerTint);
+        else if (k == L"explorer_tint_opacity") explorerTintOpacity = std::clamp(_wtoi(v.c_str()), 0, 100);
+        else if (k == L"explorer_highlight") explorerHighlight = std::clamp(_wtoi(v.c_str()), 0, 2);
+        else if (k == L"explorer_radius")  explorerRadius = std::clamp(_wtoi(v.c_str()), 0, 12);
+        else if (k == L"explorer_text")    explorerText = std::clamp(_wtoi(v.c_str()), 0, 1);
+        else if (k == L"explorer_region")  explorerRegion = std::clamp(_wtoi(v.c_str()), 0, 1);
+        else if (k == L"explorer_xaml")    explorerXamlDiag = std::clamp(_wtoi(v.c_str()), 0, 2);
         else if (k == L"monitor_cpu")      monShowCpu = ParseBool(v, monShowCpu);
         else if (k == L"monitor_ram")      monShowRam = ParseBool(v, monShowRam);
         else if (k == L"monitor_gpu")      monShowGpu = ParseBool(v, monShowGpu);

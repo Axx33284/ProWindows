@@ -30,6 +30,7 @@ struct Choice { const wchar_t* id; const wchar_t* name; };
 // The ids are the theme names the mod's GetSelectedTheme compares against.
 const Choice kThemes[] = {
     { L"ProWindows",                         L"ProWindows" },
+    { L"ProWindows Glass",                   L"ProWindows Glass" },
     { L"",                                   L"None (my own styles only)" },
     { L"Translucent Explorer11",             L"Translucent Explorer11" },
     { L"MicaBar",                            L"MicaBar" },
@@ -70,6 +71,7 @@ struct Wanted {
     std::wstring theme;
     std::wstring effect;
     bool debug = false;
+    ExplorerLook look;
 };
 
 std::mutex g_mutex;            // guards everything below
@@ -132,7 +134,7 @@ const wchar_t kTemplate[] =
     L"; controlStyles[0].styles[0]=Background=#8B0000\r\n"
     L";\r\n"
     L"; Constants and resource variables work too:\r\n"
-    L"; styleConstants[0]=myColor=#202020\r\n"
+    L"; styleConstants[4]=myColor=#202020\r\n"
     L"; themeResourceVariables[0]=MyKey@Dark=#202020\r\n";
 
 std::wstring ReadFileUtf8(const std::wstring& path) {
@@ -179,6 +181,57 @@ const wchar_t* ModEffect(const std::wstring& id) {
     return L"";
 }
 
+// The system accent colour, as the shell stores it (ABGR); blue if unreadable.
+COLORREF AccentColour() {
+    DWORD v = 0, size = sizeof(v);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM", L"AccentColor",
+                     RRF_RT_REG_DWORD, nullptr, &v, &size) != ERROR_SUCCESS)
+        return RGB(0, 120, 215);
+    return RGB(v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF);
+}
+
+COLORREF Lighten(COLORREF c, int percent) {
+    auto f = [&](int x) { return x + (255 - x) * percent / 100; };
+    return RGB(f(GetRValue(c)), f(GetGValue(c)), f(GetBValue(c)));
+}
+
+std::wstring Hex6(COLORREF c) {
+    wchar_t b[16];
+    swprintf_s(b, L"#%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
+    return b;
+}
+
+std::wstring Gradient(COLORREF top, COLORREF bottom) {
+    return L"<LinearGradientBrush StartPoint=\"0,0\" EndPoint=\"0,1\"><GradientStop Color=\"" +
+           Hex6(top) + L"\" Offset=\"0\"/><GradientStop Color=\"" + Hex6(bottom) +
+           L"\" Offset=\"1\"/></LinearGradientBrush>";
+}
+
+// The constants the ProWindows themes read (see styler.cpp), as styleConstants[N]
+// lines, always the same four so the numbers a user continues from do not move.
+std::wstring LookConstants(const Wanted& w) {
+    const ExplorerLook& l = w.look;
+    std::wstring fill = Hex6(l.tint);
+    if (w.theme == L"ProWindows Glass") {
+        const int a = std::clamp(l.tintOpacity, 0, 100) * 255 / 100;
+        wchar_t b[16];
+        swprintf_s(b, L"#%02X", a);
+        fill = b + fill.substr(1);
+    }
+    std::wstring highlight;
+    if (l.highlight == 1)      highlight = L"<SolidColorBrush Color=\"" + Hex6(AccentColour()) + L"\"/>";
+    else if (l.highlight == 2) highlight = Gradient(Lighten(l.tint, 12), Lighten(l.tint, 28));
+    else                       highlight = Gradient(RGB(0x1A, 0x1A, 0x1A), RGB(0x3A, 0x3A, 0x3A));
+    const wchar_t* text = l.text == 1 ? L"#D0D0D0" : L"#FFFFFF";
+
+    std::wstring out;
+    out += L"\r\nstyleConstants[0]=pwFill=" + fill;
+    out += L"\r\nstyleConstants[1]=pwHighlight=" + highlight;
+    out += L"\r\nstyleConstants[2]=pwRadius=" + std::to_wstring(std::clamp(l.radius, 0, 12));
+    out += L"\r\nstyleConstants[3]=pwText=" + std::wstring(text);
+    return out;
+}
+
 // Rewrites the managed block. True when the file's content changed (so styled
 // Explorers need telling).
 bool WriteIni(const Wanted& w) {
@@ -188,9 +241,15 @@ bool WriteIni(const Wanted& w) {
     std::wstring block = kBlockBegin;
     block += L"\r\ntheme=" + w.theme;
     block += L"\r\nbackgroundTranslucentEffect=" + std::wstring(ModEffect(w.effect));
-    // Nothing else can hold the XAML diagnostics channel the styling needs, and
-    // a prompt inside Explorer is not something ProWindows can answer.
-    block += L"\r\nxamlDiagnosticsHandling=block";
+    block += w.look.region == 1 ? L"\r\nbackgroundTranslucentEffectRegion=explorerFrame"
+                                : L"\r\nbackgroundTranslucentEffectRegion=entireWindow";
+    // Other programs using the XAML diagnostics channel the styling needs: the
+    // default is to block them, as a prompt inside Explorer is not something
+    // ProWindows can answer.
+    block += w.look.xaml == 0 ? L"\r\nxamlDiagnosticsHandling=alert"
+           : w.look.xaml == 2 ? L"\r\nxamlDiagnosticsHandling=allow"
+                              : L"\r\nxamlDiagnosticsHandling=block";
+    block += LookConstants(w);
     block += w.debug ? L"\r\ndebug=1" : L"\r\ndebug=0";
     block += L"\r\n";
     block += kBlockEnd;
@@ -510,6 +569,13 @@ Wanted Snapshot(const Config& c) {
     w.theme   = c.explorerTheme;
     w.effect  = c.explorerEffect;
     w.debug   = c.debug;
+    w.look.tint        = c.explorerTint;
+    w.look.tintOpacity = c.explorerTintOpacity;
+    w.look.highlight   = c.explorerHighlight;
+    w.look.radius      = c.explorerRadius;
+    w.look.text        = c.explorerText;
+    w.look.region      = c.explorerRegion;
+    w.look.xaml        = c.explorerXamlDiag;
     return w;
 }
 
@@ -605,13 +671,19 @@ std::wstring ExplorerStylerIniPath() {
     return ConfigDir() + L"\\explorer-styler.ini";
 }
 
-bool ExplorerStylerWriteIni(const std::wstring& theme, const std::wstring& effect, bool debug) {
+bool ExplorerStylerWriteIni(const std::wstring& theme, const std::wstring& effect, bool debug,
+                            const ExplorerLook& look) {
     Wanted w;
     w.enabled = true;
     w.theme   = theme;
     w.effect  = effect;
     w.debug   = debug;
+    w.look    = look;
     return WriteIni(w);
+}
+
+bool ExplorerThemeIsProWindows(const std::wstring& id) {
+    return id == L"ProWindows" || id == L"ProWindows Glass";
 }
 
 void ExplorerStylerEnsureIni() {
